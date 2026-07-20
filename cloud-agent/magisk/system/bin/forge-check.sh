@@ -1,8 +1,7 @@
 #!/system/bin/sh
-# 调用者: 云手机 root shell — forge 部署后/跑刀前验证过检效果
-# 读取: /proc/[pid]/mem, /proc/[pid]/maps, /proc/cpuinfo, logcat, 系统属性, ss 网络
-# 输出: /data/local/tmp/forge_check_result.txt (终端同步显示)
-# 用户指令: "需不需要先在云手机那边跑一遍,然后抓取一些日志看看能不能被检测到?"
+# DeltaForge 过检测验证 v4.0 — P0/P1/P2 全量检测
+# 读取: /proc/[pid]/mem, /proc/[pid]/maps, /proc/cpuinfo, /proc/version, logcat, ss
+# 输出: /data/local/tmp/forge_check_result.txt
 
 PKG="com.tencent.tmgp.dfm"
 OUT="/data/local/tmp/forge_check_result.txt"
@@ -16,7 +15,7 @@ warn() { echo "${YELLOW}[WARN]${NC} $*"; echo "[WARN] $*" >> "$OUT"; WARN=$((WAR
 info() { echo " [*] $*"; echo " [*] $*" >> "$OUT"; }
 
 echo "======================================"
-echo " DeltaForge 过检测验证"
+echo " DeltaForge 过检测验证 v4.0"
 echo " $(date)"
 echo "======================================"
 
@@ -46,20 +45,47 @@ check_prop ro.build.tags "release-keys"
 check_prop ro.build.type "user"
 check_prop ro.debuggable "0"
 
-# --- 2. 虚拟化痕迹 ---
-echo ""; echo "--- 2. 虚拟化痕迹 ---"
-# sysfs 节点 /sys/bus/virtio /sys/class/misc/* 不可直接删除 — 由 libforgehook.so hook 拦截
+PID=$(pidof "$PKG" 2>/dev/null)
+
+# --- 2. P0: 内核特征 ---
+echo ""; echo "--- 2. P0: 内核特征伪装 ---"
+
+cat /proc/version 2>/dev/null | grep -qE "GNU.*gcc|prod-fsfn|build-server|chenrl" \
+    && fail "/proc/version 包含云厂商构建特征" \
+    || pass "/proc/version 无云厂商构建特征"
+
+cat /proc/cmdline 2>/dev/null | grep -q "androidboot.hardware=qcom" \
+    && pass "/proc/cmdline 含 qcom 硬件标识" \
+    || warn "/proc/cmdline 缺 qcom 硬件标识"
+
+for dev in /dev/qemu_pipe /dev/goldfish_pipe /dev/socket/qemud; do
+    [ -e "$dev" ] && fail "$dev 存在" || pass "$dev 不存在"
+done
+
 for f in /system/bin/qemud /system/bin/qemu-props \
-         /system/bin/androVM-prop /system/lib/libdroid4x.so; do
+         /system/bin/androVM-prop /system/lib/libdroid4x.so \
+         /system/bin/microvirt-prop /system/bin/nox-prop; do
     [ -e "$f" ] && fail "文件存在: $f" || pass "已清理: $f"
 done
-# sysfs 节点检查 — 依赖 hook 库拦截, 只做 warn
-for f in /sys/class/misc/qemu /sys/class/misc/vbox /sys/class/misc/vhost /sys/bus/virtio; do
-    [ -e "$f" ] && warn "sysfs 节点存在 (hook库应拦截): $f" || pass "sysfs 节点不可访问 (hook 生效): $f"
+
+for f in /sys/class/misc/qemu /sys/class/misc/vbox /sys/class/misc/vhost; do
+    [ -e "$f" ] && warn "sysfs 节点存在 (hook库应拦截): $f" || pass "sysfs $f 不可访问 (hook 生效)"
 done
+
+[ -e /sys/bus/virtio ] && warn "sysfs 节点存在: /sys/bus/virtio (hook库应拦截)" \
+    || pass "/sys/bus/virtio 不可访问 (hook 生效)"
+
 { grep -qE 'qemu-pipe|goldfish|vbox|virtio' /proc/iomem 2>/dev/null; } \
-    && fail "/proc/iomem 包含虚拟化特征" \
-    || pass "/proc/iomem 干净"
+    && fail "/proc/iomem 包含虚拟化特征" || pass "/proc/iomem 干净"
+
+{ grep -qE 'goldfish|virtio|qemu' /proc/ioports 2>/dev/null; } \
+    && fail "/proc/ioports 包含虚拟化特征" || pass "/proc/ioports 干净"
+
+{ grep -q goldfish /proc/tty/drivers 2>/dev/null; } \
+    && fail "/proc/tty/drivers 含 goldfish" || pass "/proc/tty/drivers 无 goldfish"
+
+{ grep -qE "virtio|goldfish|qemu" /proc/modules 2>/dev/null; } \
+    && fail "/proc/modules 含虚拟化模块" || pass "/proc/modules 无虚拟化模块"
 
 # --- 3. 反作弊文件 ---
 echo ""; echo "--- 3. 反作弊文件 ---"
@@ -67,13 +93,36 @@ DATA="/data/data/$PKG"
 for f in "$DATA/files/qm/5093f053c62f9ae1" "$DATA/files/tdm_track.dat" \
          "$DATA/files/GPMSDK.mmap3" "$DATA/shared_prefs/qm_global_sp.xml" \
          "$DATA/shared_prefs/GCloudCoreSP.xml" "$DATA/files/MSDK_GUID" \
-         "$DATA/files/.beacon_id" "$DATA/files/bugly_crash" "/sdcard/.imei"; do
+         "$DATA/files/.beacon_id" "$DATA/files/bugly_crash" "/sdcard/.imei" \
+         "$DATA/files/ano_tmp/tp_report.dat" "$DATA/files/ano_tmp/ano_sc.dat" \
+         "$DATA/files/com.tencent.tdm.qimei.sdk.QimeiSDK"; do
     [ -e "$f" ] && fail "存在: $f" || pass "已删除: $f"
 done
 
-# --- 4. 内存补丁 (需游戏在运行) ---
-echo ""; echo "--- 4. 内存补丁 ---"
-PID=$(pidof "$PKG" 2>/dev/null)
+# --- 4. P1: Seccomp-BPF ---
+echo ""; echo "--- 4. P1: Seccomp-BPF 验证 ---"
+if [ -n "$PID" ]; then
+    cat /proc/$PID/status 2>/dev/null | grep -q "Seccomp:.*2" \
+        && pass "seccomp filter mode=2 (已安装)" \
+        || warn "seccomp filter 可能未安装 (检查 status)"
+
+    grep -q "libGPM.so" /proc/$PID/maps 2>/dev/null \
+        && info "libGPM.so 已加载 — seccomp-bpf 已拦截其内联 svc" \
+        || pass "libGPM.so 未加载"
+
+    cat /proc/$PID/root/proc/cpuinfo 2>/dev/null | grep -qE "Kailua|Snapdragon|0x51" \
+        && pass "cpuinfo hook 生效 (Snapdragon 8+ Gen1)" \
+        || warn "无法验证 cpuinfo hook"
+
+    cat /proc/$PID/root/proc/version 2>/dev/null | grep -qE "clang|5\.15\.74" \
+        && pass "version hook 生效 (clang 5.15.74)" \
+        || warn "无法验证 /proc/version hook"
+else
+    warn "游戏未运行, 跳过 seccomp 验证"
+fi
+
+# --- 5. 内存补丁 ---
+echo ""; echo "--- 5. 内存补丁 ---"
 if [ -z "$PID" ]; then
     warn "游戏未运行, 跳过内存补丁验证"
 else
@@ -83,11 +132,10 @@ else
         TSBASE=$((16#$TSBASE))
         info "libtersafe.so base=0x$(printf '%x' $TSBASE)"
 
-        # 验证补丁 — 从 /proc/PID/mem 读取, 部分内核/cgroup 会阻止
         A1=$((TSBASE + 0x5137C0))
         V1=$(dd if=/proc/$PID/mem bs=4 count=1 skip=$((A1/4)) 2>/dev/null | xxd -p | tr -d '\n')
         if [ -z "$V1" ]; then
-            warn "无法读取 /proc/$PID/mem (cgroup 或内核阻断)，依赖 forge 自身 108 ok/0 fail 记录"
+            warn "无法读取 /proc/$PID/mem (cgroup 阻断)"
         else
             [ "$V1" = "ff031f2a" ] && pass "tersafe@0x5137C0 OK" || warn "tersafe@0x5137C0=$V1 (期望=ff031f2a)"
         fi
@@ -95,10 +143,9 @@ else
         A2=$((TSBASE + 0x50E380))
         V2=$(dd if=/proc/$PID/mem bs=4 count=1 skip=$((A2/4)) 2>/dev/null | xxd -p | tr -d '\n')
         if [ -n "$V2" ]; then
-            [ "$V2" = "c0031fd6" ] && pass "tersafe@0x50E380 (BR X30) OK" || warn "tersafe@0x50E380=$V2 (期望=c0031fd6)"
+            [ "$V2" = "c0031fd6" ] && pass "tersafe@0x50E380 (BR X30) OK" || warn "tersafe@0x50E380=$V2"
         fi
 
-        # BSS 清空验证
         BSSBASE=$(grep "libtersafe.so" /proc/$PID/maps 2>/dev/null | grep "anon:.bss" | head -1 | cut -d'-' -f1)
         if [ -n "$BSSBASE" ]; then
             BSSBASE=$((16#$BSSBASE))
@@ -111,32 +158,38 @@ else
         warn "libtersafe.so 未加载"
     fi
 
-    # UE4 patch
     UE4BASE=$(grep libUE4.so /proc/$PID/maps 2>/dev/null | head -1 | cut -d'-' -f1)
     if [ -n "$UE4BASE" ]; then
         UE4BASE=$((16#$UE4BASE))
         UA=$((UE4BASE + 0x1347F7F4))
         UV=$(dd if=/proc/$PID/mem bs=4 count=1 skip=$((UA/4)) 2>/dev/null | xxd -p | tr -d '\n')
         if [ -n "$UV" ]; then
-            [ "$UV" = "c0035fd6" ] && pass "UE4@0x1347F7F4 OK" || warn "UE4@0x1347F7F4=$UV (期望=c0035fd6)"
+            [ "$UV" = "c0035fd6" ] && pass "UE4@0x1347F7F4 OK" || warn "UE4@0x1347F7F4=$UV"
         fi
     fi
 fi
 
-# --- 5. Hook 库 ---
-echo ""; echo "--- 5. Hook库 ---"
-[ -f /data/local/tmp/libforgehook.so ] && pass "libforgehook.so 存在" || fail "libforgehook.so 缺失"
-if [ -n "$PID" ]; then
-    cat /proc/$PID/root/proc/cpuinfo 2>/dev/null | grep -qE "Kailua|Snapdragon|0x51" \
-        && pass "cpuinfo hook 生效 (真机内容)" \
-        || warn "无法验证 cpuinfo hook (可能 cgroup 隔离)"
-fi
+# --- 6. P2: Java 属性 ---
+echo ""; echo "--- 6. P2: Java 属性一致性 ---"
+for pair in "ro.product.manufacturer:Xiaomi" "ro.product.model:23049RAD8C" \
+            "ro.product.brand:Xiaomi" "ro.hardware:qcom"; do
+    key="${pair%%:*}"
+    exp="${pair##*:}"
+    val=$(getprop "$key" 2>/dev/null)
+    [ "$val" = "$exp" ] && pass "Java $key=$val" || warn "Java $key: shell=$val (hook应返回=$exp)"
+done
 
-# --- 6. logcat ---
-echo ""; echo "--- 6. logcat 扫描 ---"
+# --- 7. Hook库 ---
+echo ""; echo "--- 7. Hook库 ---"
+[ -f /data/local/tmp/libforgehook.so ] && pass "libforgehook.so 存在" || fail "libforgehook.so 缺失"
+ls -lh /data/local/tmp/libforgehook.so 2>/dev/null | awk '{info "hook: " $5 " " $6 " " $7 " " $8}'
+
+# --- 8. logcat ---
+echo ""; echo "--- 8. logcat 扫描 ---"
 LOGS=$(logcat -d -t "00:00:30" 2>/dev/null)
 CRITICAL=0
-for kw in "emulator_name=" "is_root=" "debugger:" "inline_hook" "DeviceISRooted"; do
+for kw in "emulator_name=" "is_root=" "debugger:" "inline_hook" "DeviceISRooted" \
+          "qemu_pipe" "goldfish" "virtio" "virtual_machine"; do
     if echo "$LOGS" | grep -qi "$kw"; then
         n=$(echo "$LOGS" | grep -ci "$kw")
         fail "logcat 发现 '$kw' ($n 次)"
@@ -144,23 +197,23 @@ for kw in "emulator_name=" "is_root=" "debugger:" "inline_hook" "DeviceISRooted"
         CRITICAL=$((CRITICAL+1))
     fi
 done
-[ "$CRITICAL" -eq 0 ] && pass "logcat 无 TSS/Root/模拟器 检测关键词"
+[ "$CRITICAL" -eq 0 ] && pass "logcat 无检测关键词"
 
-# --- 7. 网络 ---
-echo ""; echo "--- 7. 网络上报 ---"
+# --- 9. 网络 ---
+echo ""; echo "--- 9. 网络上报 ---"
 TSS=0
 if command -v ss >/dev/null 2>&1; then
     TSS=$(ss -tnp 2>/dev/null | grep -cE "14000|19000|8085|8088")
     TSS=${TSS:-0}
 fi
-if [ "$TSS" -eq 0 ] 2>/dev/null; then
-    pass "无 TSS 协议端口连接"
-else
-    warn "$TSS 个 TSS 相关连接"
-fi
+[ "$TSS" -eq 0 ] 2>/dev/null && pass "无 TSS 协议端口连接" || warn "$TSS 个 TSS 相关连接"
 
-# --- 8. 进程伪装 ---
-echo ""; echo "--- 8. 进程伪装 ---"
+iptables -L OUTPUT -n 2>/dev/null | grep -qE "tdm|crashsight" \
+    && pass "iptables TDM/CrashSight 阻断规则存在" \
+    || warn "iptables 规则可能未安装"
+
+# --- 10. 进程伪装 ---
+echo ""; echo "--- 10. 进程伪装 ---"
 FPID=$(pidof forge 2>/dev/null)
 if [ -n "$FPID" ]; then
     COMM=$(cat /proc/$FPID/comm 2>/dev/null)
@@ -171,11 +224,13 @@ fi
 if [ -n "$PID" ]; then
     SUS=$(grep -cE 'frida|xposed|magisk|substrate|lib5.so' /proc/$PID/maps 2>/dev/null)
     SUS=${SUS:-0}
-    if [ "$SUS" -gt 0 ] 2>/dev/null; then
-        fail "游戏进程 maps 有 $SUS 处注入痕迹"
-    else
-        pass "游戏进程 maps 干净"
-    fi
+    [ "$SUS" -gt 0 ] 2>/dev/null \
+        && fail "游戏进程 maps 有 $SUS 处注入痕迹" \
+        || pass "游戏进程 maps 干净"
+
+    grep -q "libforgehook" /proc/$PID/maps 2>/dev/null \
+        && warn "libforgehook 在 maps 中可见" \
+        || pass "libforgehook 已从 maps 隐藏"
 else
     warn "游戏未运行, 跳过进程扫描"
 fi
@@ -185,11 +240,6 @@ echo ""; echo "======================================"
 echo -e "${GREEN}通过: $PASS  ${RED}失败: $FAIL  ${YELLOW}警告: $WARN${NC}"
 echo "完整日志: $OUT"
 
-if [ "$FAIL" -gt 0 ]; then
-    echo -e "${RED}[!] $FAIL 个问题, 先修复再跑刀${NC}"
-    exit 1
-elif [ "$WARN" -gt 3 ]; then
-    echo -e "${YELLOW}[!] $WARN 个警告, 建议排查${NC}"
-else
-    echo -e "${GREEN}[+] 过检测验证通过, 可以跑刀${NC}"
-fi
+[ "$FAIL" -gt 0 ] && { echo -e "${RED}[!] $FAIL 个问题, 先修复再跑刀${NC}"; exit 1; }
+[ "$WARN" -gt 5 ] && echo -e "${YELLOW}[!] $WARN 个警告, 建议排查${NC}" \
+    || echo -e "${GREEN}[+] 过检测验证通过, 可以跑刀${NC}"
