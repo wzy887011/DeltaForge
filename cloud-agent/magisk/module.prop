@@ -1,0 +1,6 @@
+id=deltaforge
+name=DeltaForge Anti-Detection
+version=v1.0.0
+versionCode=1
+author=DeltaForge
+description=三角洲行动云手机过检测 Magisk 模块 - 属性伪装 + 启动脚本 + native agent 部署
