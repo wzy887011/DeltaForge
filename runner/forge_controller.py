@@ -20,11 +20,11 @@ ADB_SERIAL = os.environ.get("ADB_SERIAL", "")
 
 
 def adb(args: str) -> str:
+    cmd = ["adb"]
     if ADB_SERIAL:
-        cmd = f"adb -s {ADB_SERIAL} {args}"
-    else:
-        cmd = f"adb {args}"
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        cmd.extend(["-s", ADB_SERIAL])
+    cmd.extend(args.split())
+    r = subprocess.run(cmd, capture_output=True, text=True)
     return r.stdout.strip()
 
 

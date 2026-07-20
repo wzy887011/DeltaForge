@@ -36,5 +36,5 @@ fi
 
 nohup "$FORGE" -d > /data/local/tmp/forge.log 2>&1 &
 sleep 2
-echo "[+] forge daemon PID=$(pidof forge)"
+echo "[+] forge daemon PID=$(pidof forge 2>/dev/null || echo 'unknown')"
 echo "[+] done"

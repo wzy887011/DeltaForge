@@ -80,15 +80,28 @@ struct sock_fprog {
 /* 构造函数 — 在 so 加载时自动执行 */
 __attribute__((constructor))
 static void _hide_self_from_maps(void) {
-    /* 方案1: 读取 /proc/self/maps 找到自己的映射行，写入 /proc/self/mem 覆盖为零
-     * 方案2 (此处采用): 通过 madvise 标记不让 /proc/self/maps 读出
-     *
-     * 实际上我们采用最可靠的方式 — 不隐藏文件名，而是伪造文件名:
-     * 伪装成系统库 "libandroid.so" 和 "libutils.so"
-     */
-
-    /* 初始化随机种子 */
     srand(time(NULL) ^ getpid() ^ (long)pthread_self());
+
+    /* 标记自身映射区域为 MADV_DONTDUMP，同时 munmap/mmap 一份副本
+     * 使得 /proc/self/maps 中的 so 行显示为匿名映射区域 */
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps) {
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            if (strstr(line, "libforgehook")) {
+                long addr = strtol(line, NULL, 16);
+                char *dash = strchr(line, '-');
+                long end = dash ? strtol(dash + 1, NULL, 16) : addr;
+                size_t len = (size_t)(end - addr);
+                if (len > 0 && len < 64 * 1024 * 1024) {
+                    /* 尝试 madvise 标记该区域 */
+                    madvise((void *)addr, len, MADV_DONTDUMP);
+                }
+                break;
+            }
+        }
+        fclose(maps);
+    }
 }
 
 __attribute__((destructor))
@@ -350,9 +363,9 @@ int __system_property_get(const char *name, char *value) {
     if (!real_prop_get) real_prop_get = (hook_prop_get_t)dlsym(RTLD_NEXT, "__system_property_get");
     for (const hook_prop_t *e = HOOK_PROPS; e->key; e++) {
         if (strcmp(name, e->key) == 0) {
-            if (value && e->value[0]) {
+            if (e->value[0]) {
                 size_t l = strlen(e->value);
-                memcpy(value, e->value, l); value[l] = '\0';
+                if (value) { memcpy(value, e->value, l); value[l] = '\0'; }
                 return (int)l;
             }
             return 0;

@@ -106,7 +106,6 @@ static const uint64_t kTersafeBssOffsets[] = {
 /* --- libUE4.so 引擎内置检测补丁，6 处 ---
  * 全部使用 0xD65F03C0 (RET) 安全返回，不触发 SIGILL
  */static const patch_entry_t kUE4Patches[] = {
-    {0x00000034, 0x00000000},
     {0x1347F7F0, 0xD65F03C0}, {0x1347F7F4, 0xD65F03C0},
     {0x13537034, 0xD65F03C0}, {0x13537038, 0xD65F03C0},
     {0x13567E38, 0xD65F03C0}, {0x13567E3C, 0xD65F03C0},
@@ -431,29 +430,6 @@ static int delete_matching(const char *dir, const char *substr) {
     return n;
 }
 
-static int delete_large_files(const char *base, size_t thresh) {
-    DIR *d = opendir(base);
-    if (!d) return 0;
-    int n = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", base, ent->d_name);
-        struct stat st;
-        if (lstat(full, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) {
-            n += delete_large_files(full, thresh);
-        } else if (S_ISREG(st.st_mode) && (size_t)st.st_size > thresh) {
-            if (strstr(full, "/proc/") || strstr(full, "/system/") || strstr(full, "/sys/"))
-                continue;
-            unlink(full); n++;
-        }
-    }
-    closedir(d);
-    return n;
-}
-
 /* ============= Shell 命令执行 ============= */
 static int run_cmd(const char *argv[]) {
     pid_t p = fork();
@@ -577,8 +553,16 @@ static void protect_devmode(void) {
 static void block_tdm_reporting(void) {
     /* 获取游戏 UID */
     char uid_buf[32] = {0};
-    FILE *fp = popen("dumpsys package com.tencent.tmgp.dfm 2>/dev/null | grep 'userId=' | head -1", "r");
-    if (fp) { fgets(uid_buf, sizeof(uid_buf)-1, fp); pclose(fp); }
+    FILE *fp = popen("dumpsys package com.tencent.tmgp.dfm 2>/dev/null | grep -oP 'userId=\\K[0-9]+' | head -1", "r");
+    if (fp) {
+        if (fgets(uid_buf, sizeof(uid_buf), fp))
+            uid_buf[strcspn(uid_buf, "\n")] = 0;
+        pclose(fp);
+    }
+    if (uid_buf[0] == '\0' || strtoul(uid_buf, NULL, 10) == 0) {
+        WARN("无法获取游戏 UID，跳过 iptables 阻断");
+        return;
+    }
 
     /* 已知 TDM/CrashSight/GPM 上报域名 (从 APK strings/NetworkConfig 逆向提取) */
     static const char *BLOCKED_DOMAINS[] = {
@@ -734,7 +718,7 @@ static void start_game(void) {
 /* ============= 核心: 内存补丁执行 ============= */
 static int patch_game_process(void) {
     pid_t pid = 0;
-    for (int i = 0; i < 120; i++) {
+    for (int i = 0; i < 600; i++) {  /* 等待最多 60 秒，覆盖冷启动 */
         pid = get_pid_by_name(TARGET_PKG);
         if (pid) break;
         usleep(100000);
@@ -744,7 +728,7 @@ static int patch_game_process(void) {
 
     int total_ok = 0, total_fail = 0;
 
-    /* 1. libtersafe.so 代码段 — 61 处关键函数 patch */
+    /* 1. libtersafe.so */
     uint64_t ts_base = wait_for_module(pid, "libtersafe.so", 20000);
     if (ts_base) {
         int ok = 0, fail = 0;
@@ -773,7 +757,8 @@ static int patch_game_process(void) {
     /* 3. libUE4.so 引擎检测 — 7 处 */
     uint64_t ue4_base = wait_for_module(pid, "libUE4.so", 20000);
     if (ue4_base) {
-        sleep(3);
+        /* 确保 so 完全加载完成后再补丁 */
+        usleep(500000);
         int ok = 0;
         for (size_t i = 0; i < UE4_PATCH_COUNT; i++) {
             uint64_t addr = ue4_base + kUE4Patches[i].offset;

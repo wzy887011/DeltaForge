@@ -35,12 +35,10 @@ static int uinit(void) {
     ioctl(ufd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
     ioctl(ufd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
 
-    struct uinput_abs_setup ax = {{0, sw-1, 0, 0, 11}};
-    ioctl(ufd, UI_ABS_SETUP, ABS_MT_POSITION_X);
+    struct uinput_abs_setup ax = {.code = ABS_MT_POSITION_X, .absinfo = {0, sw-1, 0, 0, 11}};
     ioctl(ufd, UI_ABS_SETUP, &ax);
 
-    struct uinput_abs_setup ay = {{0, sh-1, 0, 0, 11}};
-    ioctl(ufd, UI_ABS_SETUP, ABS_MT_POSITION_Y);
+    struct uinput_abs_setup ay = {.code = ABS_MT_POSITION_Y, .absinfo = {0, sh-1, 0, 0, 11}};
     ioctl(ufd, UI_ABS_SETUP, &ay);
 
     struct uinput_setup us;

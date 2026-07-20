@@ -118,7 +118,7 @@ else
         UA=$((UE4BASE + 0x1347F7F4))
         UV=$(dd if=/proc/$PID/mem bs=4 count=1 skip=$((UA/4)) 2>/dev/null | xxd -p | tr -d '\n')
         if [ -n "$UV" ]; then
-            [ "$UV" = "c0031fd6" ] && pass "UE4@0x1347F7F4 OK" || warn "UE4@0x1347F7F4=$UV (期望=c0031fd6)"
+            [ "$UV" = "c0035fd6" ] && pass "UE4@0x1347F7F4 OK" || warn "UE4@0x1347F7F4=$UV (期望=c0035fd6)"
         fi
     fi
 fi
