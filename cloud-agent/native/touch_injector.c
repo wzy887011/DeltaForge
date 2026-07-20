@@ -14,6 +14,8 @@
 #include <linux/input.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <math.h>
+#include <time.h>
 
 static int ufd = -1;
 static int sw = 1080, sh = 2400;
