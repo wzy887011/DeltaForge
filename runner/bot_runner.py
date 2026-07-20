@@ -118,8 +118,11 @@ class BotRunner:
         if out:
             return True
         self._adb(
-            f"LD_PRELOAD=/data/local/tmp/libforgehook.so "
-            f"am start -n {self.cfg['game_package']}/{self.cfg['game_package']}.PermissionActivity"
+            f"setprop wrap.{self.cfg['game_package']} "
+            f"'LD_PRELOAD=/data/local/tmp/libforgehook.so'"
+        )
+        self._adb(
+            f"am start -n {self.cfg['game_package']}/com.epicgames.ue4.SplashActivity"
         )
         for _ in range(40):
             time.sleep(2)

