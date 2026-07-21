@@ -23,14 +23,6 @@
 #include <stdint.h>
 #include <signal.h>
 
-/* ARM64 user_pt_regs */
-struct user_pt_regs {
-    uint64_t regs[31];
-    uint64_t sp;
-    uint64_t pc;
-    uint64_t pstate;
-};
-
 /* 在目标进程中读写内存 */
 static ssize_t pv_readv(pid_t pid, uint64_t addr, void *buf, size_t len) {
     struct iovec local  = {buf, len};
