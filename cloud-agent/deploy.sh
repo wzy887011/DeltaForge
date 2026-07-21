@@ -29,6 +29,8 @@ case "$CMD" in
         ok "forge: $(ls -lh forge | awk '{print $5}')"
         clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v warning || true
         ok "touch_injector: $(ls -lh touch_injector | awk '{print $5}')"
+        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v warning || true
+        ok "injector: $(ls -lh injector | awk '{print $5}')"
         ok "编译完成"
         ;;
     status)
@@ -49,15 +51,17 @@ case "$CMD" in
         clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v warning || true
         clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge -lpthread 2>&1 | grep -v warning || true
         clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v warning || true
+        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v warning || true
         ok "编译完成"
 
         ok "Step 3/5: 部署二进制..."
         su -c "killall forge 2>/dev/null; sleep 1" || true
-        su -c "rm -f $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector"
+        su -c "rm -f $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector $TARGET_DIR/injector"
         su -c "cp $NATIVE_DIR/forge $TARGET_DIR/forge"
         su -c "cp $NATIVE_DIR/libforgehook.so $TARGET_DIR/libforgehook.so"
         su -c "cp $NATIVE_DIR/touch_injector $TARGET_DIR/touch_injector"
-        su -c "chmod 755 $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector"
+        su -c "cp $NATIVE_DIR/injector $TARGET_DIR/injector"
+        su -c "chmod 755 $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector $TARGET_DIR/injector"
         ok "部署完成"
 
         ok "Step 4/5: 验证..."
