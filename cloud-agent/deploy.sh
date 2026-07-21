@@ -51,10 +51,17 @@ case "$CMD" in
 
         ok "Step 2/5: 编译..."
         cd "$NATIVE_DIR"
-        clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v warning || true
-        clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge -lpthread 2>&1 | grep -v warning || true
-        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v warning || true
-        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v warning || true
+        clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v "^.*warning:" || true
+        ok "libforgehook.so: $(ls -lh libforgehook.so 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+        clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge 2>&1 | grep -v "^.*warning:" || true
+        ok "forge: $(ls -lh forge 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v "^.*warning:" || true
+        ok "touch_injector: $(ls -lh touch_injector 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v "^.*warning:" || true
+        ok "injector: $(ls -lh injector 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+        for BIN in forge libforgehook.so injector; do
+            [ -f "$NATIVE_DIR/$BIN" ] || { err "编译失败: $BIN 不存在，终止部署"; exit 1; }
+        done
         ok "编译完成"
 
         ok "Step 3/5: 部署二进制..."
