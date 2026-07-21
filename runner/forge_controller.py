@@ -65,27 +65,43 @@ def wait_for_device(timeout=60):
 
 def push_and_start_forge():
     base = os.path.dirname(os.path.abspath(__file__))
-    forge_path = os.path.join(base, "..", "cloud-agent", "native", "forge")
-    if not os.path.exists(forge_path):
-        forge_path = os.path.join(base, "forge")
-    if not os.path.exists(forge_path):
-        print(f"[-] forge binary not found: {forge_path}")
+    native_dir = os.path.join(base, "..", "cloud-agent", "native")
+
+    def _find(name):
+        p = os.path.join(native_dir, name)
+        if os.path.exists(p):
+            return p
+        p2 = os.path.join(base, name)
+        return p2 if os.path.exists(p2) else None
+
+    forge_path = _find("forge")
+    if not forge_path:
+        print("[-] forge binary not found — compile first: clang -static -Os forge.c -o forge")
         return False
+
     adb(f"push {forge_path} /data/local/tmp/forge")
     adb("shell chmod 755 /data/local/tmp/forge")
-    # 同时推送 hook 库
-    hook_path = os.path.join(os.path.dirname(forge_path), "libforgehook.so")
-    if not os.path.exists(hook_path):
-        hook_path = os.path.join(base, "libforgehook.so")
-    if os.path.exists(hook_path):
+    print("[+] forge pushed")
+
+    hook_path = _find("libforgehook.so")
+    if hook_path:
         adb(f"push {hook_path} /data/local/tmp/libforgehook.so")
         adb("shell chmod 644 /data/local/tmp/libforgehook.so")
         print("[+] libforgehook.so pushed")
     else:
-        print("[!] libforgehook.so not found — /proc/cpuinfo hook unavailable")
-    adb("shell pkill forge 2>/dev/null")
+        print("[!] libforgehook.so not found — proc/sysfs hook unavailable")
+
+    injector_path = _find("injector")
+    if injector_path:
+        adb(f"push {injector_path} /data/local/tmp/injector")
+        adb("shell chmod 755 /data/local/tmp/injector")
+        print("[+] injector pushed")
+    else:
+        print("[!] injector not found — ptrace injection unavailable, game hook will NOT work")
+
+    adb("shell su -c 'pkill forge 2>/dev/null; true'")
     time.sleep(1)
-    adb("shell '/data/local/tmp/forge -d &'")
+    adb("shell su -c '/data/local/tmp/forge -d > /data/local/tmp/forge.log 2>&1 &'")
     time.sleep(2)
     print("[+] forge daemon started")
     return True

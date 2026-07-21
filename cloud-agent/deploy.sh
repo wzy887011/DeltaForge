@@ -17,7 +17,8 @@ CMD="${1:-full}"
 case "$CMD" in
     clean)
         ok "清理编译产物..."
-        rm -f "$NATIVE_DIR/forge" "$NATIVE_DIR/libforgehook.so" "$NATIVE_DIR/touch_injector"
+        rm -f "$NATIVE_DIR/forge" "$NATIVE_DIR/libforgehook.so" \
+              "$NATIVE_DIR/touch_injector" "$NATIVE_DIR/injector"
         ok "done"
         ;;
     build)
@@ -35,7 +36,9 @@ case "$CMD" in
         ;;
     status)
         echo "=== DeltaForge 状态 ==="
-        ls -lh "$TARGET_DIR/forge" "$TARGET_DIR/libforgehook.so" "$TARGET_DIR/touch_injector" 2>/dev/null || warn "二进制未部署"
+        ls -lh "$TARGET_DIR/forge" "$TARGET_DIR/libforgehook.so" \
+               "$TARGET_DIR/touch_injector" "$TARGET_DIR/injector" 2>/dev/null \
+            || warn "二进制未部署"
         su -c "ss -tlnp | grep 9510" 2>/dev/null && ok "daemon TCP 9510 运行中" || warn "daemon 未运行"
         su -c "pidof com.tencent.tmgp.dfm" 2>/dev/null && ok "游戏运行中" || warn "游戏未运行"
         ;;
@@ -57,12 +60,26 @@ case "$CMD" in
         ok "Step 3/5: 部署二进制..."
         su -c "killall forge 2>/dev/null; sleep 1" || true
         su -c "rm -f $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector $TARGET_DIR/injector"
-        su -c "cp $NATIVE_DIR/forge $TARGET_DIR/forge"
+        su -c "cp $NATIVE_DIR/forge          $TARGET_DIR/forge"
         su -c "cp $NATIVE_DIR/libforgehook.so $TARGET_DIR/libforgehook.so"
         su -c "cp $NATIVE_DIR/touch_injector $TARGET_DIR/touch_injector"
-        su -c "cp $NATIVE_DIR/injector $TARGET_DIR/injector"
+        su -c "cp $NATIVE_DIR/injector       $TARGET_DIR/injector"
         su -c "chmod 755 $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector $TARGET_DIR/injector"
         ok "部署完成"
+
+        ok "Step 3.5/5: MD5 交叉验证..."
+        VERIFY_FAIL=0
+        for BIN in forge libforgehook.so touch_injector injector; do
+            SRC_MD5=$(md5sum "$NATIVE_DIR/$BIN" 2>/dev/null | awk '{print $1}')
+            DST_MD5=$(su -c "md5sum $TARGET_DIR/$BIN 2>/dev/null | awk '{print \$1}'" 2>/dev/null)
+            if [ -n "$SRC_MD5" ] && [ "$SRC_MD5" = "$DST_MD5" ]; then
+                ok "  $BIN OK ($DST_MD5)"
+            else
+                err "  $BIN MD5 不匹配! src=$SRC_MD5 dst=$DST_MD5"
+                VERIFY_FAIL=$((VERIFY_FAIL+1))
+            fi
+        done
+        [ "$VERIFY_FAIL" -gt 0 ] && { err "部署验证失败 $VERIFY_FAIL 个文件"; exit 1; }
 
         ok "Step 4/5: 验证..."
         su -c "sh $NATIVE_DIR/../magisk/system/bin/forge-check.sh" 2>&1 || true

@@ -1,0 +1,15 @@
+# 强制 shell/Python/C 源码使用 LF — 解决 Windows checkout 后 CRLF 导致手机上 Permission denied
+*.sh       text eol=lf
+*.py       text eol=lf
+*.c        text eol=lf
+*.h        text eol=lf
+*.json     text eol=lf
+*.md       text eol=lf
+Makefile   text eol=lf
+
+# 编译产物按二进制处理，不做行尾转换
+*.so       binary
+*.o        binary
+forge      binary
+injector   binary
+touch_injector binary

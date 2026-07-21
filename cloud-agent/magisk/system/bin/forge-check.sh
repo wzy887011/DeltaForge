@@ -179,10 +179,46 @@ for pair in "ro.product.manufacturer:Xiaomi" "ro.product.model:23049RAD8C" \
     [ "$val" = "$exp" ] && pass "Java $key=$val" || warn "Java $key: shell=$val (hook应返回=$exp)"
 done
 
-# --- 7. Hook库 ---
-echo ""; echo "--- 7. Hook库 ---"
+# --- 7. Hook库 & 注入器 ---
+echo ""; echo "--- 7. Hook库 & 注入器 ---"
 [ -f /data/local/tmp/libforgehook.so ] && pass "libforgehook.so 存在" || fail "libforgehook.so 缺失"
-ls -lh /data/local/tmp/libforgehook.so 2>/dev/null | awk '{info "hook: " $5 " " $6 " " $7 " " $8}'
+ls -lh /data/local/tmp/libforgehook.so 2>/dev/null | awk '{print " [*] hook: " $5 " " $6 " " $7 " " $8}' >> "$OUT"
+[ -f /data/local/tmp/injector ] && pass "injector 存在" || fail "injector 缺失 — ptrace 注入不可用"
+[ -f /data/local/tmp/forge ]    && pass "forge 存在"    || fail "forge 缺失"
+
+# --- 7.5 注入结果验证 ---
+echo ""; echo "--- 7.5 注入结果验证 ---"
+if [ -n "$PID" ]; then
+    # 检查 forge.log 中是否有注入成功记录
+    INJECT_LOG=$(grep -iE "inject|dlopen|libforgehook" /data/local/tmp/forge.log 2>/dev/null | tail -3)
+    if [ -n "$INJECT_LOG" ]; then
+        pass "forge.log 有注入记录"
+        echo " [*] $(echo "$INJECT_LOG" | head -1)" >> "$OUT"
+    else
+        warn "forge.log 无注入记录 — 尚未执行 forge -l 或注入失败"
+    fi
+
+    # 以游戏进程视角访问 /sys/class/misc/qemu — hook 生效应返回 ENOENT
+    QEMU_CHK=$(su -c "ls /proc/$PID/root/sys/class/misc/qemu 2>&1" 2>/dev/null)
+    if echo "$QEMU_CHK" | grep -qiE "no such|not found|cannot access|enoent"; then
+        pass "sysfs /sys/class/misc/qemu → ENOENT (hook 拦截生效)"
+    elif [ -z "$QEMU_CHK" ]; then
+        warn "无法通过 /proc/$PID/root 访问 sysfs (可能权限受限，不影响结论)"
+    else
+        fail "/sys/class/misc/qemu 对游戏可见 — hook 未生效，请确认 injector 已执行"
+        info "  返回: $QEMU_CHK"
+    fi
+
+    # smaps 中匿名可执行段数量 — 注入后通常 >2
+    ANON_RWX=$(grep -cE "^[0-9a-f].*rwxp[[:space:]]+0 00:00 0" /proc/$PID/smaps 2>/dev/null || echo 0)
+    if [ "$ANON_RWX" -gt 2 ] 2>/dev/null; then
+        pass "smaps 匿名可执行段: $ANON_RWX (正常注入特征)"
+    else
+        warn "smaps 匿名可执行段: $ANON_RWX (偏少，注入可能未完成)"
+    fi
+else
+    warn "游戏未运行，跳过注入验证 — 请先运行: su -c '/data/local/tmp/forge -l'"
+fi
 
 # --- 8. logcat ---
 echo ""; echo "--- 8. logcat 扫描 ---"
