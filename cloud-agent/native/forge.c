@@ -445,22 +445,56 @@ static int run_cmd(const char *argv[]) {
 }
 
 /* ============= 系统属性伪装 ============= */
-static void spoof_properties(void) {
-    for (const prop_spoof_t *s = kSpoofProps; s->key; s++) {
-        char cmd[512];
-        if (s->value) {
-            snprintf(cmd, sizeof(cmd),
-                "resetprop '%s' '%s' 2>/dev/null; setprop '%s' '%s' 2>/dev/null",
-                s->key, s->value, s->key, s->value);
-        } else {
-            snprintf(cmd, sizeof(cmd),
-                "resetprop --delete '%s' 2>/dev/null; setprop '%s' '' 2>/dev/null",
-                s->key, s->key);
+
+/* 查找 resetprop 二进制 (Magisk 路径不在默认 PATH 里) */
+static const char *find_resetprop(void) {
+    static char rp[128] = {0};
+    if (rp[0]) return rp;
+    static const char *cands[] = {
+        "/data/adb/magisk/resetprop",
+        "/data/adb/magisk32/resetprop",
+        "/sbin/.magisk/mirror/system/bin/resetprop",
+        "/sbin/resetprop",
+        NULL
+    };
+    struct stat st;
+    for (int i = 0; cands[i]; i++) {
+        if (stat(cands[i], &st) == 0 && S_ISREG(st.st_mode)) {
+            snprintf(rp, sizeof(rp), "%s", cands[i]);
+            return rp;
         }
-        system(cmd);
     }
-    OK("系统属性伪装完成 (%zu 项)",
-        (sizeof(kSpoofProps)/sizeof(kSpoofProps[0]) - 1));
+    return NULL;  /* resetprop 不可用 */
+}
+
+static void spoof_properties(void) {
+    const char *rp = find_resetprop();
+    if (!rp) WARN("未找到 resetprop — ro.* 只读属性无法修改，libforgehook hook 兜底");
+
+    int ok = 0, fail = 0;
+    for (const prop_spoof_t *s = kSpoofProps; s->key; s++) {
+        char cmd[640];
+        if (s->value) {
+            if (rp)
+                snprintf(cmd, sizeof(cmd),
+                    "%s '%s' '%s' 2>/dev/null || setprop '%s' '%s' 2>/dev/null",
+                    rp, s->key, s->value, s->key, s->value);
+            else
+                snprintf(cmd, sizeof(cmd),
+                    "setprop '%s' '%s' 2>/dev/null", s->key, s->value);
+        } else {
+            if (rp)
+                snprintf(cmd, sizeof(cmd),
+                    "%s --delete '%s' 2>/dev/null || setprop '%s' '' 2>/dev/null",
+                    rp, s->key, s->key);
+            else
+                snprintf(cmd, sizeof(cmd),
+                    "setprop '%s' '' 2>/dev/null", s->key);
+        }
+        if (system(cmd) == 0) ok++; else fail++;
+    }
+    OK("属性伪装完成 — resetprop=%s ok=%d fail=%d",
+       rp ? rp : "N/A", ok, fail);
 }
 
 /* ============= 云手机虚拟化痕迹文件清理 ============= */
@@ -553,7 +587,7 @@ static void protect_devmode(void) {
 static void block_tdm_reporting(void) {
     /* 获取游戏 UID */
     char uid_buf[32] = {0};
-    FILE *fp = popen("dumpsys package com.tencent.tmgp.dfm 2>/dev/null | grep -oP 'userId=\\K[0-9]+' | head -1", "r");
+    FILE *fp = popen("dumpsys package com.tencent.tmgp.dfm 2>/dev/null | grep -o 'userId=[0-9]*' | head -1 | sed 's/userId=//'", "r");
     if (fp) {
         if (fgets(uid_buf, sizeof(uid_buf), fp))
             uid_buf[strcspn(uid_buf, "\n")] = 0;
