@@ -24,12 +24,6 @@
 #include <signal.h>
 
 /* 在目标进程中读写内存 */
-static ssize_t pv_readv(pid_t pid, uint64_t addr, void *buf, size_t len) {
-    struct iovec local  = {buf, len};
-    struct iovec remote = {(void *)(uintptr_t)addr, len};
-    return syscall(270, pid, &local, 1, &remote, 1, 0);
-}
-
 static ssize_t pv_writev(pid_t pid, uint64_t addr, const void *buf, size_t len) {
     struct iovec local  = {(void *)buf, len};
     struct iovec remote = {(void *)(uintptr_t)addr, len};
