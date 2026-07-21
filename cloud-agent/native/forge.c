@@ -705,17 +705,21 @@ static void stop_game(void) {
 }
 
 static void start_game(void) {
+    /* 云手机 wrap 属性不生效，改用 ptrace 注入器。先裸启游戏，再 by PID 注入 libforgehook.so */
     char buf[1024];
-    /* 通过 setprop wrap 让 Zygote 在 fork 游戏进程时自动 LD_PRELOAD */
-    snprintf(buf, sizeof(buf),
-        "setprop wrap." TARGET_PKG " 'LD_PRELOAD=/data/local/tmp/libforgehook.so' 2>/dev/null");
-    system(buf);
-    /* 使用 SplashActivity 作为入口 (UE4 默认启动 Activity) */
     snprintf(buf, sizeof(buf),
         "am start -n %s/com.epicgames.ue4.SplashActivity 2>/dev/null",
         TARGET_PKG);
     system(buf);
-    OK("游戏已启动 (wrap LD_PRELOAD hook)");
+    OK("游戏已启动，等待进程出现后注入...");
+}
+
+static int inject_hook(pid_t pid) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "/data/local/tmp/injector %d /data/local/tmp/libforgehook.so 2>/dev/null", pid);
+    int rc = system(cmd);
+    return (rc == 0) ? 0 : -1;
 }
 
 /* ============= 核心: 内存补丁执行 ============= */
@@ -793,10 +797,21 @@ static int do_prepare(void) {
 static int do_launch(void) {
     do_prepare();
     start_game();
+    /* ptrace 注入 libforgehook.so — 替代不生效的 LD_PRELOAD wrap */
+    pid_t pid = 0;
+    for (int i = 0; i < 300; i++) {
+        pid = get_pid_by_name(TARGET_PKG);
+        if (pid) break;
+        usleep(100000);
+    }
+    if (pid) {
+        usleep(500000); /* 等 ART 初始化完成后再注入 */
+        inject_hook(pid);
+    }
     int rc = patch_game_process();
     /* 补丁成功后隐藏 maps 注入痕迹 */
     if (rc == 0) {
-        pid_t pid = get_pid_by_name(TARGET_PKG);
+        pid = get_pid_by_name(TARGET_PKG);
         if (pid) hide_injection_from_maps(pid);
     }
     return rc;
