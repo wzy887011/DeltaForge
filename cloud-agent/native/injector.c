@@ -104,11 +104,11 @@ static size_t build_shellcode(uint32_t *code, size_t max,
     *(uint64_t *)&code[idx] = fn_addr;
     idx += 2;
 
-    /* 回填 LDR X16, .+X — 从 ldr_slot 后一个字面到 fn_addr 的距离 */
-    int offset_bytes = (idx - (ldr_slot + 1)) * 4; /* bytes from after ldr to fn_addr */
-    offset_bytes -= 8; /* LDR literal 是 PC-relative，从当前指令算 */
-    /* LDR X16, #imm — offset 必须是 4 字节倍数 */
-    code[ldr_slot] = 0x58000010 | (((offset_bytes >> 2) & 0x7FFFF) << 5);
+    /* 回填 LDR X16, .+X — imm19 = (target_addr - pc) / 4
+     * target = fn_addr 所在位置 (idx-2), pc = ldr 指令本身 (ldr_slot)
+     * offset_bytes = (idx - 2 - ldr_slot) * 4, imm19 = offset_bytes / 4 */
+    int imm19 = idx - 2 - ldr_slot;
+    code[ldr_slot] = 0x58000010 | (((imm19 & 0x7FFFF) << 5));
 
     return idx * 4;
 }
