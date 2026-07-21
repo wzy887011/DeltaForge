@@ -65,9 +65,8 @@ static uint64_t get_local_lib(const char *module) {
     return base;
 }
 
-/* 构建 shellcode: 设置 x0-x5, 调用目标函数, trap
- * 布局: LDR X16, .+shell_body_size → movz/movk x0-x5 → BLR X16 → BRK #0 → fn_addr
- * 共 12 条 mov 指令 (x0-x5 × 2 avg) + load + blr + brk + padding + fn_addr */
+/* 构建 shellcode: 用 movz/movk 设置 x0-x5 + x16(函数地址), 然后 BLR X16, BRK #0
+ * 不再用 LDR PC-relative — ARM64 不同微架构上 PC 语义不一致 */
 static size_t build_shellcode(uint32_t *code, size_t max,
                                uint64_t x0_v, uint64_t x1_v, uint64_t x2_v,
                                uint64_t x3_v, uint64_t x4_v, uint64_t x5_v,
@@ -75,16 +74,20 @@ static size_t build_shellcode(uint32_t *code, size_t max,
     int idx = 0;
     (void)max;
 
-    /* slot 0: LDR X16, .+N — N 会在代码生成完后回填 */
-    int ldr_slot = idx;
-    code[idx++] = 0; /* placeholder */
+    /* 构造 x16 = fn_addr */
+    code[idx++] = 0xD2800010 | ((fn_addr & 0xFFFF) << 5);          /* movz x16, #lo */
+    if (((fn_addr >> 16) & 0xFFFF))
+        code[idx++] = 0xF2A00010 | (((fn_addr >> 16) & 0xFFFF) << 5);
+    if (((fn_addr >> 32) & 0xFFFF))
+        code[idx++] = 0xF2C00010 | (((fn_addr >> 32) & 0xFFFF) << 5);
+    if (((fn_addr >> 48) & 0xFFFF))
+        code[idx++] = 0xF2E00010 | (((fn_addr >> 48) & 0xFFFF) << 5);
 
     /* 每个参数: movz + upto 3 movk */
     uint64_t args[6] = {x0_v, x1_v, x2_v, x3_v, x4_v, x5_v};
     for (int r = 0; r < 6; r++) {
         uint64_t v = args[r];
-        uint32_t movz = 0xD2800000 | (r << 0); /* movz Xr, #imm16 */
-        code[idx++] = movz | ((v & 0xFFFF) << 5);
+        code[idx++] = 0xD2800000 | (r << 0) | ((v & 0xFFFF) << 5);
         if ((v >> 16) & 0xFFFF)
             code[idx++] = 0xF2A00000 | (r << 0) | (((v >> 16) & 0xFFFF) << 5);
         if ((v >> 32) & 0xFFFF)
@@ -97,18 +100,6 @@ static size_t build_shellcode(uint32_t *code, size_t max,
     code[idx++] = 0xD63F0200;
     /* BRK #0 */
     code[idx++] = 0xD4200000;
-
-    /* 对齐到 8 字节 */
-    if (idx % 2) idx++;
-    /* fn_addr */
-    *(uint64_t *)&code[idx] = fn_addr;
-    idx += 2;
-
-    /* 回填 LDR X16, .+X — imm19 = (target_addr - pc) / 4
-     * target = fn_addr 所在位置 (idx-2), pc = ldr 指令本身 (ldr_slot)
-     * offset_bytes = (idx - 2 - ldr_slot) * 4, imm19 = offset_bytes / 4 */
-    int imm19 = idx - 2 - ldr_slot;
-    code[ldr_slot] = 0x58000010 | (((imm19 & 0x7FFFF) << 5));
 
     return idx * 4;
 }
