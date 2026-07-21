@@ -71,43 +71,66 @@ static uint64_t get_local_lib(const char *module) {
     return base;
 }
 
-/* 构建 shellcode: 设置 x0-x2, 调用目标函数, trap */
+/* 构建 shellcode: 设置 x0-x5, 调用目标函数, trap
+ * 布局: LDR X16, .+shell_body_size → movz/movk x0-x5 → BLR X16 → BRK #0 → fn_addr
+ * 共 12 条 mov 指令 (x0-x5 × 2 avg) + load + blr + brk + padding + fn_addr */
 static size_t build_shellcode(uint32_t *code, size_t max,
-                               uint64_t x0, uint64_t x1, uint64_t x2,
+                               uint64_t x0_v, uint64_t x1_v, uint64_t x2_v,
+                               uint64_t x3_v, uint64_t x4_v, uint64_t x5_v,
                                uint64_t fn_addr) {
     int idx = 0;
-    uint64_t args[3] = {x0, x1, x2};
-    /* x0-x2: movz + 3*movk per register */
-    for (int r = 0; r < 3; r++) {
+    (void)max;
+
+    /* slot 0: LDR X16, .+N — N 会在代码生成完后回填 */
+    int ldr_slot = idx;
+    code[idx++] = 0; /* placeholder */
+
+    /* 每个参数: movz + upto 3 movk */
+    uint64_t args[6] = {x0_v, x1_v, x2_v, x3_v, x4_v, x5_v};
+    for (int r = 0; r < 6; r++) {
         uint64_t v = args[r];
-        uint32_t base = 0xD2800000 | (r << 0);  /* movz Xr, #imm16 */
-        code[idx++] = base | ((v & 0xFFFF) << 5);
-        if ((v >> 16) & 0xFFFF) code[idx++] = 0xF2A00000 | (r << 0) | (((v >> 16) & 0xFFFF) << 5);
-        if ((v >> 32) & 0xFFFF) code[idx++] = 0xF2C00000 | (r << 0) | (((v >> 32) & 0xFFFF) << 5);
-        if ((v >> 48) & 0xFFFF) code[idx++] = 0xF2E00000 | (r << 0) | (((v >> 48) & 0xFFFF) << 5);
+        uint32_t movz = 0xD2800000 | (r << 0); /* movz Xr, #imm16 */
+        code[idx++] = movz | ((v & 0xFFFF) << 5);
+        if ((v >> 16) & 0xFFFF)
+            code[idx++] = 0xF2A00000 | (r << 0) | (((v >> 16) & 0xFFFF) << 5);
+        if ((v >> 32) & 0xFFFF)
+            code[idx++] = 0xF2C00000 | (r << 0) | (((v >> 32) & 0xFFFF) << 5);
+        if ((v >> 48) & 0xFFFF)
+            code[idx++] = 0xF2E00000 | (r << 0) | (((v >> 48) & 0xFFFF) << 5);
     }
-    /* ldr x16, #16; blr x16; brk #0 */
-    code[idx++] = 0x580000B0;  /* ldr x16, #16 (PC+0x58) */
-    code[idx++] = 0xD63F0200;  /* blr x16 */
-    code[idx++] = 0xD4200000;  /* brk #0 */
-    code[idx++] = 0xD503201F;  /* nop (padding) */
-    /* fn_addr (8 bytes) */
+
+    /* BLR X16 */
+    code[idx++] = 0xD63F0200;
+    /* BRK #0 */
+    code[idx++] = 0xD4200000;
+
+    /* 对齐到 8 字节 */
     if (idx % 2) idx++;
+    /* fn_addr */
     *(uint64_t *)&code[idx] = fn_addr;
     idx += 2;
+
+    /* 回填 LDR X16, .+X — 从 ldr_slot 后一个字面到 fn_addr 的距离 */
+    int offset_bytes = (idx - (ldr_slot + 1)) * 4; /* bytes from after ldr to fn_addr */
+    offset_bytes -= 8; /* LDR literal 是 PC-relative，从当前指令算 */
+    /* LDR X16, #imm — offset 必须是 4 字节倍数 */
+    code[ldr_slot] = 0x58000010 | (((offset_bytes >> 2) & 0x7FFFF) << 5);
+
     return idx * 4;
 }
 
 static int remote_call(pid_t pid, uint64_t fn_addr,
-                       uint64_t x0, uint64_t x1, uint64_t x2,
+                       uint64_t x0_v, uint64_t x1_v, uint64_t x2_v,
+                       uint64_t x3_v, uint64_t x4_v, uint64_t x5_v,
                        uint64_t *result) {
     struct user_pt_regs saved, regs;
     if (ptrace_getregs(pid, &saved) != 0) return -1;
     memcpy(&regs, &saved, sizeof(regs));
 
     uint64_t sc_addr = (regs.sp - 0x200) & ~0xFULL;
-    uint32_t code[32];
-    size_t clen = build_shellcode(code, sizeof(code), x0, x1, x2, fn_addr);
+    uint32_t code[64]; /* 足够大 */
+    size_t clen = build_shellcode(code, sizeof(code),
+                                   x0_v, x1_v, x2_v, x3_v, x4_v, x5_v, fn_addr);
 
     if (pv_writev(pid, sc_addr, code, clen) != (ssize_t)clen) return -1;
 
@@ -170,10 +193,10 @@ int main(int argc, char **argv) {
     printf("[*] dlopen=0x%llx mmap=0x%llx\n",
            (unsigned long long)fn_dlopen, (unsigned long long)fn_mmap);
 
-    /* mmap(0, slen, RW, PRIVATE|ANON, -1, 0) */
+    /* mmap(0, slen, RW, PRIVATE|ANON, -1, 0) — 6 args */
     uint64_t str_addr = 0;
-    if (remote_call(pid, fn_mmap, 0, slen, 3, &str_addr) != 0 || !str_addr) {
-        fprintf(stderr, "[-] mmap 失败\n");
+    if (remote_call(pid, fn_mmap, 0, slen, 3, 0x22, 0xFFFFFFFFFFFFFFFFULL, 0, &str_addr) != 0 || !str_addr || str_addr < 0x1000) {
+        fprintf(stderr, "[-] mmap 失败, returned 0x%llx\n", (unsigned long long)str_addr);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return 1;
     }
@@ -189,7 +212,7 @@ int main(int argc, char **argv) {
 
     /* dlopen(so, RTLD_NOW=2) */
     uint64_t handle = 0;
-    if (remote_call(pid, fn_dlopen, str_addr, 2, 0, &handle) != 0 || !handle) {
+    if (remote_call(pid, fn_dlopen, str_addr, 2, 0, 0, 0, 0, &handle) != 0 || !handle) {
         fprintf(stderr, "[-] dlopen 失败\n");
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return 1;
