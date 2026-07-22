@@ -41,18 +41,27 @@
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
 #define FORGE_VERSION       "1.0.0"
+#define FORGE_LOG           "/data/local/tmp/forge.log"
 
 static int do_prepare(void);
 static int do_launch(void);
 
 /* ============= 日志宏 ============= */
 static int g_verbose = 0;
-#define LOG(fmt, ...) do { \
-    if (g_verbose) fprintf(stderr, "[forge] " fmt "\n", ##__VA_ARGS__); \
+static FILE *g_logfile = NULL;
+
+#define OK(fmt, ...)  do { \
+    if (g_logfile) { fprintf(g_logfile, "[+] " fmt "\n", ##__VA_ARGS__); fflush(g_logfile); } \
+    fprintf(stderr, "\033[32m[+] " fmt "\033[0m\n", ##__VA_ARGS__); \
 } while(0)
-#define OK(fmt, ...)  fprintf(stderr, "\033[32m[+] " fmt "\033[0m\n", ##__VA_ARGS__)
-#define WARN(fmt, ...) fprintf(stderr, "\033[33m[!] " fmt "\033[0m\n", ##__VA_ARGS__)
-#define ERR(fmt, ...) fprintf(stderr, "\033[31m[-] " fmt "\033[0m\n", ##__VA_ARGS__)
+#define WARN(fmt, ...) do { \
+    if (g_logfile) { fprintf(g_logfile, "[!] " fmt "\n", ##__VA_ARGS__); fflush(g_logfile); } \
+    fprintf(stderr, "\033[33m[!] " fmt "\033[0m\n", ##__VA_ARGS__); \
+} while(0)
+#define ERR(fmt, ...) do { \
+    if (g_logfile) { fprintf(g_logfile, "[-] " fmt "\n", ##__VA_ARGS__); fflush(g_logfile); } \
+    fprintf(stderr, "\033[31m[-] " fmt "\033[0m\n", ##__VA_ARGS__); \
+} while(0)
 
 /* ============= 内存补丁条目 ============= */
 typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
@@ -848,6 +857,14 @@ static int do_launch(void) {
         pid = get_pid_by_name(TARGET_PKG);
         if (pid) hide_injection_from_maps(pid);
     }
+    /* 二次清理: 游戏运行后 TSS/GCloud 会重新创建检测文件 */
+    if (pid) {
+        unlink(APP_DATA "/files/GPMSDK.mmap3");
+        unlink(APP_DATA "/shared_prefs/GCloudCoreSP.xml");
+        unlink(APP_DATA "/files/tdm_track.dat");
+        unlink(APP_DATA "/shared_prefs/qm_global_sp.xml");
+        OK("二次文件清理完成");
+    }
     return rc;
 }
 
@@ -985,11 +1002,14 @@ int main(int argc, char **argv) {
 
     if (daemon_mode) {
         if (getuid() != 0) { ERR("daemon 模式需要 root 权限"); return 1; }
+        g_logfile = fopen(FORGE_LOG, "a");
         OK("DeltaForge daemon v" FORGE_VERSION " 启动");
         return run_tcp_server();
     }
 
     if (getuid() != 0) { ERR("需要 root 权限"); return 1; }
+
+    g_logfile = fopen(FORGE_LOG, "a");
 
     if (flag_launch) { return do_launch(); }
     if (flag_prep)   { do_prepare(); return 0; }
