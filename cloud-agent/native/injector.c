@@ -22,9 +22,11 @@
 #include <signal.h>
 
 /* ── ARM64 pt_regs ──
-   Termux clang 自带 <asm/ptrace.h> 已经定义了 user_pt_regs,
-   用 ifndef 守卫避免重定义 ── */
-#ifndef __ASM_PTRACE_H
+   Termux NDK 的 <asm/ptrace.h> 已定义 user_pt_regs,
+   用 __has_include 检测后优先使用系统定义 ── */
+#if __has_include(<asm/ptrace.h>)
+#include <asm/ptrace.h>
+#else
 struct user_pt_regs {
     uint64_t regs[31];
     uint64_t sp;
