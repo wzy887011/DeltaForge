@@ -21,7 +21,7 @@ REAL_SO="libtdmqimei_real.so"
 CMD="${1:-install}"
 
 find_game_lib() {
-    GAME_LIB=$(su -c "find /data/app -type f -name '${TARGET_SO}' 2>/dev/null | head -1" 2>/dev/null)
+    GAME_LIB=$(find /data/app -type f -name "${TARGET_SO}" 2>/dev/null | head -1)
     if [ -n "$GAME_LIB" ]; then
         GAME_LIB=$(dirname "$GAME_LIB")
         return 0
@@ -57,7 +57,9 @@ case "$CMD" in
         cp "$HOOK_PATH" "${GAME_LIB}/${TARGET_SO}"
         chmod 644 "${GAME_LIB}/${TARGET_SO}"
 
-        su -c "killall forge 2>/dev/null; am force-stop ${PKG} 2>/dev/null; sleep 2" || true
+        killall forge 2>/dev/null
+        am force-stop ${PKG} 2>/dev/null
+        sleep 2
 
         HOOK_SIZE=$(ls -l "${GAME_LIB}/${TARGET_SO}" | awk '{print $5}')
         REAL_SIZE=$(ls -l "${GAME_LIB}/${REAL_SO}" | awk '{print $5}')
