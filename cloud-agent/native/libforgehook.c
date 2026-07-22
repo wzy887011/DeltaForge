@@ -84,28 +84,24 @@ static void _hide_self_from_maps(void) {
     fclose(maps);
 }
 
-/* ---- chainload real Qimei (B1: opendir/readdir, no fork) ---- */
+/* ---- chainload real Qimei (B1: read /data/local/tmp/chainload_path.txt) ---- */
 __attribute__((constructor(50)))
 static void _chainload_real_qimei(void) {
-    DIR *d=opendir("/data/app");
-    if(!d)return;
-    struct dirent *ent;
-    char lib_path[512]={0};
-    while((ent=readdir(d))!=NULL){
-        if(ent->d_type!=DT_DIR&&ent->d_type!=DT_UNKNOWN)continue;
-        if(!strstr(ent->d_name,"com.tencent.tmgp.dfm"))continue;
-        snprintf(lib_path,sizeof(lib_path),
-            "/data/app/%s/lib/arm64/libtdmqimei_real.so",ent->d_name);
-        if(access(lib_path,R_OK)==0){dlopen(lib_path,RTLD_NOW|RTLD_GLOBAL);break;}
-        snprintf(lib_path,sizeof(lib_path),
-            "/data/app/%s/lib/arm64-v8a/libtdmqimei_real.so",ent->d_name);
-        if(access(lib_path,R_OK)==0){dlopen(lib_path,RTLD_NOW|RTLD_GLOBAL);break;}
+    FILE *fp=fopen("/data/local/tmp/chainload_path.txt","r");
+    if(!fp){
+        FILE *log=fopen("/data/local/tmp/forge.log","a");
+        if(log){fprintf(log,"[!] chainload: chainload_path.txt not found\n");fflush(log);fclose(log);}
+        return;
     }
-    closedir(d);
+    char lib_path[512]={0};
+    fgets(lib_path,sizeof(lib_path),fp);
+    fclose(fp);
+    lib_path[strcspn(lib_path,"\r\n")]=0;
+    void *h=dlopen(lib_path,RTLD_NOW|RTLD_GLOBAL);
     FILE *log=fopen("/data/local/tmp/forge.log","a");
     if(log){
-        if(lib_path[0])fprintf(log,"[+] chainload: %s\n",lib_path);
-        else fprintf(log,"[!] chainload: real qimei NOT FOUND\n");
+        if(h)fprintf(log,"[+] chainload: %s (handle=%p)\n",lib_path,h);
+        else fprintf(log,"[!] chainload: FAILED %s (%s)\n",lib_path,dlerror());
         fflush(log);fclose(log);
     }
 }
