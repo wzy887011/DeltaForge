@@ -217,6 +217,27 @@ static const prop_spoof_t kSpoofProps[] = {
     {"ro.kernel.android.qemud", NULL},
     {"qemu.hw.mainkeys", NULL},
     {"qemu.sf.lcd_density", NULL},
+    /* --- 云手机平台特征: 删除 --- */
+    {"ro.hardware.gralloc", NULL},
+    {"ro.hardware.egl", NULL},
+    {"ro.product.base_version", NULL},
+    {"ro.product.odm.brand", NULL},
+    {"ro.product.odm.device", NULL},
+    {"ro.product.odm.manufacturer", NULL},
+    {"ro.product.odm.model", NULL},
+    {"ro.product.odm.name", NULL},
+    {"ro.product.odm_dlkm.brand", NULL},
+    {"ro.product.odm_dlkm.device", NULL},
+    {"ro.product.odm_dlkm.manufacturer", NULL},
+    {"ro.product.odm_dlkm.model", NULL},
+    {"ro.product.odm_dlkm.name", NULL},
+    {"ro.product.product.brand", NULL},
+    {"ro.product.product.device", NULL},
+    {"ro.product.product.manufacturer", NULL},
+    {"ro.product.product.model", NULL},
+    {"ro.product.product.name", NULL},
+    {"ro.product.ota.host", NULL},
+    {"ro.build.characteristics", NULL},
     /* --- 伪装为 Xiaomi Redmi K60 (marble) --- */
     {"ro.product.manufacturer", "Xiaomi"},
     {"ro.product.model", "23049RAD8C"},
@@ -748,8 +769,17 @@ static void stop_game(void) {
 }
 
 static void start_game(void) {
-    /* 云手机 wrap 属性不生效，改用 ptrace 注入器。先裸启游戏，再 by PID 注入 libforgehook.so */
     char buf[1024];
+
+    /* Step 0: 尝试 wrap 属性 — 让系统在进程启动时 LD_PRELOAD hook 库
+     * 云手机上 wrap 不一定生效（依赖 ro.debuggable 或 ROM 支持），
+     * 但不生效也不影响后续 ptrace 注入。 */
+    snprintf(buf, sizeof(buf),
+        "setprop wrap.%s 'LD_PRELOAD=/data/local/tmp/libforgehook.so' 2>/dev/null",
+        TARGET_PKG);
+    OK("尝试 wrap LD_PRELOAD: %s", TARGET_PKG);
+
+    /* Step 1: 裸启游戏 */
     snprintf(buf, sizeof(buf),
         "am start -n %s/com.epicgames.ue4.SplashActivity 2>/dev/null",
         TARGET_PKG);
