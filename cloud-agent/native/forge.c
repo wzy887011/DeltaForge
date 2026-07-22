@@ -52,7 +52,11 @@ static void start_logcat(void) {
            "anti.cheat|forbid|ban|frozen|kicked|emulator|"
            "fingerprint|hardware|manufacturer|device_id' "
            "> " DETECT_LOG " 2>&1 &");
-    OK("封号诊断日志: " DETECT_LOG);
+    fprintf(stderr, "[+] 封号诊断日志: %s\n", DETECT_LOG);
+    if (g_logfile) {
+        fprintf(g_logfile, "[+] 封号诊断日志: %s\n", DETECT_LOG);
+        fflush(g_logfile);
+    }
 }
 
 static int do_prepare(void);
