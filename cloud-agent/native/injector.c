@@ -21,13 +21,17 @@
 #include <stdint.h>
 #include <signal.h>
 
-/* ── ARM64 pt_regs ── */
+/* ── ARM64 pt_regs ──
+   Termux clang 自带 <asm/ptrace.h> 已经定义了 user_pt_regs,
+   用 ifndef 守卫避免重定义 ── */
+#ifndef __ASM_PTRACE_H
 struct user_pt_regs {
     uint64_t regs[31];
     uint64_t sp;
     uint64_t pc;
     uint64_t pstate;
 };
+#endif
 
 static ssize_t pv_writev(pid_t pid, uint64_t addr, const void *buf, size_t len) {
     struct iovec local  = {(void *)buf, len};
