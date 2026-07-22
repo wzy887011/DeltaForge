@@ -21,7 +21,7 @@ REAL_SO="libtdmqimei_real.so"
 CMD="${1:-install}"
 
 find_game_lib() {
-    for path in /data/app/*/com.tencent.tmgp.dfm*/lib/arm64 /data/app/*/com.tencent.tmgp.dfm*/lib/arm64-v8a; do
+    for path in /data/app/*/com.tencent.tmgp.dfm*/lib/arm64 /data/app/*/com.tencent.tmgp.dfm*/lib/arm64-v8a /data/app/~~*/*com.tencent.tmgp.dfm*/lib/arm64 /data/app/~~*/*com.tencent.tmgp.dfm*/lib/arm64-v8a; do
         if [ -d "$path" ]; then
             GAME_LIB="$path"
             return 0
