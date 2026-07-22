@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-# DeltaForge deploy.sh — 云手机端一键编译+部署+启动
+# DeltaForge deploy.sh — 云手机端一键编译+部署+启动 v4.2
 # 用法: cd ~/DeltaForge && sh cloud-agent/deploy.sh
 # ============================================================
 
@@ -22,16 +22,42 @@ case "$CMD" in
         ok "done"
         ;;
     build)
-        ok "=== 编译 DeltaForge v4.1 ==="
+        ok "=== 编译 DeltaForge v4.2 ==="
         cd "$NATIVE_DIR"
-        clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v warning || true
-        ok "libforgehook.so: $(ls -lh libforgehook.so | awk '{print $5}')"
-        clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge -lpthread 2>&1 | grep -v warning || true
-        ok "forge: $(ls -lh forge | awk '{print $5}')"
-        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v warning || true
-        ok "touch_injector: $(ls -lh touch_injector | awk '{print $5}')"
-        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v warning || true
-        ok "injector: $(ls -lh injector | awk '{print $5}')"
+
+        # 1. libforgehook.so (共享库, 必须)
+        clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v "^.*warning:" || true
+        if [ -f libforgehook.so ]; then
+            ok "libforgehook.so: $(ls -lh libforgehook.so | awk '{print $5}')"
+        else
+            err "libforgehook.so 编译失败"; exit 1
+        fi
+
+        # 2. forge (主程序, 必须)
+        # 注: forge.c 不使用 pthread, 无需 -lpthread
+        clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge 2>&1 | grep -v "^.*warning:" || true
+        if [ -f forge ]; then
+            ok "forge: $(ls -lh forge | awk '{print $5}')"
+        else
+            err "forge 编译失败"; exit 1
+        fi
+
+        # 3. injector (ptrace 注入器, 必须)
+        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v "^.*warning:" || true
+        if [ -f injector ]; then
+            ok "injector: $(ls -lh injector | awk '{print $5}')"
+        else
+            err "injector 编译失败"; exit 1
+        fi
+
+        # 4. touch_injector (触摸注入, 可选 — bot_runner.py 有 input 回退)
+        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v "^.*warning:" || true
+        if [ -f touch_injector ]; then
+            ok "touch_injector: $(ls -lh touch_injector | awk '{print $5}')"
+        else
+            warn "touch_injector 编译失败 (可选, bot_runner 会回退到 input 命令)"
+        fi
+
         ok "编译完成"
         ;;
     status)
@@ -43,24 +69,34 @@ case "$CMD" in
         su -c "pidof com.tencent.tmgp.dfm" 2>/dev/null && ok "游戏运行中" || warn "游戏未运行"
         ;;
     full)
-        ok "=== DeltaForge 一键部署 v4.1 ==="
+        ok "=== DeltaForge 一键部署 v4.2 ==="
 
         ok "Step 1/5: 拉取仓库..."
         cd ~/DeltaForge
-        git pull origin master 2>&1 | tail -1
+        git pull origin master 2>&1 | tail -3 || warn "git pull 失败, 使用本地代码继续"
 
         ok "Step 2/5: 编译..."
         cd "$NATIVE_DIR"
+
+        # 1. libforgehook.so
         clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v "^.*warning:" || true
         ok "libforgehook.so: $(ls -lh libforgehook.so 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+
+        # 2. forge (不使用 pthread, 无需 -lpthread)
         clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge 2>&1 | grep -v "^.*warning:" || true
         ok "forge: $(ls -lh forge 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
-        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v "^.*warning:" || true
-        ok "touch_injector: $(ls -lh touch_injector 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+
+        # 3. injector
         clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v "^.*warning:" || true
         ok "injector: $(ls -lh injector 2>/dev/null | awk '{print $5}' || echo 'FAIL')"
+
+        # 4. touch_injector (可选)
+        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v "^.*warning:" || true
+        ok "touch_injector: $(ls -lh touch_injector 2>/dev/null | awk '{print $5}' || echo 'FAIL (可选)')"
+
+        # 必须文件检查 (不含 touch_injector)
         for BIN in forge libforgehook.so injector; do
-            [ -f "$NATIVE_DIR/$BIN" ] || { err "编译失败: $BIN 不存在，终止部署"; exit 1; }
+            [ -f "$NATIVE_DIR/$BIN" ] || { err "编译失败: $BIN 不存在, 终止部署"; exit 1; }
         done
         ok "编译完成"
 
@@ -69,14 +105,21 @@ case "$CMD" in
         su -c "rm -f $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector $TARGET_DIR/injector"
         su -c "cp $NATIVE_DIR/forge          $TARGET_DIR/forge"
         su -c "cp $NATIVE_DIR/libforgehook.so $TARGET_DIR/libforgehook.so"
-        su -c "cp $NATIVE_DIR/touch_injector $TARGET_DIR/touch_injector"
         su -c "cp $NATIVE_DIR/injector       $TARGET_DIR/injector"
-        su -c "chmod 755 $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/touch_injector $TARGET_DIR/injector"
+        su -c "chmod 755 $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/injector"
+        # touch_injector 可选部署
+        if [ -f "$NATIVE_DIR/touch_injector" ]; then
+            su -c "cp $NATIVE_DIR/touch_injector $TARGET_DIR/touch_injector"
+            su -c "chmod 755 $TARGET_DIR/touch_injector"
+            ok "touch_injector 已部署"
+        else
+            warn "touch_injector 不存在, 跳过 (bot_runner 使用 input 回退)"
+        fi
         ok "部署完成"
 
         ok "Step 3.5/5: MD5 交叉验证..."
         VERIFY_FAIL=0
-        for BIN in forge libforgehook.so touch_injector injector; do
+        for BIN in forge libforgehook.so injector; do
             SRC_MD5=$(md5sum "$NATIVE_DIR/$BIN" 2>/dev/null | awk '{print $1}')
             DST_MD5=$(su -c "md5sum $TARGET_DIR/$BIN 2>/dev/null | awk '{print \$1}'" 2>/dev/null)
             if [ -n "$SRC_MD5" ] && [ "$SRC_MD5" = "$DST_MD5" ]; then
@@ -86,6 +129,16 @@ case "$CMD" in
                 VERIFY_FAIL=$((VERIFY_FAIL+1))
             fi
         done
+        # touch_injector 可选验证
+        if [ -f "$NATIVE_DIR/touch_injector" ]; then
+            SRC_MD5=$(md5sum "$NATIVE_DIR/touch_injector" 2>/dev/null | awk '{print $1}')
+            DST_MD5=$(su -c "md5sum $TARGET_DIR/touch_injector 2>/dev/null | awk '{print \$1}'" 2>/dev/null)
+            if [ -n "$SRC_MD5" ] && [ "$SRC_MD5" = "$DST_MD5" ]; then
+                ok "  touch_injector OK ($DST_MD5)"
+            else
+                warn "  touch_injector MD5 跳过 (可选)"
+            fi
+        fi
         [ "$VERIFY_FAIL" -gt 0 ] && { err "部署验证失败 $VERIFY_FAIL 个文件"; exit 1; }
 
         ok "Step 4/5: 验证..."
