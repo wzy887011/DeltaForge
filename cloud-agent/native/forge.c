@@ -108,6 +108,10 @@ static const patch_entry_t kTersafePatches[] = {
     {0x508CE8, 0x384006A8}, {0x50A81C, 0x38400509}, {0x50A92C, 0x38400509},
     {0x50A95C, 0x38400509}, {0x50A9BC, 0x38400503}, {0x50B704, 0x3840050A},
     {0x50E370, 0xD65F03C0},
+    /* kill 链强制补丁 — 基于 tombstone SI_TKILL 调用栈 */
+    {0x3233B8, 0xD65F03C0},  /* tgkill 调用入口 → RET */
+    {0x419FDC, 0xD2800000},  /* 检测模块入口 → MOV X0,#0 */
+    {0x419FE0, 0xD65F03C0},  /* 检测模块+4 → RET */
 };
 #define TERSAFE_PATCH_COUNT (sizeof(kTersafePatches)/sizeof(kTersafePatches[0]))
 
