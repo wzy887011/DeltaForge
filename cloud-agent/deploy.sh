@@ -71,10 +71,8 @@ case "$CMD" in
 
         ok "编译完成"
 
-        # Step 2.5: 自动安装 library hijack (需要先启动一次游戏让 Android 挂载 lib 目录)
-        # 延迟初始化: 先尝试 hijack, 找不到路径就警告但继续
-        su -c "find /data/app -type f -name 'libtdmqimei.so' 2>/dev/null | head -1" > /tmp/game_lib_path.txt 2>/dev/null
-        GAME_LIB=$(cat /tmp/game_lib_path.txt 2>/dev/null)
+        # Step 2.5: 自动安装 library hijack
+        GAME_LIB=$(su -c "find /data/app -type f -name 'libtdmqimei.so' 2>/dev/null | head -1" 2>/dev/null)
         if [ -n "$GAME_LIB" ] && [ -f "$GAME_LIB" ]; then
             GAME_LIB_DIR=$(dirname "$GAME_LIB")
             if [ ! -f "${GAME_LIB_DIR}/libtdmqimei_real.so" ]; then
