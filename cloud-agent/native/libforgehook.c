@@ -769,7 +769,7 @@ static void jni_hook_system_properties(JNIEnv *env) {
     (*env)->DeleteLocalRef(env, sp_cls);
     return;
 }
-
+/* --- JNI helper functions for B3 RegisterNatives --- */
 static jstring hooked_get(JNIEnv *e, jclass c, jstring k, jstring d) {
     const char *ck = (*e)->GetStringUTFChars(e, k, NULL);
     if (!ck) return d;
