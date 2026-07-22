@@ -290,20 +290,18 @@ static const char FAKE_INPUT_DEVS[]=
 "H: Handlers=event2\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0 0 0 0 0 0 0\n"
 "B: ABS=6618000 0\n";
 
-/* ---- null redirect list — 反作弊数据文件重定向到匿名内存，写入不落盘 ---- */
+/* ---- null redirect list — 只重定向纯上报文件，不碰游戏配置/SDK状态文件 ---- */
 static const char *NULL_REDIRECT[]={
-    "crashSight_db_",      /* CrashSight 崩溃数据库 */
-    "tgpa.xml",            /* TGPA 检测状态 */
-    "tdm.xml",             /* TDM 模块状态 */
-    "GCloudCoreSP.xml",    /* GCloud SDK 共享偏好 */
-    "ace_shell_db.dat",    /* ACE shell 数据库 */
+    "crashSight_db_",      /* CrashSight 崩溃数据库 — 纯上报 */
+    "ace_shell_db.dat",    /* ACE shell 数据库 — 纯检测数据 */
     "ace_cache_db.dat",    /* ACE 缓存数据库 */
-    "tersafe.update",      /* TerSafe 更新数据 */
+    "tersafe.update",      /* TerSafe 更新包 */
     "tdm_track.dat",       /* TDM 追踪数据 */
-    "GPMSDK.mmap3",        /* GPM SDK mmap */
-    "mmkvlite_log_app_state.mmkv", /* App 状态日志 */
     "sys_log_",            /* CrashSight 系统日志 */
     "jni_log_",            /* CrashSight JNI 日志 */
+    /* 注意: tgpa.xml / tdm.xml / GCloudCoreSP.xml / GPMSDK.mmap3 /
+     *       mmkvlite_log_app_state.mmkv 不在此处 — 游戏 SDK 读写这些文件，
+     *       重定向到空 memfd 会导致 SDK 崩溃。改由 forge.c 定期清理。 */
     NULL
 };
 
