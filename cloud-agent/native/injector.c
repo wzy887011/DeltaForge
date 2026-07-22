@@ -1,6 +1,6 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/injector.c
-// 描述: ptrace 注入器 v4 — 自动解析 dlopen 所在库，正确计算目标地址
+// 法器: DeltaForge/cloud-agent/native/injector.c v5.5
+// 描述: ptrace 注入器 — 自动解析 dlopen 所在库，正确计算目标地址
 //   ARM64 上无 mmap syscall, 改用目标进程栈存放路径字符串
 // 编译: clang -Os -Wall injector.c -o injector -ldl
 // 用法: ./injector <PID> /data/local/tmp/libforgehook.so
@@ -52,7 +52,7 @@ static int ptrace_setregs(pid_t pid, struct user_pt_regs *regs) {
 }
 
 /* ── 在 maps 文件中找包含 addr 的 entry ──
-   返回: entry 的 start (base); 出参 name_buf 填完整路径 (如 "/apex/.../libdl.so") ── */
+   返回: entry 的 start (base); 出参 name_buf 填文件名 (basename only) ── */
 static uint64_t find_containing_entry(const char *maps_path,
                                        uint64_t addr,
                                        char *name_out, size_t name_sz) {
@@ -61,31 +61,37 @@ static uint64_t find_containing_entry(const char *maps_path,
 
     char line[1024];
     uint64_t start, end;
-    char perms[8], rest[768];
+    char perms[8];
     if (name_out) name_out[0] = '\0';
 
     while (fgets(line, sizeof(line), f)) {
-        int n = sscanf(line, "%llx-%llx %7s %*s %*s %*s %[^\n]",
-                       (unsigned long long *)&start,
-                       (unsigned long long *)&end, perms, rest);
-        if (n < 3) continue;
+        if (sscanf(line, "%llx-%llx %7s",
+                   (unsigned long long *)&start,
+                   (unsigned long long *)&end, perms) < 2) continue;
         if (addr < start || addr >= end) continue;
 
         if (name_out) {
-            char *p = strrchr(line, '/');
-            if (p) {
-                char *q = name_out;
-                while (*p && *p != '\n' && (size_t)(q - name_out) < name_sz - 1)
-                    *q++ = *p++;
-                *q = '\0';
-            }
-            if (!name_out[0]) {
-                char *b = strrchr(line, '[');
+            /* 路径在行末，以 '/' 开头 — 提取 basename */
+            char *path = strchr(line, '/');
+            if (path) {
+                size_t plen = strlen(path);
+                while (plen > 0 && (path[plen-1]=='\n'||path[plen-1]=='\r'||path[plen-1]==' '))
+                    plen--;
+                path[plen] = '\0';
+                char *slash = strrchr(path, '/');
+                const char *fname = slash ? slash + 1 : path;
+                size_t flen = strlen(fname);
+                if (flen > 0 && flen < name_sz)
+                    memcpy(name_out, fname, flen + 1);
+            } else {
+                /* 匿名映射 [anon]/[stack] */
+                char *b = strchr(line, '[');
                 if (b) {
-                    char *q = name_out;
-                    while (*b && *b != '\n' && (size_t)(q - name_out) < name_sz - 1)
-                        *q++ = *b++;
-                    *q = '\0';
+                    char *e2 = strchr(b, ']');
+                    if (e2) {
+                        size_t l = (size_t)(e2 - b + 1);
+                        if (l < name_sz) { memcpy(name_out, b, l); name_out[l] = '\0'; }
+                    }
                 }
             }
         }

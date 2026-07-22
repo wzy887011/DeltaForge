@@ -66,7 +66,7 @@ class TouchInjector:
         if self.bin:
             self._run(f"tap {int(x)} {int(y)} {p} {d}")
         else:
-            self._run(f"touchscreen tap {int(x)} {int(y)}")
+            self._run(f"tap {int(x)} {int(y)}")
             time.sleep(d / 1000.0)
 
     def swipe(self, x1, y1, x2, y2, duration_ms=None, curve=True):
@@ -75,7 +75,7 @@ class TouchInjector:
         if self.bin:
             self._run(f"swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {d} {steps} {1 if curve else 0}")
         else:
-            self._run(f"touchscreen swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {d}")
+            self._run(f"swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {d}")
 
 
 class BotRunner:

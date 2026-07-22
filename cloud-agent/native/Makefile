@@ -6,7 +6,7 @@ CC = $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/$(TARGET)-clang
 CFLAGS_STATIC = -static -Os -Wall -fno-stack-protector -fomit-frame-pointer
 CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector
 
-all: forge libforgehook.so touch_injector
+all: forge libforgehook.so touch_injector injector
 
 forge: forge.c
 	@if [ -f "$(CC)" ]; then \
@@ -33,6 +33,15 @@ touch_injector: touch_injector.c
 	else \
 		gcc -static -Os -Wall touch_injector.c -o touch_injector; \
 		file touch_injector; ls -lh touch_injector; \
+	fi
+
+injector: injector.c
+	@if [ -f "$(CC)" ]; then \
+		$(CC) -Os -Wall injector.c -o injector -ldl; \
+		file injector; ls -lh injector; \
+	else \
+		gcc -Os -Wall injector.c -o injector -ldl; \
+		file injector; ls -lh injector; \
 	fi
 
 host:

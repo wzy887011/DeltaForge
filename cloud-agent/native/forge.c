@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/forge.c
+// 法器: DeltaForge/cloud-agent/native/forge.c v5.5
 // 描述: 三角洲行动云手机过检测核心 - 完整内存补丁 + 环境伪装 + 文件清理
 // 编译: aarch64-linux-android21-clang -static -Os -o forge forge.c
 //   或: 云手机内 gcc -static -Os -o forge forge.c
@@ -40,7 +40,7 @@
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "1.0.0"
+#define FORGE_VERSION       "5.5"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
@@ -352,9 +352,12 @@ static uint64_t get_module_base(pid_t pid, const char *module_spec) {
                 base = strtoull(line, NULL, 16);
                 break;
             }
-            found_lib = 0;
-        }
-        if (strstr(line, lib)) {
+            /* 遇到另一个 .so 路径说明已跨过目标库，停止搜索 */
+            if (strstr(line, ".so") && !strstr(line, lib)) {
+                break;
+            }
+            /* 继续向下搜索，不重置 found_lib */
+        } else if (strstr(line, lib)) {
             if (!bss_mode) { base = strtoull(line, NULL, 16); break; }
             found_lib = 1;
         }
@@ -668,27 +671,36 @@ static void block_tdm_reporting(void) {
         system(cmd);
     }
 
-    /* 如果内核有 xt_owner: 阻断游戏 UID 所有出站 TCP，只放行 DNS+特定端口 */
+    /* xt_owner: 先插入 ACCEPT 规则，最后插入 DROP — 顺序决定匹配优先级 */
     snprintf(cmd, sizeof(cmd),
-        "iptables -C OUTPUT -m owner --uid-owner %s -p tcp --dport 53 -j ACCEPT 2>/dev/null || "
-        "iptables -I OUTPUT 1 -m owner --uid-owner %s -p tcp --dport 53 -j ACCEPT 2>/dev/null",
+        "iptables -C OUTPUT -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null || "
+        "iptables -I OUTPUT 1 -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null",
         uid_buf, uid_buf);
+    system(cmd);
 
-    /* 放行游戏服务器端口 (三角洲游戏端口范围: 8080/443/14000-14100) */
     snprintf(cmd, sizeof(cmd),
         "iptables -C OUTPUT -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null || "
         "iptables -I OUTPUT 2 -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null",
         uid_buf, uid_buf);
+    system(cmd);
 
     snprintf(cmd, sizeof(cmd),
         "iptables -C OUTPUT -m owner --uid-owner %s -p tcp --dport 8080 -j ACCEPT 2>/dev/null || "
         "iptables -I OUTPUT 3 -m owner --uid-owner %s -p tcp --dport 8080 -j ACCEPT 2>/dev/null",
         uid_buf, uid_buf);
+    system(cmd);
 
-    /* 阻断其余所有出站连接 */
+    /* 放行 UDP 14000-14100 游戏实时帧数据 */
+    snprintf(cmd, sizeof(cmd),
+        "iptables -C OUTPUT -m owner --uid-owner %s -p udp --dport 14000:14100 -j ACCEPT 2>/dev/null || "
+        "iptables -I OUTPUT 4 -m owner --uid-owner %s -p udp --dport 14000:14100 -j ACCEPT 2>/dev/null",
+        uid_buf, uid_buf);
+    system(cmd);
+
+    /* DROP 放最后，确保 ACCEPT 先匹配 */
     snprintf(cmd, sizeof(cmd),
         "iptables -C OUTPUT -m owner --uid-owner %s -j DROP 2>/dev/null || "
-        "iptables -I OUTPUT 4 -m owner --uid-owner %s -j DROP 2>/dev/null",
+        "iptables -I OUTPUT 5 -m owner --uid-owner %s -j DROP 2>/dev/null",
         uid_buf, uid_buf);
     system(cmd);
 
@@ -906,10 +918,14 @@ static int do_launch(void) {
         unlink(APP_DATA "/shared_prefs/qm_global_sp.xml");
         OK("二次文件清理完成");
     }
-    /* B5: 后台线程每30秒重复清理 */
+    /* B5: 后台每30秒重复清理 — double-fork 避免僵尸进程 */
     if (pid > 0) {
-        pid_t cleaner = fork();
-        if (cleaner == 0) {
+        pid_t mid = fork();
+        if (mid == 0) {
+            /* 中间进程: 立即 fork 子进程后退出，让 init 接管 */
+            pid_t cleaner = fork();
+            if (cleaner != 0) _exit(0);  /* 中间进程退出 */
+            /* 以下是真正的清理 daemon */
             prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
             while (1) {
                 sleep(30);
@@ -937,6 +953,8 @@ static int do_launch(void) {
                         delete_matching(kScanDirs[i], kPatternSubstrings[j]);
             }
         }
+        /* 回收中间进程，避免僵尸 */
+        if (mid > 0) waitpid(mid, NULL, 0);
     }
     return rc;
 }
@@ -1057,6 +1075,7 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char **argv) {
     disguise_self();
+    srand((unsigned int)(time(NULL) ^ (unsigned long)getpid()));
 
     int daemon_mode = 0, flag_prep = 0, flag_launch = 0, flag_patch = 0,
         flag_status = 0, flag_clean = 0, flag_spoof = 0;

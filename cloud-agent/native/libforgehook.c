@@ -1,6 +1,7 @@
 // ============================================================
-// DeltaForge/cloud-agent/native/libforgehook.c v5.0
+// DeltaForge/cloud-agent/native/libforgehook.c v5.5
 // Shared library — hook __system_property_get, fopen/open, seccomp-bpf, JNI
+//                  getenv(LD_PRELOAD), dl_iterate_phdr, opendir/readdir
 // Compile: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
 // ============================================================
 
@@ -24,6 +25,7 @@
 #include <sys/uio.h>
 #include <jni.h>
 #include <time.h>
+#include <link.h>
 
 /* seccomp-bpf constants */
 #ifndef SECCOMP_SET_MODE_FILTER
@@ -64,8 +66,8 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 #define BPF_JEQ  0x10
 #define BPF_K    0x00
 
-/* ---- maps hide ---- */
-__attribute__((constructor))
+/* ---- maps hide — priority 50: 在 chainload 之前先隐藏自身 ---- */
+__attribute__((constructor(50)))
 static void _hide_self_from_maps(void) {
     srand(time(NULL)^getpid()^(long)pthread_self());
     FILE *maps=fopen("/proc/self/maps","r");
@@ -121,31 +123,37 @@ static int find_self_from_maps(char *out, size_t out_sz) {
     syscall(SYS_close, fd);
     if (n <= 0) return 0;
     buf[n] = '\0';
+
+    /* 逐行解析，找包含 libtdmqimei 的行，提取路径列 (第6列，'/'开头) */
     const char *needle = "libtdmqimei";
-    char *p = strstr(buf, needle);
-    if (!p) return 0;
-    char *line = p;
-    while (line > buf && line[-1] != '\n') line--;
-    char *path_start = line;
-    while (*path_start == ' ' || (*path_start >= '0' && *path_start <= '9') ||
-           *path_start == '-') {
-        char *dash = strchr(path_start, '-');
-        if (!dash) break;
-        path_start = dash + 1;
-        while (*path_start == ' ') path_start++;
+    char *line = buf;
+    while (line && *line) {
+        char *eol = strchr(line, '\n');
+        if (eol) *eol = '\0';
+
+        if (strstr(line, needle)) {
+            char *path = strchr(line, '/');
+            if (path) {
+                size_t len = strlen(path);
+                while (len > 0 && (path[len-1]==' '||path[len-1]=='\t'||path[len-1]=='\r'))
+                    len--;
+                if (len > 0 && len < out_sz) {
+                    memcpy(out, path, len);
+                    out[len] = '\0';
+                    if (eol) *eol = '\n';
+                    return 1;
+                }
+            }
+        }
+
+        if (!eol) break;
+        *eol = '\n';
+        line = eol + 1;
     }
-    char *real_path = strchr(path_start, '/');
-    if (!real_path || real_path > p) return 0;
-    char *end = p + 12;
-    if (!strstr(p, needle)) return 0;
-    size_t len = (size_t)(end - real_path);
-    if (len + 1 > out_sz) return 0;
-    for (size_t i = 0; i < len; i++) out[i] = real_path[i];
-    out[len] = '\0';
-    return 1;
+    return 0;
 }
 
-__attribute__((constructor(50)))
+__attribute__((constructor(100)))
 static void _chainload_real_qimei(void) {
     char real_path[1024];
     char self_path[1024];
@@ -235,6 +243,23 @@ static const char FAKE_GPU_MAX[]="680000000\n";
 static const char FAKE_HARDWARE[]="Qualcomm Technologies, Inc Kailua\n";
 static const char FAKE_MACHINE[]="Snapdragon 8+ Gen1\n";
 
+/* /proc/self/status — TracerPid: 0 防止反调试检测 ptrace */
+static const char FAKE_PROC_STATUS[]=
+"Name:\tGameActivity\nUmask:\t0077\nState:\tS (sleeping)\n"
+"Tgid:\t12345\nNgid:\t0\nPid:\t12345\nPPid:\t1199\nTracerPid:\t0\n"
+"Uid:\t10600\t10600\t10600\t10600\nGid:\t10600\t10600\t10600\t10600\n"
+"FDSize:\t256\nGroups:\t3003 9997 20000\nNStgid:\t12345\nNSpid:\t12345\n"
+"NSpgid:\t12345\nNSsid:\t12345\nVmPeak:\t10485760 kB\nVmSize:\t9437184 kB\n"
+"VmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t524288 kB\nVmRSS:\t458752 kB\n"
+"Threads:\t48\n";
+
+/* /proc/net/tcp — 空响应，不暴露调试端口 */
+static const char FAKE_NET_TCP[]=
+"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
+
+static const char FAKE_NET_TCP6[]=
+"  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
+
 static const char FAKE_INPUT_DEVS[]=
 "I: Bus=0019 Vendor=0001 Product=0001 Version=0100\n"
 "N: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\n"
@@ -276,6 +301,9 @@ static const fake_file_t FAKE_FILES[]={
     {"/sys/devices/soc0/machine",FAKE_MACHINE,sizeof(FAKE_MACHINE)-1},
     {"/sys/devices/soc0/family","Snapdragon\n",11},
     {"/sys/class/sensors/","\n",1},
+    {"/proc/self/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},
+    {"/proc/net/tcp",FAKE_NET_TCP,sizeof(FAKE_NET_TCP)-1},
+    {"/proc/net/tcp6",FAKE_NET_TCP6,sizeof(FAKE_NET_TCP6)-1},
     {NULL,NULL,0}
 };
 
@@ -285,6 +313,8 @@ static const char *HIDDEN[]={
     "/sys/bus/virtio/devices","/sys/bus/virtio/drivers",
     "/sys/devices/virtual","/sys/firmware/qemu",
     "/sys/hypervisor",
+    "/dev/tee0","/dev/tee1","/dev/teepriv0",  /* 云手机虚拟 TEE */
+    "/dev/qemu_pipe","/dev/socket/qemud","/dev/goldfish_pipe",
     "/system/bin/qemud","/system/bin/qemu-props",
     "/system/bin/androVM-prop","/system/bin/microvirt-prop",
     "/system/bin/nox-prop","/system/bin/ttVM-prop",
@@ -304,8 +334,7 @@ static const char *HIDDEN[]={
     "/data/data/de.robv.android.xposed.installer",
     "/data/data/org.lsposed.manager",
     "/data/local/tmp/x8","/data/local/tmp/sandbox",
-    "/data/local/tmp/inject","/dev/qemu_pipe",
-    "/dev/socket/qemud","/dev/goldfish_pipe",
+    "/data/local/tmp/inject",
     NULL
 };
 
@@ -414,6 +443,78 @@ int lstat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return
 ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
+/* ---- P0ext: getenv — 拦截 LD_PRELOAD / LD_LIBRARY_PATH 检测 ---- */
+typedef char *(*getenv_t)(const char *);
+static getenv_t _getenv = NULL;
+
+char *getenv(const char *name) {
+    if (!_getenv) _getenv = (getenv_t)dlsym(RTLD_NEXT, "getenv");
+    if (name && (strcmp(name, "LD_PRELOAD") == 0 ||
+                 strcmp(name, "LD_LIBRARY_PATH") == 0 ||
+                 strcmp(name, "ANDROID_ROOT") == 0))
+        return NULL;
+    return _getenv ? _getenv(name) : NULL;
+}
+
+/* ---- P0ext: dl_iterate_phdr — 过滤 libforgehook 被枚举 ---- */
+typedef int (*dl_iterate_phdr_t)(int (*)(struct dl_phdr_info *, size_t, void *), void *);
+static dl_iterate_phdr_t _dl_iterate_phdr = NULL;
+
+struct _phdr_wrap { int (*cb)(struct dl_phdr_info *, size_t, void *); void *data; };
+
+static int _phdr_filter(struct dl_phdr_info *info, size_t size, void *arg) {
+    struct _phdr_wrap *w = (struct _phdr_wrap *)arg;
+    if (info && info->dlpi_name &&
+        (strstr(info->dlpi_name, "libforgehook") ||
+         strstr(info->dlpi_name, "libtdmqimei_real")))
+        return 0;
+    return w->cb(info, size, w->data);
+}
+
+int dl_iterate_phdr(int (*cb)(struct dl_phdr_info *, size_t, void *), void *data) {
+    if (!_dl_iterate_phdr)
+        _dl_iterate_phdr = (dl_iterate_phdr_t)dlsym(RTLD_NEXT, "dl_iterate_phdr");
+    if (!_dl_iterate_phdr) return 0;
+    struct _phdr_wrap w = {cb, data};
+    return _dl_iterate_phdr(_phdr_filter, &w);
+}
+
+/* ---- P0ext: opendir / readdir — 目录级隐藏 ---- */
+typedef DIR  *(*opendir_t)(const char *);
+typedef struct dirent *(*readdir_t)(DIR *);
+static opendir_t _opendir = NULL;
+static readdir_t _readdir = NULL;
+
+static const char *FILT_NAMES[] = {
+    "frida", "gdbserver", "gdb", "magisk", ".magisk", "supersu",
+    "xposed", "lsposed", "edxposed", "substrate",
+    "qemu", "vbox", "vhost", "goldfish", "libdroid4x",
+    NULL
+};
+
+static int dname_filtered(const char *n) {
+    if (!n) return 0;
+    for (const char **p = FILT_NAMES; *p; p++)
+        if (strstr(n, *p)) return 1;
+    return 0;
+}
+
+DIR *opendir(const char *name) {
+    if (!_opendir) _opendir = (opendir_t)dlsym(RTLD_NEXT, "opendir");
+    if (hidden(name)) { errno = ENOENT; return NULL; }
+    return _opendir ? _opendir(name) : NULL;
+}
+
+struct dirent *readdir(DIR *dirp) {
+    if (!_readdir) _readdir = (readdir_t)dlsym(RTLD_NEXT, "readdir");
+    if (!_readdir) return NULL;
+    struct dirent *ent;
+    while ((ent = _readdir(dirp)) != NULL) {
+        if (!dname_filtered(ent->d_name)) break;
+    }
+    return ent;
+}
+
 /* ---- P1: seccomp-bpf SIGSYS handler ---- */
 static volatile int g_bpf_active=0;
 static volatile uint64_t g_sigsys_total=0;
@@ -468,7 +569,7 @@ static void install_seccomp(void){
     if(prctl(SECCOMP_SET_MODE_FILTER,0UL,&g_bpf_fprog)!=0){g_bpf_active=0;return;}
     g_bpf_active=1;
 }
-__attribute__((constructor(101)))
+__attribute__((constructor(200)))
 static void _install_seccomp_cb(void){install_seccomp();}
 
 /* ---- P2: __system_property_get hook ---- */
@@ -504,6 +605,12 @@ static const hook_prop_t HOOK_PROPS[]={
     {"ro.bootmode","unknown"},
     {"persist.sys.usb.config","adb"},
     {"gsm.version.baseband","MPSS.TH.5.0-05076-OmniGen_PACK-1"},
+    /* 序列号/IMEI — 清空防止云手机特征泄露 */
+    {"ro.serialno",""},
+    {"ro.boot.serialno",""},
+    {"persist.sys.device_name","Redmi K60"},
+    {"bluetooth.name","Redmi K60"},
+    {"wifi.interface","wlan0"},
     {"ro.kernel.qemu",""},
     {"ro.boot.qemu",""},
     {"ro.boot.qemu.avd_name",""},
@@ -552,7 +659,13 @@ int __system_property_get(const char *name,char *value){
     if(!real_prop_get)real_prop_get=(hook_prop_get_t)dlsym(RTLD_NEXT,"__system_property_get");
     for(const hook_prop_t *e=HOOK_PROPS;e->key;e++){
         if(strcmp(name,e->key)==0){
-            if(e->value[0]){size_t l=strlen(e->value);if(value){memcpy(value,e->value,l);value[l]='\0';}return (int)l;}
+            if(e->value[0]){
+                size_t l=strlen(e->value);
+                if(value){memcpy(value,e->value,l);value[l]='\0';}
+                return (int)l;
+            }
+            /* "删除"属性: 清空缓冲区防止返回垃圾值 */
+            if(value) value[0]='\0';
             return 0;
         }
     }

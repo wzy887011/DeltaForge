@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/touch_injector.c
+// 法器: DeltaForge/cloud-agent/native/touch_injector.c v5.5
 // 描述: /dev/uinput 底层触摸注入 — 伪装 "fts_ts" I2C 触摸屏
 //       绕开 InputDispatcher 检测层（adb input 在 InputReader 层可见）
 // 编译: aarch64-linux-android21-clang -static -Os -o touch_injector touch_injector.c
@@ -143,7 +143,11 @@ int main(int argc, char **argv) {
         do_swipe(x1, y1, x2, y2, d, s, c);
         printf("swipe %d,%d -> %d,%d dur=%dms steps=%d curve=%d\n", x1, y1, x2, y2, d, s, c);
     }
-    ioctl(ufd, UI_DEV_DESTROY);
-    close(ufd);
+    /* 仅在设备成功创建时销毁，避免对无效 fd 调用 DESTROY */
+    if (ufd >= 0) {
+        ioctl(ufd, UI_DEV_DESTROY);
+        close(ufd);
+        ufd = -1;
+    }
     return 0;
 }
