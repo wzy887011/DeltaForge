@@ -71,20 +71,24 @@ case "$CMD" in
 
         ok "编译完成"
 
-        # Step 2.5: 自动安装 library hijack (编译后自动替换游戏 Qimei SDK)
-        GAME_LIB=$(find /data/app -type f -name "libtdmqimei.so" 2>/dev/null | head -1)
-        if [ -n "$GAME_LIB" ]; then
+        # Step 2.5: 自动安装 library hijack (需要先启动一次游戏让 Android 挂载 lib 目录)
+        # 延迟初始化: 先尝试 hijack, 找不到路径就警告但继续
+        su -c "find /data/app -type f -name 'libtdmqimei.so' 2>/dev/null | head -1" > /tmp/game_lib_path.txt 2>/dev/null
+        GAME_LIB=$(cat /tmp/game_lib_path.txt 2>/dev/null)
+        if [ -n "$GAME_LIB" ] && [ -f "$GAME_LIB" ]; then
             GAME_LIB_DIR=$(dirname "$GAME_LIB")
             if [ ! -f "${GAME_LIB_DIR}/libtdmqimei_real.so" ]; then
                 ok "hijack: 首次备份 libtdmqimei.so"
-                cp "$GAME_LIB" "${GAME_LIB_DIR}/libtdmqimei_real.so"
-                chmod 644 "${GAME_LIB_DIR}/libtdmqimei_real.so"
+                su -c "cp '${GAME_LIB}' '${GAME_LIB_DIR}/libtdmqimei_real.so'"
+                su -c "chmod 644 '${GAME_LIB_DIR}/libtdmqimei_real.so'"
             fi
-            cp "$NATIVE_DIR/libforgehook.so" "$GAME_LIB"
-            chmod 644 "$GAME_LIB"
+            su -c "cp '${NATIVE_DIR}/libforgehook.so' '${GAME_LIB}'"
+            su -c "chmod 644 '${GAME_LIB}'"
             ok "hijack: libforgehook.so → libtdmqimei.so 已替换"
         else
-            warn "hijack: 未找到游戏 libtdmqimei.so, 跳过库劫持 (ptrace 兜底)"
+            warn "hijack: 未找到游戏 libtdmqimei.so — 游戏可能未安装或需先启动一次"
+            warn "         先执行: su -c 'am start -n com.tencent.tmgp.dfm/com.epicgames.ue4.SplashActivity; sleep 3; am force-stop com.tencent.tmgp.dfm'"
+            warn "         再执行: sh cloud-agent/deploy.sh build"
         fi
         ;;
     status)
