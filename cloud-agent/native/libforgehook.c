@@ -573,6 +573,89 @@ struct dirent *readdir(DIR *dirp) {
     return ent;
 }
 
+/* ============================================================
+ * P3: TerSafe 运行时指令补丁 — constructor(150)
+ *
+ * 调用栈分析（tombstone SI_TKILL）：
+ *   #04 0x419fdc  独立检测模块（CRC/完整性/云机特征）← 触发点
+ *   #03 0x2e7810  检测结果处理
+ *   #01 0x320d78  kill 调度
+ *   #00 0x3233b8  tgkill 发出 ← PC 被捕获处
+ *
+ * 策略：
+ *   patch1 @ 0x419fdc → MOV X0,#0; RET  令检测直接返回"干净"
+ *   patch2 @ 0x3233b8 → RET             保险层：就算检测触发也无法 kill 进程
+ * ============================================================ */
+
+static uintptr_t get_module_base(const char *so_name) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    if (fd < 0) return 0;
+    char buf[32768];
+    ssize_t n = (ssize_t)syscall(SYS_read, fd, buf, sizeof(buf) - 1);
+    syscall(SYS_close, fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    char *line = buf;
+    while (line && *line) {
+        char *eol = strchr(line, '\n');
+        if (eol) *eol = '\0';
+        if (strstr(line, so_name)) {
+            uintptr_t base = (uintptr_t)strtoul(line, NULL, 16);
+            if (eol) *eol = '\n';
+            return base;
+        }
+        if (!eol) break;
+        *eol = '\n';
+        line = eol + 1;
+    }
+    return 0;
+}
+
+/* AArch64 单指令内存补丁：mprotect RWX → 写 → flush icache → 恢复 RX */
+static int patch_insn(uintptr_t addr, uint32_t insn) {
+    uintptr_t page   = addr & ~(uintptr_t)(4096 - 1);
+    size_t    pagesz = (addr & 4095) > 4092 ? 8192 : 4096;
+    if (syscall(SYS_mprotect, (void *)page, pagesz,
+                PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+        return -1;
+    *(volatile uint32_t *)addr = insn;
+    __builtin___clear_cache((void *)addr, (void *)(addr + 4));
+    syscall(SYS_mprotect, (void *)page, pagesz, PROT_READ | PROT_EXEC);
+    return 0;
+}
+
+#define TERSAFE_DETECT_OFF  0x419fdcu   /* 检测模块入口 → return 0 */
+#define TERSAFE_KILL_OFF    0x3233b8u   /* tgkill 调用点 → RET */
+#define AARCH64_MOV_X0_0    0xD2800000u /* MOV X0, #0 */
+#define AARCH64_RET         0xD65F03C0u /* RET */
+
+__attribute__((constructor(150)))
+static void _patch_tersafe(void) {
+    uintptr_t base = get_module_base("libtersafe.so");
+    if (!base) {
+        forge_log_raw("[patch] libtersafe.so base not found\n");
+        return;
+    }
+    char log[96];
+    int ln = snprintf(log, sizeof(log), "[patch] tersafe base=0x%lx\n", (unsigned long)base);
+    if (ln > 0) forge_log_raw(log);
+
+    /* 补丁1: 检测模块 → MOV X0,#0; RET（令检测直接返回干净） */
+    uintptr_t det = base + TERSAFE_DETECT_OFF;
+    int r1 = patch_insn(det, AARCH64_MOV_X0_0);
+    int r2 = patch_insn(det + 4, AARCH64_RET);
+    forge_log_raw((r1 == 0 && r2 == 0)
+        ? "[patch] detect@0x419fdc -> return-0 OK\n"
+        : "[patch] detect@0x419fdc -> return-0 FAILED\n");
+
+    /* 补丁2: tgkill 函数入口 → RET（保险层） */
+    uintptr_t kil = base + TERSAFE_KILL_OFF;
+    int r3 = patch_insn(kil, AARCH64_RET);
+    forge_log_raw(r3 == 0
+        ? "[patch] kill@0x3233b8 -> RET OK\n"
+        : "[patch] kill@0x3233b8 -> RET FAILED\n");
+}
+
 /* ---- P1: seccomp-bpf SIGSYS handler ---- */
 static volatile int g_bpf_active=0;
 static volatile uint64_t g_sigsys_total=0;
