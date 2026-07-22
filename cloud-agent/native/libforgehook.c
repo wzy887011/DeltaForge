@@ -112,18 +112,32 @@ static void _hide_self_from_maps(void) {
 }
 
 /* P0: 链式加载真 Qimei (library hijack 模式)
- * 用 popen+find 定位真 Qimei, Android 12+ 目录名被哈希
+ * 用 opendir+readdir 扫描 /data/app, 避免 popen 的 fork/exec 在 ART 初始化时死锁
  * constructor(50) 在 _hide_self_from_maps 之后、seccomp(101) 之前运行 */
 __attribute__((constructor(50)))
 static void _chainload_real_qimei(void) {
-    FILE *fp = popen("find /data/app -type f -name libtdmqimei_real.so 2>/dev/null | head -1", "r");
-    if (!fp) return;
+    DIR *d = opendir("/data/app");
+    if (!d) return;
+    struct dirent *ent;
     char lib_path[512] = {0};
-    if (fgets(lib_path, sizeof(lib_path), fp)) {
-        lib_path[strcspn(lib_path, "\n")] = 0;
-        if (lib_path[0]) dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_type != DT_DIR && ent->d_type != DT_UNKNOWN) continue;
+        if (!strstr(ent->d_name, "com.tencent.tmgp.dfm")) continue;
+        snprintf(lib_path, sizeof(lib_path),
+            "/data/app/%s/lib/arm64/libtdmqimei_real.so", ent->d_name);
+        if (access(lib_path, R_OK) == 0) { dlopen(lib_path, RTLD_NOW|RTLD_GLOBAL); break; }
+        snprintf(lib_path, sizeof(lib_path),
+            "/data/app/%s/lib/arm64-v8a/libtdmqimei_real.so", ent->d_name);
+        if (access(lib_path, R_OK) == 0) { dlopen(lib_path, RTLD_NOW|RTLD_GLOBAL); break; }
     }
-    pclose(fp);
+    closedir(d);
+    /* B8 fix: log chainload result */
+    FILE *log = fopen("/data/local/tmp/forge.log", "a");
+    if (log) {
+        if (lib_path[0]) fprintf(log, "[+] chainload: %s\n", lib_path);
+        else fprintf(log, "[!] chainload: real qimei NOT FOUND\n");
+        fflush(log); fclose(log);
+    }
 }
 
 __attribute__((destructor))
@@ -692,6 +706,33 @@ static void jni_overwrite_build_fields(JNIEnv *env) {
         }
     }
     (*env)->DeleteLocalRef(env, build_cls);
+
+    /* B3: JNI RegisterNatives 替换 SystemProperties 的 native 方法 */
+    jclass sp_cls = (*env)->FindClass(env, "android/os/SystemProperties");
+    if (sp_cls) {
+        static jstring JNICALL hk_get(JNIEnv *e, jclass c, jstring k, jstring d) {
+            const char *ck = (*e)->GetStringUTFChars(e, k, NULL);
+            if (ck) {
+                for (const hook_prop_t *p = HOOK_PROPS; p->key; p++) {
+                    if (!strcmp(ck, p->key)) { (*e)->ReleaseStringUTFChars(e, k, ck);
+                        return p->value[0] ? (*e)->NewStringUTF(e, p->value) : d; }
+                }
+                (*e)->ReleaseStringUTFChars(e, k, ck);
+            }
+            return d;
+        }
+        static jint    JNICALL hk_gi(JNIEnv *e, jclass c, jstring k, jint d)    { return d; }
+        static jlong   JNICALL hk_gl(JNIEnv *e, jclass c, jstring k, jlong d)   { return d; }
+        static jboolean JNICALL hk_gb(JNIEnv *e, jclass c, jstring k, jboolean d){ return d; }
+        JNINativeMethod m[] = {
+            {"native_get",       "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)hk_get},
+            {"native_get_int",   "(Ljava/lang/String;I)I",    (void*)hk_gi},
+            {"native_get_long",  "(Ljava/lang/String;J)J",    (void*)hk_gl},
+            {"native_get_boolean","(Ljava/lang/String;Z)Z",   (void*)hk_gb},
+        };
+        (*env)->RegisterNatives(env, sp_cls, m, 4);
+        (*env)->DeleteLocalRef(env, sp_cls);
+    } else { (*env)->ExceptionClear(env); }
 }
 
 /* P2 Step 2: Hook android.os.SystemProperties native 方法 ====

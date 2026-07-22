@@ -690,6 +690,7 @@ static void block_tdm_reporting(void) {
         "iptables -C OUTPUT -m owner --uid-owner %s -j DROP 2>/dev/null || "
         "iptables -I OUTPUT 4 -m owner --uid-owner %s -j DROP 2>/dev/null",
         uid_buf, uid_buf);
+    system(cmd);
 
     OK("TDM/CRASHSIGHT/GPM 网络上报已阻断 (%s)", uid_buf);
 }
