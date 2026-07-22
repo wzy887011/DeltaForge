@@ -711,31 +711,8 @@ static void jni_overwrite_build_fields(JNIEnv *env) {
     (*env)->DeleteLocalRef(env, build_cls);
 
     /* B3: JNI RegisterNatives 替换 SystemProperties 的 native 方法 */
-    jclass sp_cls = (*env)->FindClass(env, "android/os/SystemProperties");
-    if (sp_cls) {
-        static jstring JNICALL hk_get(JNIEnv *e, jclass c, jstring k, jstring d) {
-            const char *ck = (*e)->GetStringUTFChars(e, k, NULL);
-            if (ck) {
-                for (const hook_prop_t *p = HOOK_PROPS; p->key; p++) {
-                    if (!strcmp(ck, p->key)) { (*e)->ReleaseStringUTFChars(e, k, ck);
-                        return p->value[0] ? (*e)->NewStringUTF(e, p->value) : d; }
-                }
-                (*e)->ReleaseStringUTFChars(e, k, ck);
-            }
-            return d;
-        }
-        static jint    JNICALL hk_gi(JNIEnv *e, jclass c, jstring k, jint d)    { return d; }
-        static jlong   JNICALL hk_gl(JNIEnv *e, jclass c, jstring k, jlong d)   { return d; }
-        static jboolean JNICALL hk_gb(JNIEnv *e, jclass c, jstring k, jboolean d){ return d; }
-        JNINativeMethod m[] = {
-            {"native_get",       "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)hk_get},
-            {"native_get_int",   "(Ljava/lang/String;I)I",    (void*)hk_gi},
-            {"native_get_long",  "(Ljava/lang/String;J)J",    (void*)hk_gl},
-            {"native_get_boolean","(Ljava/lang/String;Z)Z",   (void*)hk_gb},
-        };
-        (*env)->RegisterNatives(env, sp_cls, m, 4);
-        (*env)->DeleteLocalRef(env, sp_cls);
-    } else { (*env)->ExceptionClear(env); }
+    jni_hook_system_properties(env);
+    return;
 }
 
 /* P2 Step 2: Hook android.os.SystemProperties native 方法 ====
@@ -790,7 +767,24 @@ static void jni_hook_system_properties(JNIEnv *env) {
      */
 
     (*env)->DeleteLocalRef(env, sp_cls);
+    return;
 }
+
+static jstring hooked_get(JNIEnv *e, jclass c, jstring k, jstring d) {
+    const char *ck = (*e)->GetStringUTFChars(e, k, NULL);
+    if (!ck) return d;
+    for (const hook_prop_t *p = HOOK_PROPS; p->key; p++) {
+        if (!strcmp(ck, p->key)) {
+            (*e)->ReleaseStringUTFChars(e, k, ck);
+            return p->value[0] ? (*e)->NewStringUTF(e, p->value) : d;
+        }
+    }
+    (*e)->ReleaseStringUTFChars(e, k, ck);
+    return d;
+}
+static jint     hooked_get_int(JNIEnv *e, jclass c, jstring k, jint d)     { return d; }
+static jlong    hooked_get_long(JNIEnv *e, jclass c, jstring k, jlong d)   { return d; }
+static jboolean hooked_get_bool(JNIEnv *e, jclass c, jstring k, jboolean d){ return d; }
 
 /* ===== P2: 使用 constructor 确保 JNI_OnLoad 之前的基础设施已就绪 =====
  * constructor 优先级:
