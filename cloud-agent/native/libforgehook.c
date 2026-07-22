@@ -582,10 +582,21 @@ struct dirent *readdir(DIR *dirp) {
  *   #01 0x320d78  kill 调度
  *   #00 0x3233b8  tgkill 发出 ← PC 被捕获处
  *
- * 策略：
- *   patch1 @ 0x419fdc → MOV X0,#0; RET  令检测直接返回"干净"
- *   patch2 @ 0x3233b8 → RET             保险层：就算检测触发也无法 kill 进程
+ * 修复 v2（原版问题）：
+ *   1. forge.log 是 root:root 0600，游戏进程写不进去 → 改用独立 hook log
+ *   2. Android 11 W^X：mprotect(RWX) 被 SELinux 拒绝 → 回退 /proc/self/mem 写
  * ============================================================ */
+
+/* 游戏进程可写的独立 patch 日志（/data/local/tmp 对 u0_a73 可创建新文件） */
+static void hook_log(const char *msg) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD,
+                          "/data/local/tmp/forge_hook.log",
+                          O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    size_t len = 0; while (msg[len]) len++;
+    (void)syscall(SYS_write, fd, msg, len);
+    syscall(SYS_close, fd);
+}
 
 static uintptr_t get_module_base(const char *so_name) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
@@ -611,16 +622,29 @@ static uintptr_t get_module_base(const char *so_name) {
     return 0;
 }
 
-/* AArch64 单指令内存补丁：mprotect RWX → 写 → flush icache → 恢复 RX */
+/*
+ * AArch64 单指令补丁
+ *  方法1: mprotect RWX（Android 9-以下或宽松 SELinux）
+ *  方法2: pwrite64 via /proc/self/mem（绕过 W^X，Android 10+ 首选）
+ */
 static int patch_insn(uintptr_t addr, uint32_t insn) {
+    /* 方法1: mprotect RWX */
     uintptr_t page   = addr & ~(uintptr_t)(4096 - 1);
     size_t    pagesz = (addr & 4095) > 4092 ? 8192 : 4096;
     if (syscall(SYS_mprotect, (void *)page, pagesz,
-                PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-        return -1;
-    *(volatile uint32_t *)addr = insn;
+                PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        *(volatile uint32_t *)addr = insn;
+        __builtin___clear_cache((void *)addr, (void *)(addr + 4));
+        syscall(SYS_mprotect, (void *)page, pagesz, PROT_READ | PROT_EXEC);
+        return 0;
+    }
+    /* 方法2: /proc/self/mem pwrite64（直接写虚拟地址，绕过页保护） */
+    int mfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDWR, 0);
+    if (mfd < 0) return -2;
+    ssize_t nw = (ssize_t)syscall(__NR_pwrite64, mfd, &insn, (size_t)4, (off_t)addr);
+    syscall(SYS_close, mfd);
+    if (nw != 4) return -3;
     __builtin___clear_cache((void *)addr, (void *)(addr + 4));
-    syscall(SYS_mprotect, (void *)page, pagesz, PROT_READ | PROT_EXEC);
     return 0;
 }
 
@@ -632,28 +656,25 @@ static int patch_insn(uintptr_t addr, uint32_t insn) {
 __attribute__((constructor(150)))
 static void _patch_tersafe(void) {
     uintptr_t base = get_module_base("libtersafe.so");
-    if (!base) {
-        forge_log_raw("[patch] libtersafe.so base not found\n");
-        return;
-    }
-    char log[96];
-    int ln = snprintf(log, sizeof(log), "[patch] tersafe base=0x%lx\n", (unsigned long)base);
-    if (ln > 0) forge_log_raw(log);
+    char logbuf[128];
+    int ln;
 
-    /* 补丁1: 检测模块 → MOV X0,#0; RET（令检测直接返回干净） */
+    if (!base) { hook_log("[patch] ERR: libtersafe base=0\n"); return; }
+    ln = snprintf(logbuf, sizeof(logbuf), "[patch] base=0x%lx\n", (unsigned long)base);
+    if (ln > 0) hook_log(logbuf);
+
+    /* patch1: 检测模块入口 → MOV X0,#0; RET（直接返回"干净"） */
     uintptr_t det = base + TERSAFE_DETECT_OFF;
     int r1 = patch_insn(det, AARCH64_MOV_X0_0);
     int r2 = patch_insn(det + 4, AARCH64_RET);
-    forge_log_raw((r1 == 0 && r2 == 0)
-        ? "[patch] detect@0x419fdc -> return-0 OK\n"
-        : "[patch] detect@0x419fdc -> return-0 FAILED\n");
+    ln = snprintf(logbuf, sizeof(logbuf), "[patch] detect@0x419fdc r1=%d r2=%d\n", r1, r2);
+    if (ln > 0) hook_log(logbuf);
 
-    /* 补丁2: tgkill 函数入口 → RET（保险层） */
+    /* patch2: tgkill 入口 → RET（保险层） */
     uintptr_t kil = base + TERSAFE_KILL_OFF;
     int r3 = patch_insn(kil, AARCH64_RET);
-    forge_log_raw(r3 == 0
-        ? "[patch] kill@0x3233b8 -> RET OK\n"
-        : "[patch] kill@0x3233b8 -> RET FAILED\n");
+    ln = snprintf(logbuf, sizeof(logbuf), "[patch] kill@0x3233b8 r3=%d\n", r3);
+    if (ln > 0) hook_log(logbuf);
 }
 
 /* ---- P1: seccomp-bpf SIGSYS handler ---- */
