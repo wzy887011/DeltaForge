@@ -1,6 +1,6 @@
 // ============================================================
 // 法器: DeltaForge/cloud-agent/native/injector.c
-// 描述: ptrace 注入器 v3 — 栈内存代替mmap, 直接远程调用dlopen
+// 描述: ptrace 注入器 v4 — 自动解析 dlopen 所在库，正确计算目标地址
 //   ARM64 上无 mmap syscall, 改用目标进程栈存放路径字符串
 // 编译: clang -Os -Wall injector.c -o injector -ldl
 // 用法: ./injector <PID> /data/local/tmp/libforgehook.so
@@ -21,6 +21,14 @@
 #include <stdint.h>
 #include <signal.h>
 
+/* ── ARM64 pt_regs ── */
+struct user_pt_regs {
+    uint64_t regs[31];
+    uint64_t sp;
+    uint64_t pc;
+    uint64_t pstate;
+};
+
 static ssize_t pv_writev(pid_t pid, uint64_t addr, const void *buf, size_t len) {
     struct iovec local  = {(void *)buf, len};
     struct iovec remote = {(void *)(uintptr_t)addr, len};
@@ -37,29 +45,77 @@ static int ptrace_setregs(pid_t pid, struct user_pt_regs *regs) {
     return ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
 }
 
-static uint64_t find_base(pid_t pid, const char *module) {
+/* ── 在 maps 文件中找包含 addr 的 entry ──
+   返回: entry 的 start (base); 出参 name_buf 填完整路径 (如 "/apex/.../libdl.so") ── */
+static uint64_t find_containing_entry(const char *maps_path,
+                                       uint64_t addr,
+                                       char *name_out, size_t name_sz) {
+    FILE *f = fopen(maps_path, "r");
+    if (!f) { if (name_out) name_out[0] = '\0'; return 0; }
+
+    char line[1024];
+    uint64_t start, end;
+    char perms[8], rest[768];
+    if (name_out) name_out[0] = '\0';
+
+    while (fgets(line, sizeof(line), f)) {
+        int n = sscanf(line, "%llx-%llx %7s %*s %*s %*s %[^\n]",
+                       (unsigned long long *)&start,
+                       (unsigned long long *)&end, perms, rest);
+        if (n < 3) continue;
+        if (addr < start || addr >= end) continue;
+
+        if (name_out) {
+            char *p = strrchr(line, '/');
+            if (p) {
+                char *q = name_out;
+                while (*p && *p != '\n' && (size_t)(q - name_out) < name_sz - 1)
+                    *q++ = *p++;
+                *q = '\0';
+            }
+            if (!name_out[0]) {
+                char *b = strrchr(line, '[');
+                if (b) {
+                    char *q = name_out;
+                    while (*b && *b != '\n' && (size_t)(q - name_out) < name_sz - 1)
+                        *q++ = *b++;
+                    *q = '\0';
+                }
+            }
+        }
+        fclose(f);
+        return start;
+    }
+
+    fclose(f);
+    if (name_out) name_out[0] = '\0';
+    return 0;
+}
+
+/* ── 在 /proc/PID/maps 中找第一条匹配 library_name 的 r-xp entry ── */
+static uint64_t find_lib_base(pid_t pid, const char *lib_name) {
     char path[64], line[1024];
     snprintf(path, sizeof(path), "/proc/%d/maps", pid);
     FILE *f = fopen(path, "r");
     if (!f) return 0;
-    uint64_t base = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, module)) { base = strtoull(line, NULL, 16); break; }
-    }
-    fclose(f);
-    return base;
-}
 
-static uint64_t get_local_lib(const char *module) {
-    char line[1024];
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f) return 0;
-    uint64_t base = 0;
+    uint64_t best = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, module)) { base = strtoull(line, NULL, 16); break; }
+        if (!strstr(line, lib_name)) continue;
+        /* 优先 r-xp (代码段，是真正的 base) */
+        if (strstr(line, " r-xp ")) {
+            fclose(f);
+            return strtoull(line, NULL, 16);
+        }
+        /* 退而求其次: 有 x 权限的任意段 */
+        if (!best && strchr(line, 'x'))
+            best = strtoull(line, NULL, 16);
+        /* 最后的退路: 第一段匹配 */
+        if (!best)
+            best = strtoull(line, NULL, 16);
     }
     fclose(f);
-    return base;
+    return best;
 }
 
 int main(int argc, char **argv) {
@@ -74,14 +130,14 @@ int main(int argc, char **argv) {
 
     printf("[*] PID=%d SO=%s\n", pid, so);
 
-    /* ATTACH */
+    /* ── ATTACH ── */
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) != 0) {
         perror("ATTACH"); return 1;
     }
     int s; waitpid(pid, &s, 0);
     printf("[+] attached\n");
 
-    /* 保存寄存器，用栈内存放路径字符串 */
+    /* 保存寄存器 */
     struct user_pt_regs saved;
     if (ptrace_getregs(pid, &saved) != 0) {
         perror("getregs");
@@ -89,7 +145,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 路径字符串写到目标进程栈上 (SP - 0x400), 不用 mmap */
+    /* ── 路径字符串写到目标栈 ── */
     uint64_t str_addr = (saved.sp - 0x400) & ~0xFULL;
     printf("[*] 路径写入栈 0x%llx\n", (unsigned long long)str_addr);
     if (pv_writev(pid, str_addr, so, slen) != (ssize_t)slen) {
@@ -99,30 +155,59 @@ int main(int argc, char **argv) {
     }
     printf("[+] 路径已写入\n");
 
-    /* 解析目标 dlopen */
-    uint64_t local_linker = get_local_lib("linker64");
-    uint64_t target_linker = find_base(pid, "linker64");
-    if (!target_linker) target_linker = find_base(pid, "libdl.so");
-
+    /* ── 正确解析 dlopen ──
+       dlsym(RTLD_DEFAULT, "dlopen") 在 Android >= 7.0 上返回 libdl.so
+       中地址。不能假设它在 linker64 里。用 /proc/self/maps 定位它
+       落在哪个库 → 取该库文件名 → 在目标 /proc/PID/maps 找同名库 →
+       offset 计算目标 dlopen 地址。 ── */
     void *local_dlopen = dlsym(RTLD_DEFAULT, "dlopen");
-    if (!local_dlopen || !target_linker || !local_linker) {
-        fprintf(stderr, "[-] dlopen 解析失败\n");
+    if (!local_dlopen) {
+        fprintf(stderr, "[-] dlsym(dlopen) 本地失败\n");
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return 1;
     }
+    printf("[*] 本地 dlopen=0x%llx\n", (unsigned long long)local_dlopen);
 
-    uint64_t fn_dlopen = target_linker +
-        ((uint64_t)local_dlopen - local_linker);
-    printf("[*] dlopen=0x%llx\n", (unsigned long long)fn_dlopen);
+    /* 1. 在 /proc/self/maps 定位 dlopen 所在 entry */
+    char owner_full[256] = {0};
+    uint64_t local_base = find_containing_entry("/proc/self/maps",
+                                                  (uint64_t)local_dlopen,
+                                                  owner_full, sizeof(owner_full));
+    if (!local_base || !owner_full[0]) {
+        fprintf(stderr, "[-] 无法在 /proc/self/maps 定位 dlopen 所在库\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 1;
+    }
+    printf("[*] dlopen 在: %s (本地 base=0x%llx)\n",
+           owner_full, (unsigned long long)local_base);
 
-    /* 构造 shellcode:
-     * movz/movk x16 = fn_dlopen
-     * movz/movk x0 = str_addr
-     * movz x1, #2  (RTLD_NOW)
-     * movz x2, #0
-     * blr x16
-     * brk #0
-     */
+    /* 2. 取文件名部分，在目标 maps 中找同名库 */
+    char *lib_name = strrchr(owner_full, '/');
+    lib_name = lib_name ? lib_name + 1 : owner_full;
+    printf("[*] 目标中搜索: %s\n", lib_name);
+
+    uint64_t target_base = find_lib_base(pid, lib_name);
+    if (!target_base) {
+        fprintf(stderr, "[-] 在 /proc/%d/maps 找不到 %s\n", pid, lib_name);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 1;
+    }
+    printf("[*] 目标 %s base=0x%llx\n", lib_name, (unsigned long long)target_base);
+
+    /* 3. 正确计算 */
+    uint64_t offset = (uint64_t)local_dlopen - local_base;
+    uint64_t fn_dlopen = target_base + offset;
+    printf("[*] offset=0x%llx → 目标 dlopen=0x%llx\n",
+           (unsigned long long)offset, (unsigned long long)fn_dlopen);
+
+    /* ── 构造 shellcode ──
+       movz/movk x16 = fn_dlopen
+       movz/movk x0  = str_addr
+       movz x1, #2   (RTLD_NOW)
+       movz x2, #0
+       blr x16
+       brk #0
+    ── */
     uint32_t code[24];
     int n = 0;
 
@@ -145,14 +230,14 @@ int main(int argc, char **argv) {
         code[n++] = 0xF2E00000 | (((str_addr >> 48) & 0xFFFF) << 5);
 
     /* x1 = 2 (RTLD_NOW), x2 = 0 */
-    code[n++] = 0xD2800041; /* movz x1, #2 */
-    code[n++] = 0xD2800002; /* movz x2, #0 */
+    code[n++] = 0xD2800041;
+    code[n++] = 0xD2800002;
 
     /* blr x16; brk #0 */
     code[n++] = 0xD63F0200;
     code[n++] = 0xD4200000;
 
-    /* 写入 shellcode 到目标栈 */
+    /* ── 写 shellcode 到目标栈 ── */
     uint64_t sc_addr = (saved.sp - 0x300) & ~0xFULL;
     size_t clen = n * 4;
     if (pv_writev(pid, sc_addr, code, clen) != (ssize_t)clen) {
@@ -161,7 +246,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 修改 PC 指向 shellcode */
+    /* ── 修改 PC ── */
     struct user_pt_regs regs;
     memcpy(&regs, &saved, sizeof(regs));
     regs.pc = sc_addr;
@@ -171,6 +256,7 @@ int main(int argc, char **argv) {
     if (ptrace_setregs(pid, &regs) != 0) { perror("setregs"); return 1; }
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) { perror("cont"); return 1; }
 
+    /* ── 等待 brk trap ── */
     int status;
     if (waitpid(pid, &status, 0) == -1) { perror("wait"); return 1; }
 
@@ -184,15 +270,18 @@ int main(int argc, char **argv) {
         printf("[-] unexpected status: 0x%x\n", status);
     }
 
-    /* 恢复寄存器 */
+    /* ── 恢复寄存器并 detach ── */
     ptrace_setregs(pid, &saved);
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 
-    if (!handle) {
-        fprintf(stderr, "[-] dlopen 失败 (返回 NULL)\n");
+    /* 检查 handle: NULL 或 error range (> 0xfffffffffffff000) 均失败 */
+    if (!handle || (int64_t)handle < 0) {
+        fprintf(stderr, "[-] dlopen 失败 (handle=0x%llx)\n",
+                (unsigned long long)handle);
         return 1;
     }
 
-    printf("[+] 注入完成 — libforgehook.so handle=0x%llx\n", (unsigned long long)handle);
+    printf("[+] 注入完成 — libforgehook.so handle=0x%llx\n",
+           (unsigned long long)handle);
     return 0;
 }
