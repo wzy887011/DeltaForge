@@ -63,6 +63,7 @@
 #define ARM64_NR_NEWFSTATAT  79
 #define ARM64_NR_GETDENTS64  216
 #define ARM64_NR_OPENAT2     437
+#define ARM64_NR_FACCESSAT2  439
 
 struct sock_filter {
     uint16_t code;
@@ -488,6 +489,8 @@ static struct sock_filter g_bpf_prog[] = {
     {BPF_JMP|BPF_JEQ|BPF_K, 1, 0, ARM64_NR_READLINKAT},                 /* readlinkat → trap */
     {BPF_JMP|BPF_JEQ|BPF_K, 1, 0, ARM64_NR_NEWFSTATAT},                 /* newfstatat → trap */
     {BPF_JMP|BPF_JEQ|BPF_K, 0, 1, ARM64_NR_OPENAT2},                    /* openat2 → trap */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0, 1, ARM64_NR_GETDENTS64},                 /* getdents64 → trap */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0, 0, ARM64_NR_FACCESSAT2},                 /* faccessat2 → trap */
     {BPF_RET|BPF_K,        0, 0, SECCOMP_RET_TRAP},                      /* trap → SIGSYS */
     {BPF_RET|BPF_K,        0, 0, SECCOMP_RET_ALLOW},                     /* allow everything else */
 };
