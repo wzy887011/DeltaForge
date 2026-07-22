@@ -84,26 +84,94 @@ static void _hide_self_from_maps(void) {
     fclose(maps);
 }
 
-/* ---- chainload real Qimei (B1: read /data/local/tmp/chainload_path.txt) ---- */
+/* ---- chainload real Qimei (dladdr + /proc/self/maps fallback, raw syscalls for logging) ---- */
+static void forge_log_raw(const char *msg) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/data/local/tmp/forge.log",
+                          O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    size_t len = 0;
+    while (msg[len]) len++;
+    while (len) {
+        ssize_t n = (ssize_t)syscall(SYS_write, fd, msg, len);
+        if (n <= 0) break;
+        msg += n;
+        len -= (size_t)n;
+    }
+    syscall(SYS_close, fd);
+}
+
+static int dirname_join_real(const char *self_path, char *out, size_t out_sz) {
+    const char *slash = strrchr(self_path, '/');
+    if (!slash) return 0;
+    size_t dir_len = (size_t)(slash - self_path + 1);
+    const char *real_name = "libtdmqimei_real.so";
+    size_t real_len = 0;
+    while (real_name[real_len]) real_len++;
+    if (dir_len + real_len + 1 > out_sz) return 0;
+    for (size_t i = 0; i < dir_len; i++) out[i] = self_path[i];
+    for (size_t i = 0; i <= real_len; i++) out[dir_len + i] = real_name[i];
+    return 1;
+}
+
+static int find_self_from_maps(char *out, size_t out_sz) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    if (fd < 0) return 0;
+    char buf[32768];
+    ssize_t n = (ssize_t)syscall(SYS_read, fd, buf, sizeof(buf) - 1);
+    syscall(SYS_close, fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    const char *needle = "libtdmqimei";
+    char *p = strstr(buf, needle);
+    if (!p) return 0;
+    char *line = p;
+    while (line > buf && line[-1] != '\n') line--;
+    char *path_start = line;
+    while (*path_start == ' ' || (*path_start >= '0' && *path_start <= '9') ||
+           *path_start == '-') {
+        char *dash = strchr(path_start, '-');
+        if (!dash) break;
+        path_start = dash + 1;
+        while (*path_start == ' ') path_start++;
+    }
+    char *real_path = strchr(path_start, '/');
+    if (!real_path || real_path > p) return 0;
+    char *end = p + 12;
+    if (!strstr(p, needle)) return 0;
+    size_t len = (size_t)(end - real_path);
+    if (len + 1 > out_sz) return 0;
+    for (size_t i = 0; i < len; i++) out[i] = real_path[i];
+    out[len] = '\0';
+    return 1;
+}
+
 __attribute__((constructor(50)))
 static void _chainload_real_qimei(void) {
-    FILE *fp=fopen("/data/local/tmp/chainload_path.txt","r");
-    if(!fp){
-        FILE *log=fopen("/data/local/tmp/forge.log","a");
-        if(log){fprintf(log,"[!] chainload: chainload_path.txt not found\n");fflush(log);fclose(log);}
+    char real_path[1024];
+    char self_path[1024];
+    Dl_info info;
+    real_path[0] = '\0';
+    self_path[0] = '\0';
+    if (dladdr((void *)&_chainload_real_qimei, &info) &&
+        info.dli_fname &&
+        dirname_join_real(info.dli_fname, real_path, sizeof(real_path))) {
+        forge_log_raw("chainload: dladdr OK\n");
+    } else if (find_self_from_maps(self_path, sizeof(self_path)) &&
+               dirname_join_real(self_path, real_path, sizeof(real_path))) {
+        forge_log_raw("chainload: /proc/self/maps OK\n");
+    } else {
+        forge_log_raw("chainload: FAILED to resolve own path\n");
         return;
     }
-    char lib_path[512]={0};
-    fgets(lib_path,sizeof(lib_path),fp);
-    fclose(fp);
-    lib_path[strcspn(lib_path,"\r\n")]=0;
-    void *h=dlopen(lib_path,RTLD_NOW|RTLD_GLOBAL);
-    FILE *log=fopen("/data/local/tmp/forge.log","a");
-    if(log){
-        if(h)fprintf(log,"[+] chainload: %s (handle=%p)\n",lib_path,h);
-        else fprintf(log,"[!] chainload: FAILED %s (%s)\n",lib_path,dlerror());
-        fflush(log);fclose(log);
+    dlerror();
+    void *h = dlopen(real_path, RTLD_NOW | RTLD_GLOBAL);
+    if (!h) {
+        forge_log_raw("chainload: dlopen FAILED: ");
+        forge_log_raw(dlerror());
+        forge_log_raw("\n");
+        return;
     }
+    forge_log_raw("chainload: dlopen SUCCESS\n");
 }
 
 /* ---- fake data tables ---- */
