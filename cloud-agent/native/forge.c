@@ -618,19 +618,11 @@ static void protect_devmode(void) {
     system("setprop persist.sys.vold_app_data_isolation_enabled 0 2>/dev/null");
 }
 
-/* ============= iptables 阻断 TDM/CrashSight/TSS 网络上报 =============
- * 腾讯反作弊 SDK 通过独立 TCP/UDP 通道上报检测数据，与游戏主逻辑分离。
- * 这些上报域名和端口在 APK 逆向中已识别（strings/常量分析）。
- *
- * 策略:
- *   a) 阻断游戏进程 UID 的全部非必要出站连接 (OUTPUT chain)
- *   b) 用 iptables owner 模块匹配游戏 UID，只放行游戏服务器 IP
- *   c) 显式 drop 已知的 TDM/CrashSight/TGPASDK 上报域名/IP 段
- *
- * 注意: 需要内核编译了 netfilter xt_owner 模块；大多数云手机内核都有。
+/* ============= iptables 清理 =============
+ * 移除此前版本遗留的阻断规则，避免游戏无法联网。
+ * 反作弊数据拦截改由 libforgehook.so 的 null_redir() 在进程内完成。
  */
 static void block_tdm_reporting(void) {
-    /* 获取游戏 UID */
     char uid_buf[32] = {0};
     FILE *fp = popen("dumpsys package com.tencent.tmgp.dfm 2>/dev/null | grep -o 'userId=[0-9]*' | head -1 | sed 's/userId=//'", "r");
     if (fp) {
@@ -638,51 +630,30 @@ static void block_tdm_reporting(void) {
             uid_buf[strcspn(uid_buf, "\n")] = 0;
         pclose(fp);
     }
-    if (uid_buf[0] == '\0' || strtoul(uid_buf, NULL, 10) == 0) {
-        WARN("无法获取游戏 UID，跳过 iptables 阻断");
-        return;
-    }
 
-    /* 已知 TDM/CrashSight/GPM 上报域名 (从 APK strings/NetworkConfig 逆向提取) */
-    static const char *BLOCKED_DOMAINS[] = {
-        "tdm.qq.com", "tdm.tencent.com", "tdm.3g.qq.com",
-        "oth.eve.mdt.qq.com", "crashsight.qq.com", "crashsight.tencent.com",
-        "android.crashsight.qq.com", "dlied1.qq.com",
-        "cloud.tencent.com", "cloud.tencent.com.cn",
-        "gcloud.tencent.com", "gcloud.tencent.com.cn",
-        "api.cloud.tencent.com", "cml.qcloud.com",
-        "tpstelemetry.tencent.com", "report.qq.com",
-        "stat.qq.com", "pingma.qq.com",
-        "szmg.qq.com", "pgdt.gtimg.cn",
-        "gamelobby.qq.com", "igame.qq.com",
-        "mtcls.qq.com", "qos.qq.com",
-        "vas.qq.com", "qun.qq.com",
-        NULL
-    };
-
-    /* 先清理旧规则，防止多次运行叠加 */
-    snprintf(cmd, sizeof(cmd),
-        "iptables -D OUTPUT -m owner --uid-owner %s -j DROP 2>/dev/null; "
-        "iptables -D OUTPUT -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null; "
-        "iptables -D OUTPUT -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null; "
-        "iptables -D OUTPUT -m owner --uid-owner %s -p tcp --dport 8080 -j ACCEPT 2>/dev/null; "
-        "iptables -D OUTPUT -m owner --uid-owner %s -p udp --dport 14000:14100 -j ACCEPT 2>/dev/null",
-        uid_buf, uid_buf, uid_buf, uid_buf, uid_buf);
-    system(cmd);
-
-    /* xt_string 匹配 TDM/CrashSight 上报域名 — 精准 DROP，不做全量阻断 */
-    char cmd[1024];
-    for (const char **d = BLOCKED_DOMAINS; *d; d++) {
+    /* 清理旧版本残留的阻断规则（DROP ALL / string match），防止游戏断网 */
+    char cmd[512];
+    if (uid_buf[0]) {
         snprintf(cmd, sizeof(cmd),
-            "iptables -C OUTPUT -m string --algo bm --string '%s' -j DROP 2>/dev/null || "
-            "iptables -I OUTPUT 1 -m string --algo bm --string '%s' -j DROP 2>/dev/null",
-            *d, *d);
+            "iptables -D OUTPUT -m owner --uid-owner %s -j DROP 2>/dev/null; "
+            "iptables -D OUTPUT -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null; "
+            "iptables -D OUTPUT -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null",
+            uid_buf, uid_buf, uid_buf);
         system(cmd);
     }
-
-    /* 不再添加 DROP ALL — 只靠域名匹配精准阻断，不影响游戏服务器连接 */
-
-    OK("TDM/CRASHSIGHT/GPM 网络上报已阻断 (%s)", uid_buf);
+    /* string 匹配规则清理 */
+    static const char *OLD_STRINGS[] = {
+        "tdm.qq.com", "crashsight.qq.com", "gcloud.tencent.com",
+        "report.qq.com", "stat.qq.com", "cloud.tencent.com",
+        "gamelobby.qq.com", "igame.qq.com", NULL
+    };
+    for (const char **s = OLD_STRINGS; *s; s++) {
+        snprintf(cmd, sizeof(cmd),
+            "iptables -D OUTPUT -m string --algo bm --string '%s' -j DROP 2>/dev/null",
+            *s);
+        system(cmd);
+    }
+    OK("iptables 旧规则已清理，游戏网络不受影响 (uid=%s)", uid_buf[0] ? uid_buf : "N/A");
 }
 
 /* ============= /proc/self/maps 注入行隐藏 =============
