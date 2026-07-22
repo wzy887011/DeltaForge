@@ -185,14 +185,15 @@ static const char *kScanDirs[] = {
     APP_DATA "/files/qm",
     APP_DATA "/files/ano_tmp",
     APP_DATA "/files/tdm_tmp",
-    APP_DATA "/files/dg-patch",
+    /* dg-patch 移除：可能存游戏增量补丁，不扫描 */
     APP_DATA "/shared_prefs",
     APP_DATA "/databases",
     NULL
 };
 static const char *kPatternSubstrings[] = { "tdm", "hawk", "qv1", "lcc", "qc_", "qm_", NULL };
 static const char *kQmDir = APP_DATA "/files/qm";
-static const char *kQmPrefixes[] = { "cm_", "QV", "q", "lc", "qm", NULL };
+/* "q"/"lc"/"qm" 前缀过短/过宽已收紧，避免误删游戏合法文件 */
+static const char *kQmPrefixes[] = { "cm_", "QV1", "lccNo", "qm_", NULL };
 
 /* ============= qm 目录匹配规则 =============
  * 原规则只匹配 cm_* 前缀，但 QimeiSDK 在文件中写入 QV1* / lccNoCN / q* 等前缀
