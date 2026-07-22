@@ -906,6 +906,38 @@ static int do_launch(void) {
         unlink(APP_DATA "/shared_prefs/qm_global_sp.xml");
         OK("二次文件清理完成");
     }
+    /* B5: 后台线程每30秒重复清理 */
+    if (pid > 0) {
+        pid_t cleaner = fork();
+        if (cleaner == 0) {
+            prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
+            while (1) {
+                sleep(30);
+                pid_t cp = get_pid_by_name(TARGET_PKG);
+                if (cp <= 0) _exit(0);
+                unlink(APP_DATA "/files/GPMSDK.mmap3");
+                unlink(APP_DATA "/shared_prefs/GCloudCoreSP.xml");
+                unlink(APP_DATA "/files/tdm_track.dat");
+                unlink(APP_DATA "/shared_prefs/qm_global_sp.xml");
+                for (int i = 0; kPurgeDirs[i]; i++) purge_dir_contents(kPurgeDirs[i]);
+                for (int i = 0; kPreciseDeleteFiles[i]; i++) unlink(kPreciseDeleteFiles[i]);
+                for (int i = 0; kExtraDeleteFiles[i]; i++) unlink(kExtraDeleteFiles[i]);
+                DIR *d = opendir(kQmDir);
+                if (d) {
+                    struct dirent *ent;
+                    while ((ent = readdir(d)) != NULL) {
+                        if (match_qm_prefix(ent->d_name)) {
+                            char full[4096]; snprintf(full, sizeof(full), "%s/%s", kQmDir, ent->d_name); unlink(full);
+                        }
+                    }
+                    closedir(d);
+                }
+                for (int i = 0; kScanDirs[i]; i++)
+                    for (int j = 0; kPatternSubstrings[j]; j++)
+                        delete_matching(kScanDirs[i], kPatternSubstrings[j]);
+            }
+        }
+    }
     return rc;
 }
 
