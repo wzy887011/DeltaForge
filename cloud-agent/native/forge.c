@@ -660,10 +660,19 @@ static void block_tdm_reporting(void) {
         NULL
     };
 
-    /* 显式 DROP 这些域的 DNS 解析结果 (需要先 nslookup 拿 IP 段) */
+    /* 先清理旧规则，防止多次运行叠加 */
+    snprintf(cmd, sizeof(cmd),
+        "iptables -D OUTPUT -m owner --uid-owner %s -j DROP 2>/dev/null; "
+        "iptables -D OUTPUT -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null; "
+        "iptables -D OUTPUT -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null; "
+        "iptables -D OUTPUT -m owner --uid-owner %s -p tcp --dport 8080 -j ACCEPT 2>/dev/null; "
+        "iptables -D OUTPUT -m owner --uid-owner %s -p udp --dport 14000:14100 -j ACCEPT 2>/dev/null",
+        uid_buf, uid_buf, uid_buf, uid_buf, uid_buf);
+    system(cmd);
+
+    /* xt_string 匹配 TDM/CrashSight 上报域名 — 精准 DROP，不做全量阻断 */
     char cmd[1024];
     for (const char **d = BLOCKED_DOMAINS; *d; d++) {
-        /* 用 iptables string 模块匹配域名 (kernel xt_string 需要启用) */
         snprintf(cmd, sizeof(cmd),
             "iptables -C OUTPUT -m string --algo bm --string '%s' -j DROP 2>/dev/null || "
             "iptables -I OUTPUT 1 -m string --algo bm --string '%s' -j DROP 2>/dev/null",
@@ -671,38 +680,7 @@ static void block_tdm_reporting(void) {
         system(cmd);
     }
 
-    /* xt_owner: 先插入 ACCEPT 规则，最后插入 DROP — 顺序决定匹配优先级 */
-    snprintf(cmd, sizeof(cmd),
-        "iptables -C OUTPUT -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null || "
-        "iptables -I OUTPUT 1 -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null",
-        uid_buf, uid_buf);
-    system(cmd);
-
-    snprintf(cmd, sizeof(cmd),
-        "iptables -C OUTPUT -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null || "
-        "iptables -I OUTPUT 2 -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null",
-        uid_buf, uid_buf);
-    system(cmd);
-
-    snprintf(cmd, sizeof(cmd),
-        "iptables -C OUTPUT -m owner --uid-owner %s -p tcp --dport 8080 -j ACCEPT 2>/dev/null || "
-        "iptables -I OUTPUT 3 -m owner --uid-owner %s -p tcp --dport 8080 -j ACCEPT 2>/dev/null",
-        uid_buf, uid_buf);
-    system(cmd);
-
-    /* 放行 UDP 14000-14100 游戏实时帧数据 */
-    snprintf(cmd, sizeof(cmd),
-        "iptables -C OUTPUT -m owner --uid-owner %s -p udp --dport 14000:14100 -j ACCEPT 2>/dev/null || "
-        "iptables -I OUTPUT 4 -m owner --uid-owner %s -p udp --dport 14000:14100 -j ACCEPT 2>/dev/null",
-        uid_buf, uid_buf);
-    system(cmd);
-
-    /* DROP 放最后，确保 ACCEPT 先匹配 */
-    snprintf(cmd, sizeof(cmd),
-        "iptables -C OUTPUT -m owner --uid-owner %s -j DROP 2>/dev/null || "
-        "iptables -I OUTPUT 5 -m owner --uid-owner %s -j DROP 2>/dev/null",
-        uid_buf, uid_buf);
-    system(cmd);
+    /* 不再添加 DROP ALL — 只靠域名匹配精准阻断，不影响游戏服务器连接 */
 
     OK("TDM/CRASHSIGHT/GPM 网络上报已阻断 (%s)", uid_buf);
 }
