@@ -29,7 +29,7 @@
 #define TARGET_PKG   "com.tencent.tmgp.dfm"
 #define APP_DATA     "/data/data/" TARGET_PKG
 #define MON_LOG      "/data/local/tmp/forge_monitor.log"
-#define AUDIT_LOG    "/data/local/tmp/forge_audit.log"
+#define AUDIT_LOG    "/data/data/com.tencent.tmgp.dfm/files/forge_audit.log"
 #define POLL_MS      500
 
 static const char *WATCH_DIRS[] = {

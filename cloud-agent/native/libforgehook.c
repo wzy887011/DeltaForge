@@ -96,8 +96,8 @@ static void forge_audit(const char *action, const char *path) {
         !strstr(path, "/sdcard/Tencent"))
         return;
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
-        "/data/local/tmp/forge_audit.log",
-        O_WRONLY | O_CREAT | O_APPEND, 0600);
+        "/data/data/com.tencent.tmgp.dfm/files/forge_audit.log",
+        O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd < 0) return;
     char buf[640];
     int n = snprintf(buf, sizeof(buf), "[GAP][%s] %s\n", action, path);
@@ -290,6 +290,36 @@ static const char FAKE_INPUT_DEVS[]=
 "H: Handlers=event2\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0 0 0 0 0 0 0\n"
 "B: ABS=6618000 0\n";
 
+/* ---- null redirect list — 反作弊数据文件重定向到匿名内存，写入不落盘 ---- */
+static const char *NULL_REDIRECT[]={
+    "crashSight_db_",      /* CrashSight 崩溃数据库 */
+    "tgpa.xml",            /* TGPA 检测状态 */
+    "tdm.xml",             /* TDM 模块状态 */
+    "GCloudCoreSP.xml",    /* GCloud SDK 共享偏好 */
+    "ace_shell_db.dat",    /* ACE shell 数据库 */
+    "ace_cache_db.dat",    /* ACE 缓存数据库 */
+    "tersafe.update",      /* TerSafe 更新数据 */
+    "tdm_track.dat",       /* TDM 追踪数据 */
+    "GPMSDK.mmap3",        /* GPM SDK mmap */
+    "mmkvlite_log_app_state.mmkv", /* App 状态日志 */
+    "sys_log_",            /* CrashSight 系统日志 */
+    "jni_log_",            /* CrashSight JNI 日志 */
+    NULL
+};
+
+static int null_redir(const char *p){
+    if(!p) return 0;
+    for(const char **n=NULL_REDIRECT;*n;n++)
+        if(strstr(p,*n)) return 1;
+    return 0;
+}
+
+/* 返回匿名内存 fd：读写均在内存中，不落盘 */
+static int memfd_anon(void){
+    int fd=(int)syscall(__NR_memfd_create,"ac",0);
+    return fd; /* 失败返回 -1，调用方 fallback 到 /dev/null */
+}
+
 /* ---- file routing table ---- */
 typedef struct {const char *pat;const char *data;size_t len;}fake_file_t;
 static const fake_file_t FAKE_FILES[]={
@@ -434,9 +464,10 @@ int open(const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(hidden(p)){errno=ENOENT;return -1;}
+    /* 反作弊数据文件重定向到匿名内存 — 写入不落盘 */
+    if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     const fake_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
-    /* 记录未被 fake/hidden 覆盖的访问 */
     if(!f&&!hidden(p)) forge_audit("open",p);
     return _open(p,flags,m);
 }
@@ -445,6 +476,7 @@ int openat(int dir,const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(hidden(p)){errno=ENOENT;return -1;}
+    if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     const fake_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
     if(!f&&!hidden(p)) forge_audit("openat",p);
@@ -454,6 +486,11 @@ int openat(int dir,const char *p,int flags,...){
 FILE *fopen(const char *p,const char *m){
     INIT();
     if(hidden(p)){errno=ENOENT;return NULL;}
+    if(null_redir(p)){
+        /* 写入模式 → /dev/null；读取模式 → 空内存 */
+        if(m[0]=='w'||m[0]=='a') return _fopen("/dev/null",m);
+        static char nb[64]={0}; FILE *fp=fmemopen(nb,sizeof(nb),"r"); if(fp) return fp;
+    }
     const fake_file_t *f=match(p);
     if(f&&m[0]=='r'){FILE *fp=fmemopen((void*)f->data,f->len,m);if(fp)return fp;}
     if(!f&&!hidden(p)) forge_audit("fopen",p);
