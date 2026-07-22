@@ -388,7 +388,7 @@ static pid_t get_pid_by_name(const char *name) {
         char buf[256] = {0};
         read(fd, buf, sizeof(buf)-1);
         close(fd);
-        if (strcmp(buf, name) == 0) { r = (pid_t)atoi(ent->d_name); break; }
+        if (strstr(buf, name)) { r = (pid_t)atoi(ent->d_name); break; }
     }
     closedir(d);
     return r;
