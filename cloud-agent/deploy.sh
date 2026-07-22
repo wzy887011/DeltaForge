@@ -23,11 +23,14 @@ echo "[DeltaForge] 生成部署子脚本..."
 DEPLOY_TMP="$HOME/df_deploy_tmp.sh"
 cat > "$DEPLOY_TMP" << EOF
 #!/bin/sh
-cp $NATIVE/forge $TMP/forge
+# 先停止正在运行的 forge，避免 "Text file busy"
+pkill -f '$TMP/forge' 2>/dev/null; sleep 1
+killall forge 2>/dev/null; sleep 0.5
+cp $NATIVE/forge           $TMP/forge
 cp $NATIVE/libforgehook.so $TMP/libforgehook.so
-cp $NATIVE/forge_monitor $TMP/forge_monitor
-cp $NATIVE/injector $TMP/injector
-cp $NATIVE/touch_injector $TMP/touch_injector
+cp $NATIVE/forge_monitor   $TMP/forge_monitor
+cp $NATIVE/injector        $TMP/injector
+cp $NATIVE/touch_injector  $TMP/touch_injector
 chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector
 chmod 644 $TMP/libforgehook.so
 echo "[+] 部署完成"
