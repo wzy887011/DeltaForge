@@ -928,7 +928,7 @@ static int do_launch(void) {
             /* 以下是真正的清理 daemon */
             prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
             while (1) {
-                sleep(30);
+                sleep(5);  /* 5s 间隔：快速响应 ace_shell_db.dat.tmp 等重建文件 */
                 pid_t cp = get_pid_by_name(TARGET_PKG);
                 if (cp <= 0) _exit(0);
                 unlink(APP_DATA "/files/GPMSDK.mmap3");

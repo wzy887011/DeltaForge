@@ -1,120 +1,39 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# ============================================================
-# DeltaForge deploy.sh v5.0 — Termux 适配版
-# 核心设计: su -c 每次只执行单一脚本路径, 避免分号/管道截断
-# ============================================================
+# DeltaForge v5.5 — Termux 一键编译 + 部署脚本
+# 用法: sh cloud-agent/deploy.sh [build]
+
 set -e
-cd "$HOME/DeltaForge" 2>/dev/null || { echo "[-] cd DeltaForge FAIL"; exit 1; }
 
-# 纯文本, 无 ANSI — Termux 对颜色码处理有 bug
-ok()  { echo "[+] $*"; }
-err() { echo "[-] $*"; }
-warn(){ echo "[!] $*"; }
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+NATIVE="$SCRIPT_DIR/native"
+TMP=/data/local/tmp
 
-NATIVE_DIR="$HOME/DeltaForge/cloud-agent/native"
-SCRIPTS_DIR="$HOME/DeltaForge/cloud-agent"
-TARGET_DIR="/data/local/tmp"
-CMD="${1:-build}"
+echo "[DeltaForge] 编译开始..."
+cd "$NATIVE"
 
-case "$CMD" in
-    clean)
-        ok "clean..."
-        rm -f "$NATIVE_DIR"/forge "$NATIVE_DIR"/libforgehook.so \
-              "$NATIVE_DIR"/touch_injector "$NATIVE_DIR"/injector
-        ok "done"
-        ;;
+clang -pie -Os -Wall forge.c -o forge && echo "[+] forge"
+clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl && echo "[+] libforgehook.so"
+clang -pie -Os -Wall forge_monitor.c -o forge_monitor && echo "[+] forge_monitor"
+clang -pie -Os -Wall injector.c -o injector -ldl && echo "[+] injector"
+clang -pie -Os -Wall touch_injector.c -o touch_injector && echo "[+] touch_injector"
+echo "[+] 编译完成"
+ls -lh forge libforgehook.so forge_monitor injector touch_injector
 
-    build)
-        ok "=== DeltaForge build v5.0 ==="
-        cd "$NATIVE_DIR"
+echo "[DeltaForge] 生成部署子脚本..."
+DEPLOY_TMP="$HOME/df_deploy_tmp.sh"
+cat > "$DEPLOY_TMP" << EOF
+#!/bin/sh
+cp $NATIVE/forge $TMP/forge
+cp $NATIVE/libforgehook.so $TMP/libforgehook.so
+cp $NATIVE/forge_monitor $TMP/forge_monitor
+cp $NATIVE/injector $TMP/injector
+cp $NATIVE/touch_injector $TMP/touch_injector
+chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector
+chmod 644 $TMP/libforgehook.so
+echo "[+] 部署完成"
+ls -lh $TMP/forge $TMP/libforgehook.so $TMP/forge_monitor
+EOF
 
-        ok "compile libforgehook.so..."
-        clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl 2>&1 | grep -v "warning" || true
-        [ -f libforgehook.so ] || { err "FAIL libforgehook.so"; exit 1; }
-        ok "  ok"
-
-        ok "compile forge..."
-        clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge 2>&1 | grep -v "warning" || true
-        [ -f forge ] || { err "FAIL forge"; exit 1; }
-        ok "  ok"
-
-        ok "compile injector..."
-        clang -Os -Wall injector.c -o injector -ldl 2>&1 | grep -v "warning" || true
-        [ -f injector ] || { err "FAIL injector"; exit 1; }
-        ok "  ok"
-
-        ok "compile touch_injector..."
-        clang -Os -Wall touch_injector.c -o touch_injector -lm 2>&1 | grep -v "warning" || true
-        [ -f touch_injector ] && ok "  ok" || warn "  skipped (optional)"
-
-        ok "build done"
-
-        # deploy via root script (single su -c invocation)
-        ok "deploy..."
-        DEPLOY_SCRIPT="$SCRIPTS_DIR/df-deploy-root.sh"
-        if [ -f "$DEPLOY_SCRIPT" ]; then
-            su -c "sh $DEPLOY_SCRIPT" || { err "deploy FAIL"; exit 1; }
-        else
-            su -c "cp $NATIVE_DIR/forge $TARGET_DIR/forge"
-            su -c "cp $NATIVE_DIR/libforgehook.so $TARGET_DIR/libforgehook.so"
-            su -c "cp $NATIVE_DIR/injector $TARGET_DIR/injector"
-            su -c "chmod 755 $TARGET_DIR/forge $TARGET_DIR/libforgehook.so $TARGET_DIR/injector"
-        fi
-        ok "deploy done"
-
-        # hijack via root script
-        ok "hijack..."
-        HIJACK_SCRIPT="$SCRIPTS_DIR/df-hijack-root.sh"
-        if [ -f "$HIJACK_SCRIPT" ]; then
-            su -c "sh $HIJACK_SCRIPT" || warn "hijack FAIL: start game once then retry build"
-        fi
-
-        ok "=== build complete ==="
-        echo "  next: su -c /data/local/tmp/forge -l"
-        ;;
-
-    full)
-        ok "=== DeltaForge full v5.0 ==="
-        ok "Step 1: git pull..."
-        git pull origin master 2>&1 | tail -3 || warn "git pull FAIL"
-
-        ok "Step 2: build..."
-        sh "$0" build
-
-        ok "Step 3: verify..."
-        VERIFY_SCRIPT="$SCRIPTS_DIR/../magisk/system/bin/forge-check.sh"
-        su -c "sh $VERIFY_SCRIPT" 2>&1 | tail -8 || true
-
-        ok "Step 4: daemon..."
-        su -c "nohup $TARGET_DIR/forge -d > /dev/null 2>&1 &"
-        sleep 2
-        su -c "ss -tlnp" 2>/dev/null | grep -q 9510 && ok "daemon TCP 9510 OK" || warn "daemon check"
-        ok "=== full deploy done ==="
-        echo "  next: su -c /data/local/tmp/forge -l"
-        ;;
-
-    diagnose)
-        ok "=== diagnose ==="
-        DIAG_SCRIPT="$SCRIPTS_DIR/df-diagnose-root.sh"
-        su -c "sh $DIAG_SCRIPT"
-        ;;
-
-    status)
-        echo "=== status ==="
-        echo "--- binaries ---"
-        ls -lh "$TARGET_DIR"/forge "$TARGET_DIR"/libforgehook.so "$TARGET_DIR"/injector 2>/dev/null || warn "missing"
-        echo "--- daemon ---"
-        su -c "ss -tlnp" 2>/dev/null | grep 9510 || warn "daemon offline"
-        echo "--- game ---"
-        su -c "pidof com.tencent.tmgp.dfm" 2>/dev/null || warn "game offline"
-        ;;
-
-    *)
-        echo "usage: sh cloud-agent/deploy.sh [build|full|diagnose|status|clean]"
-        echo "  build    - compile + deploy + hijack"
-        echo "  full     - git pull + build + verify + daemon"
-        echo "  diagnose - collect env + bg logcat"
-        echo "  status   - quick state check"
-        echo "  clean    - remove compiled binaries"
-        ;;
-esac
+echo "[DeltaForge] 以 root 身份部署到 $TMP ..."
+su -c "sh $DEPLOY_TMP"
+echo "[DeltaForge] 全部完成，运行: su -c '/data/local/tmp/forge -l'"
