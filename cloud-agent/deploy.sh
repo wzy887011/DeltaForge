@@ -12,6 +12,10 @@ ok()  { echo "${GREEN}[+]${NC} $*"; }
 err() { echo "${RED}[-]${NC} $*"; }
 warn(){ echo "${YELLOW}[!]${NC} $*"; }
 
+# 防止 ANSI 颜色码异常后终端 echo 失效
+_cleanup() { stty echo 2>/dev/null; printf '\033[0m'; }
+trap _cleanup EXIT
+
 CMD="${1:-full}"
 
 case "$CMD" in

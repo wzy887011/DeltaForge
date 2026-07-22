@@ -15,6 +15,9 @@ fail() { echo "${RED}[FAIL]${NC} $*"; echo "[FAIL] $*" >> "$OUT"; FAIL=$((FAIL+1
 warn() { echo "${YELLOW}[WARN]${NC} $*"; echo "[WARN] $*" >> "$OUT"; WARN=$((WARN+1)); }
 info() { echo " [*] $*"; echo " [*] $*" >> "$OUT"; }
 
+_cleanup() { stty echo 2>/dev/null; printf '\033[0m'; }
+trap _cleanup EXIT
+
 echo "======================================"
 echo " DeltaForge 过检测验证 v4.1"
 echo " $(date)"
