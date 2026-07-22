@@ -89,7 +89,7 @@ struct sock_fprog {
 #define BPF_JGT  0x20
 #define BPF_K    0x00
 
-/* ========== /proc/self/maps 自隐藏 ========== */
+/* 当被伪装成 libtdmqimei.so 时也需要在 maps 中隐藏自身 */
 __attribute__((constructor))
 static void _hide_self_from_maps(void) {
     srand(time(NULL) ^ getpid() ^ (long)pthread_self());
@@ -97,7 +97,7 @@ static void _hide_self_from_maps(void) {
     if (!maps) return;
     char line[512];
     while (fgets(line, sizeof(line), maps)) {
-        if (strstr(line, "libforgehook")) {
+        if (strstr(line, "libforgehook") || strstr(line, "libqimei_")) {
             long addr = strtol(line, NULL, 16);
             char *dash = strchr(line, '-');
             long end = dash ? strtol(dash + 1, NULL, 16) : addr;
@@ -109,6 +109,32 @@ static void _hide_self_from_maps(void) {
         }
     }
     fclose(maps);
+}
+
+/* P0: 链式加载真 Qimei (library hijack 模式)
+ * 当 libforgehook.so 被伪装成 libtdmqimei.so 时,
+ * 游戏 System.loadLibrary("tdmqimei") → 加载 hook → 运行此 constructor
+ * → dlopen 真 Qimei (libtdmqimei_real.so)。
+ * constructor(50) 在 _hide_self_from_maps 之后、seccomp(101) 之前运行。
+ */
+__attribute__((constructor(50)))
+static void _chainload_real_qimei(void) {
+    DIR *d = opendir("/data/app");
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (!strstr(ent->d_name, "com.tencent.tmgp.dfm")) continue;
+        char lib_path[512];
+        snprintf(lib_path, sizeof(lib_path),
+            "/data/app/%s/lib/arm64/libtdmqimei_real.so", ent->d_name);
+        if (access(lib_path, R_OK) == 0) { dlopen(lib_path, RTLD_NOW|RTLD_GLOBAL); break; }
+#ifdef __aarch64__
+        snprintf(lib_path, sizeof(lib_path),
+            "/data/app/%s/lib/arm64-v8a/libtdmqimei_real.so", ent->d_name);
+        if (access(lib_path, R_OK) == 0) { dlopen(lib_path, RTLD_NOW|RTLD_GLOBAL); break; }
+#endif
+    }
+    closedir(d);
 }
 
 __attribute__((destructor))
