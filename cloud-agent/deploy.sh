@@ -1,13 +1,20 @@
 #!/system/bin/sh
 # ============================================================
-# DeltaForge deploy.sh — 云手机端一键编译+部署+启动 v4.2
+# DeltaForge deploy.sh — 云手机端一键编译+部署+启动 v4.3
 # 用法: cd ~/DeltaForge && sh cloud-agent/deploy.sh
 # ============================================================
 
 set -e
+
+# Termux 对 ANSI 转义码处理有 bug, 自动检测并禁用颜色
+if [ -n "$TERMUX_VERSION" ] || [ -d /data/data/com.termux ]; then
+    GREEN=''; RED=''; YELLOW=''; NC=''
+else
+    GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; NC='\033[0m'
+fi
+
 NATIVE_DIR="$HOME/DeltaForge/cloud-agent/native"
 TARGET_DIR="/data/local/tmp"
-GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; NC='\033[0m'
 ok()  { echo "${GREEN}[+]${NC} $*"; }
 err() { echo "${RED}[-]${NC} $*"; }
 warn(){ echo "${YELLOW}[!]${NC} $*"; }
@@ -63,6 +70,22 @@ case "$CMD" in
         fi
 
         ok "编译完成"
+
+        # Step 2.5: 自动安装 library hijack (编译后自动替换游戏 Qimei SDK)
+        GAME_LIB=$(find /data/app -type f -name "libtdmqimei.so" 2>/dev/null | head -1)
+        if [ -n "$GAME_LIB" ]; then
+            GAME_LIB_DIR=$(dirname "$GAME_LIB")
+            if [ ! -f "${GAME_LIB_DIR}/libtdmqimei_real.so" ]; then
+                ok "hijack: 首次备份 libtdmqimei.so"
+                cp "$GAME_LIB" "${GAME_LIB_DIR}/libtdmqimei_real.so"
+                chmod 644 "${GAME_LIB_DIR}/libtdmqimei_real.so"
+            fi
+            cp "$NATIVE_DIR/libforgehook.so" "$GAME_LIB"
+            chmod 644 "$GAME_LIB"
+            ok "hijack: libforgehook.so → libtdmqimei.so 已替换"
+        else
+            warn "hijack: 未找到游戏 libtdmqimei.so, 跳过库劫持 (ptrace 兜底)"
+        fi
         ;;
     status)
         echo "=== DeltaForge 状态 ==="
