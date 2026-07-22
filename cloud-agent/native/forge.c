@@ -882,7 +882,6 @@ static int do_launch(void) {
     do_prepare();
     start_logcat();
     start_game();
-    /* ptrace 注入 libforgehook.so — 替代不生效的 LD_PRELOAD wrap */
     pid_t pid = 0;
     for (int i = 0; i < 300; i++) {
         pid = get_pid_by_name(TARGET_PKG);
@@ -890,16 +889,15 @@ static int do_launch(void) {
         usleep(100000);
     }
     if (pid) {
-        usleep(500000); /* 等 ART 初始化完成后再注入 */
+        usleep(500000);
         inject_hook(pid);
     }
+    /* hijack 模式下 libforgehook.so 已随 Qimei 自动加载, ptrace 注入是兜底 */
     int rc = patch_game_process();
-    /* 补丁成功后隐藏 maps 注入痕迹 */
     if (rc == 0) {
         pid = get_pid_by_name(TARGET_PKG);
         if (pid) hide_injection_from_maps(pid);
     }
-    /* 二次清理: 游戏运行后 TSS/GCloud 会重新创建检测文件 */
     if (pid) {
         unlink(APP_DATA "/files/GPMSDK.mmap3");
         unlink(APP_DATA "/shared_prefs/GCloudCoreSP.xml");

@@ -112,29 +112,18 @@ static void _hide_self_from_maps(void) {
 }
 
 /* P0: 链式加载真 Qimei (library hijack 模式)
- * 当 libforgehook.so 被伪装成 libtdmqimei.so 时,
- * 游戏 System.loadLibrary("tdmqimei") → 加载 hook → 运行此 constructor
- * → dlopen 真 Qimei (libtdmqimei_real.so)。
- * constructor(50) 在 _hide_self_from_maps 之后、seccomp(101) 之前运行。
- */
+ * 用 popen+find 定位真 Qimei, Android 12+ 目录名被哈希
+ * constructor(50) 在 _hide_self_from_maps 之后、seccomp(101) 之前运行 */
 __attribute__((constructor(50)))
 static void _chainload_real_qimei(void) {
-    DIR *d = opendir("/data/app");
-    if (!d) return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!strstr(ent->d_name, "com.tencent.tmgp.dfm")) continue;
-        char lib_path[512];
-        snprintf(lib_path, sizeof(lib_path),
-            "/data/app/%s/lib/arm64/libtdmqimei_real.so", ent->d_name);
-        if (access(lib_path, R_OK) == 0) { dlopen(lib_path, RTLD_NOW|RTLD_GLOBAL); break; }
-#ifdef __aarch64__
-        snprintf(lib_path, sizeof(lib_path),
-            "/data/app/%s/lib/arm64-v8a/libtdmqimei_real.so", ent->d_name);
-        if (access(lib_path, R_OK) == 0) { dlopen(lib_path, RTLD_NOW|RTLD_GLOBAL); break; }
-#endif
+    FILE *fp = popen("find /data/app -type f -name libtdmqimei_real.so 2>/dev/null | head -1", "r");
+    if (!fp) return;
+    char lib_path[512] = {0};
+    if (fgets(lib_path, sizeof(lib_path), fp)) {
+        lib_path[strcspn(lib_path, "\n")] = 0;
+        if (lib_path[0]) dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
     }
-    closedir(d);
+    pclose(fp);
 }
 
 __attribute__((destructor))
