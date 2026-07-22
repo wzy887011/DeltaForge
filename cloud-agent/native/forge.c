@@ -42,6 +42,18 @@
 #define CTRL_PORT           9510
 #define FORGE_VERSION       "1.0.0"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
+#define DETECT_LOG          "/data/local/tmp/detect_now.log"
+
+static void start_logcat(void) {
+    system("killall logcat 2>/dev/null; sleep 0.5");
+    system("logcat -c 2>/dev/null; "
+           "logcat -v time 2>/dev/null | "
+           "grep -iE 'tersafe|TSS|ACE|Qimei|TGPA|GCloud|MSDK|TDM|"
+           "anti.cheat|forbid|ban|frozen|kicked|emulator|"
+           "fingerprint|hardware|manufacturer|device_id' "
+           "> " DETECT_LOG " 2>&1 &");
+    OK("封号诊断日志: " DETECT_LOG);
+}
 
 static int do_prepare(void);
 static int do_launch(void);
@@ -868,6 +880,7 @@ static int do_prepare(void) {
 
 static int do_launch(void) {
     do_prepare();
+    start_logcat();
     start_game();
     /* ptrace 注入 libforgehook.so — 替代不生效的 LD_PRELOAD wrap */
     pid_t pid = 0;
