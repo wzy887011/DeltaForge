@@ -6,7 +6,7 @@ CC = $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/$(TARGET)-clang
 CFLAGS_STATIC = -static -Os -Wall -fno-stack-protector -fomit-frame-pointer
 CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector
 
-all: forge libforgehook.so touch_injector injector
+all: forge libforgehook.so touch_injector injector forge_monitor
 
 forge: forge.c
 	@if [ -f "$(CC)" ]; then \
@@ -44,12 +44,23 @@ injector: injector.c
 		file injector; ls -lh injector; \
 	fi
 
+forge_monitor: forge_monitor.c
+	@if [ -f "$(CC)" ]; then \
+		$(CC) $(CFLAGS_STATIC) forge_monitor.c -o forge_monitor; \
+		file forge_monitor; ls -lh forge_monitor; \
+	else \
+		gcc -static -Os -Wall forge_monitor.c -o forge_monitor; \
+		file forge_monitor; ls -lh forge_monitor; \
+	fi
+
 host:
 	gcc -static -Os -Wall forge.c -o forge -lpthread
 	gcc -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
 	gcc -static -Os -Wall touch_injector.c -o touch_injector
-	file forge; file libforgehook.so; file touch_injector
-	ls -lh forge libforgehook.so touch_injector
+	gcc -Os -Wall injector.c -o injector -ldl
+	gcc -static -Os -Wall forge_monitor.c -o forge_monitor
+	file forge libforgehook.so touch_injector injector forge_monitor
+	ls -lh forge libforgehook.so touch_injector injector forge_monitor
 
 clean:
-	rm -f forge libforgehook.so touch_injector
+	rm -f forge libforgehook.so touch_injector injector forge_monitor

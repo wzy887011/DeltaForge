@@ -86,7 +86,26 @@ static void _hide_self_from_maps(void) {
     fclose(maps);
 }
 
-/* ---- chainload real Qimei (dladdr + /proc/self/maps fallback, raw syscalls for logging) ---- */
+/* ---- forge audit log — 记录未被 fake/hidden 覆盖的访问 (覆盖缺口) ---- */
+static void forge_audit(const char *action, const char *path) {
+    if (!path || path[0] == '\0') return;
+    /* 只记录游戏数据目录和 /proc /sys 相关路径 */
+    if (!strstr(path, "/data/data/com.tencent") &&
+        !strstr(path, "/proc/") &&
+        !strstr(path, "/sys/") &&
+        !strstr(path, "/sdcard/Tencent"))
+        return;
+    int fd = (int)syscall(SYS_openat, AT_FDCWD,
+        "/data/local/tmp/forge_audit.log",
+        O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    char buf[640];
+    int n = snprintf(buf, sizeof(buf), "[GAP][%s] %s\n", action, path);
+    if (n > 0) syscall(SYS_write, fd, buf, (size_t)n);
+    syscall(SYS_close, fd);
+}
+
+/* ---- chainload real Qimei ---- */
 static void forge_log_raw(const char *msg) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD, "/data/local/tmp/forge.log",
                           O_WRONLY | O_CREAT | O_APPEND, 0600);
@@ -417,6 +436,8 @@ int open(const char *p,int flags,...){
     if(hidden(p)){errno=ENOENT;return -1;}
     const fake_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
+    /* 记录未被 fake/hidden 覆盖的访问 */
+    if(!f&&!hidden(p)) forge_audit("open",p);
     return _open(p,flags,m);
 }
 
@@ -426,6 +447,7 @@ int openat(int dir,const char *p,int flags,...){
     if(hidden(p)){errno=ENOENT;return -1;}
     const fake_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
+    if(!f&&!hidden(p)) forge_audit("openat",p);
     return _openat(dir,p,flags,m);
 }
 
@@ -434,11 +456,12 @@ FILE *fopen(const char *p,const char *m){
     if(hidden(p)){errno=ENOENT;return NULL;}
     const fake_file_t *f=match(p);
     if(f&&m[0]=='r'){FILE *fp=fmemopen((void*)f->data,f->len,m);if(fp)return fp;}
+    if(!f&&!hidden(p)) forge_audit("fopen",p);
     return _fopen(p,m);
 }
 
-int access(const char *p,int m){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _access(p,m);}
-int stat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _stat(p,b);}
+int access(const char *p,int m){INIT();if(hidden(p)){errno=ENOENT;return -1;}forge_audit("access",p);return _access(p,m);}
+int stat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return -1;}forge_audit("stat",p);return _stat(p,b);}
 int lstat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _lstat(p,b);}
 ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
@@ -664,11 +687,12 @@ int __system_property_get(const char *name,char *value){
                 if(value){memcpy(value,e->value,l);value[l]='\0';}
                 return (int)l;
             }
-            /* "删除"属性: 清空缓冲区防止返回垃圾值 */
             if(value) value[0]='\0';
             return 0;
         }
     }
+    /* 未在 HOOK_PROPS 中的属性 — 记录供分析 */
+    forge_audit("prop_get",name);
     return real_prop_get(name,value);
 }
 
