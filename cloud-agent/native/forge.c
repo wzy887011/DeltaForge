@@ -899,6 +899,10 @@ static int do_prepare(void) {
 static int do_launch(void) {
     do_prepare();
     start_logcat();
+    /* 启动反作弊行为监控（后台，日志追加写入） */
+    system("pkill -f forge_monitor 2>/dev/null; "
+           "/data/local/tmp/forge_monitor -v >> /data/local/tmp/forge_monitor.log 2>&1 &");
+    OK("forge_monitor 已启动");
     start_game();
     pid_t pid = 0;
     for (int i = 0; i < 300; i++) {
