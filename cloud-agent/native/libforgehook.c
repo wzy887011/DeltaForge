@@ -48,6 +48,7 @@
 #define ARM64_NR_OPENAT      56
 #define ARM64_NR_READLINKAT  78
 #define ARM64_NR_NEWFSTATAT  79
+#define ARM64_NR_TGKILL      131  /* tgkill — TerSafe 直接 SVC 发送自杀信号，绕过 libc hook */
 #define ARM64_NR_GETDENTS64  216
 #define ARM64_NR_OPENAT2     437
 #define ARM64_NR_FACCESSAT2  439
@@ -64,7 +65,11 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 #define BPF_W    0x00
 #define BPF_ABS  0x20
 #define BPF_JEQ  0x10
+#define BPF_JA   0x00
 #define BPF_K    0x00
+#ifndef SECCOMP_RET_ERRNO
+#define SECCOMP_RET_ERRNO 0x00050000U
+#endif
 
 /* ---- maps hide — priority 50: 在 chainload 之前先隐藏自身 ---- */
 __attribute__((constructor(50)))
@@ -740,6 +745,18 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
 }
 
 static struct sock_filter g_bpf_prog[]={
+    /* --- tgkill(*, *, SIGSEGV/SIGKILL/SIGABRT) 直接内核层拒绝 ---
+     * TerSafe 绕过 libc 直接 SVC 调用 tgkill 自杀，libc hook 拦不住，
+     * 只能在 seccomp-BPF 这一层挡：命中信号立刻 RET_ERRNO，不进内核执行。
+     * jt/jf 都是相对当前指令的跳转步数，不影响下方原有过滤逻辑（相对偏移不变）。 */
+    {BPF_LD|BPF_W|BPF_ABS,0,0,0},                       /* idx0: 载入 syscall nr */
+    {BPF_JMP|BPF_JEQ|BPF_K,0,5,ARM64_NR_TGKILL},         /* idx1: nr==tgkill? 否则跳到 idx7(架构检查) */
+    {BPF_LD|BPF_W|BPF_ABS,0,0,32},                       /* idx2: 载入 args[2] 低32位 = sig */
+    {BPF_JMP|BPF_JEQ|BPF_K,2,0,11},                      /* idx3: sig==SIGSEGV? 命中跳idx6拦截 */
+    {BPF_JMP|BPF_JEQ|BPF_K,1,0,9},                       /* idx4: sig==SIGKILL? 命中跳idx6拦截 */
+    {BPF_JMP|BPF_JEQ|BPF_K,0,1,6},                       /* idx5: sig==SIGABRT? 命中落入idx6，否则跳idx7放行 */
+    {BPF_RET|BPF_K,0,0,SECCOMP_RET_ERRNO|1},             /* idx6: 拦截 — 返回 -EPERM，不执行 syscall */
+    /* --- 原有文件类 syscall 过滤（相对跳转，位置整体后移7条不影响逻辑） --- */
     {BPF_LD|BPF_W|BPF_ABS,0,0,4},
     {BPF_JMP|BPF_JEQ|BPF_K,1,0,AUDIT_ARCH_AARCH64},
     {BPF_RET|BPF_K,0,0,SECCOMP_RET_ALLOW},
