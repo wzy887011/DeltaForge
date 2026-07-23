@@ -31,7 +31,8 @@ cp $NATIVE/libforgehook.so $TMP/libforgehook.so
 cp $NATIVE/forge_monitor   $TMP/forge_monitor
 cp $NATIVE/injector        $TMP/injector
 cp $NATIVE/touch_injector  $TMP/touch_injector
-chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector
+cp $SCRIPT_DIR/collect_logs.sh $TMP/collect_logs.sh
+chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector $TMP/collect_logs.sh
 chmod 644 $TMP/libforgehook.so
 echo "[+] 部署完成"
 ls -lh $TMP/forge $TMP/libforgehook.so $TMP/forge_monitor
