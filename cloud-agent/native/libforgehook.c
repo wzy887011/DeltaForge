@@ -507,19 +507,19 @@ ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=E
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
 /* ---- tgkill / kill hook — 拦截 TerSafe 自杀信号 ---- */
-typedef long (*tgkill_t)(pid_t, pid_t, int);
-typedef long (*kill_t)(pid_t, int);
+typedef int (*tgkill_t)(pid_t, pid_t, int);
+typedef int (*kill_t)(pid_t, int);
 static tgkill_t _tgkill = NULL;
 static kill_t   _kill_fn = NULL;
 
-long tgkill(pid_t tgid, pid_t tid, int sig) {
+int tgkill(pid_t tgid, pid_t tid, int sig) {
     if (!_tgkill) _tgkill = (tgkill_t)dlsym(RTLD_NEXT, "tgkill");
     /* 拦截：SIGSEGV(11) / SIGKILL(9) / SIGABRT(6) 发向自身 */
     if (sig == 11 || sig == 9 || sig == 6) return 0;
     return _tgkill ? _tgkill(tgid, tid, sig) : 0;
 }
 
-long kill(pid_t pid, int sig) {
+int kill(pid_t pid, int sig) {
     if (!_kill_fn) _kill_fn = (kill_t)dlsym(RTLD_NEXT, "kill");
     if (sig == 11 || sig == 9 || sig == 6) return 0;
     return _kill_fn ? _kill_fn(pid, sig) : 0;
@@ -598,10 +598,10 @@ struct dirent *readdir(DIR *dirp) {
 }
 
 /* readdir64 — TerSafe 可能走64位版枚举 /proc，同样过滤 */
-typedef struct dirent *(*readdir64_t)(DIR *);
+typedef struct dirent64 *(*readdir64_t)(DIR *);
 static readdir64_t _readdir64 = NULL;
 
-struct dirent *readdir64(DIR *dirp) {
+struct dirent64 *readdir64(DIR *dirp) {
     if (!_readdir64) _readdir64 = (readdir64_t)dlsym(RTLD_NEXT, "readdir64");
     if (!_readdir64) return NULL;
     struct dirent *ent;
