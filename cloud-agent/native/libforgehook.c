@@ -792,27 +792,23 @@ static struct sock_filter g_bpf_prog[]={
     /* 3: load syscall nr */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,0},
 
-    /* ---- tgkill(131): block sig 1-31, allow 0 and real-time (>=32) ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TGKILL},
+    /* ---- tgkill(131): block sig 1-31, allow 0 and >=32 ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,4, ARM64_NR_TGKILL},
     {BPF_LD|BPF_W|BPF_ABS, 0,0,32},            /* args[2] = sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 4,0, 0},           /* sig==0 -> ALLOW (thread check) */
-    {BPF_JMP|BPF_JGE|BPF_K, 2,0, 32},          /* sig>=32 -> ALLOW (RT signals for pthread) */
-    {BPF_JMP|BPF_JGT|BPF_K, 0,0, 31},          /* sig>31? -> ALLOW, else -> BLOCK (1-31 fatal) */
+    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 0},           /* sig==0 -> ALLOW (pthread check) */
+    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},          /* sig>=32 -> ALLOW (RT signals) */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK sig 1-31 -> -EPERM */
     {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK fatal sig -> -EPERM */
 
-    /* ---- tkill(130): block sig 1-31, allow 0 and real-time ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TKILL},
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},            /* args[1] = sig (tkill takes 2 args) */
-    {BPF_JMP|BPF_JEQ|BPF_K, 4,0, 0},           /* sig==0 -> ALLOW */
-    {BPF_JMP|BPF_JGE|BPF_K, 2,0, 32},          /* sig>=32 -> ALLOW (RT signals) */
-    {BPF_JMP|BPF_JGT|BPF_K, 0,0, 31},          /* sig>31? -> ALLOW */
+    /* ---- tkill(130): block sig 1-31, allow 0 and >=32 ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,4, ARM64_NR_TKILL},
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},            /* args[1] = sig */
+    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 0},           /* sig==0 -> ALLOW */
+    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},          /* sig>=32 -> ALLOW */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK sig 1-31 -> -EPERM */
     {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK tkill fatal -> -EPERM */
 
-    /* ---- kill(129): unconditional block ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,1, ARM64_NR_KILL},
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK kill -> -EPERM */
+    /* ---- kill(129): 不拦 — Android runtime 用 kill() 做进程组信令,拦截会瞬间崩溃 ---- */
 
     /* ---- file syscalls -> TRAP -> SIGSYS handler ---- */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,0},
