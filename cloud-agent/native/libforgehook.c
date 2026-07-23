@@ -604,7 +604,7 @@ static readdir64_t _readdir64 = NULL;
 struct dirent64 *readdir64(DIR *dirp) {
     if (!_readdir64) _readdir64 = (readdir64_t)dlsym(RTLD_NEXT, "readdir64");
     if (!_readdir64) return NULL;
-    struct dirent *ent;
+    struct dirent64 *ent;
     while ((ent = _readdir64(dirp)) != NULL) {
         if (!dname_filtered(ent->d_name)) break;
     }
