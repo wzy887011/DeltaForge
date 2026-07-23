@@ -960,6 +960,28 @@ static int do_launch(void) {
                 for (int i = 0; kScanDirs[i]; i++)
                     for (int j = 0; kPatternSubstrings[j]; j++)
                         delete_matching(kScanDirs[i], kPatternSubstrings[j]);
+
+                /* 每5秒回读关键补丁：若 TerSafe 已还原则立刻重写，日志可见是否发生 */
+                {
+                    pid_t vp2 = get_pid_by_name(TARGET_PKG);
+                    uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;
+                    if (ts2) {
+                        static const struct { uint64_t off; uint32_t exp; } kChk[] = {
+                            {0x3233B8, 0xD65F03C0},
+                            {0x419FDC, 0xD2800000},
+                            {0x419FE0, 0xD65F03C0},
+                        };
+                        for (int ci = 0; ci < 3; ci++) {
+                            uint32_t cur = 0;
+                            if (mem_read32(vp2, ts2 + kChk[ci].off, &cur) == 0
+                                && cur != kChk[ci].exp) {
+                                WARN("patch reverted off=0x%llx cur=0x%08x — repatch",
+                                     (unsigned long long)kChk[ci].off, cur);
+                                safe_write32(vp2, ts2 + kChk[ci].off, kChk[ci].exp, 3);
+                            }
+                        }
+                    }
+                }
             }
         }
         /* 回收中间进程，避免僵尸 */
