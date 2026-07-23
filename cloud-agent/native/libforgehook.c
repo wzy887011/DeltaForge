@@ -625,10 +625,12 @@ struct dirent64 *readdir64(DIR *dirp) {
  *   2. Android 11 W^X：mprotect(RWX) 被 SELinux 拒绝 → 回退 /proc/self/mem 写
  * ============================================================ */
 
-/* 游戏进程可写的独立 patch 日志（/data/local/tmp 对 u0_a73 可创建新文件） */
+/* 游戏进程可写的独立 patch 日志
+ * 之前写 /data/local/tmp/ 一直失败（该目录属主 shell:shell，u0_a71 无写权限）
+ * 导致 forge_hook.log 从未生成过 — 改写到游戏自己的 app data 目录 */
 static void hook_log(const char *msg) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
-                          "/data/local/tmp/forge_hook.log",
+                          "/data/data/com.tencent.tmgp.dfm/files/forge_hook.log",
                           O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
     size_t len = 0; while (msg[len]) len++;
@@ -783,8 +785,13 @@ static void install_seccomp(void){
     /* 正确调用 seccomp(2) syscall（aarch64=277），不是 prctl(1,...)=PR_SET_PDEATHSIG
      * SECCOMP_SET_MODE_FILTER=1，SECCOMP_FILTER_FLAG_TSYNC=1（同步到所有已有线程） */
     long r = syscall(277, 1, 1, &g_bpf_fprog);
+    int used_tsync = (r == 0);
     if(r != 0) r = syscall(277, 1, 0, &g_bpf_fprog); /* TSYNC 失败则不同步 */
     g_bpf_active = (r == 0) ? 1 : 0;
+    char logbuf[96];
+    int ln = snprintf(logbuf, sizeof(logbuf),
+        "[seccomp] r=%ld errno=%d tsync=%d active=%d\n", r, r!=0?errno:0, used_tsync, g_bpf_active);
+    if (ln > 0) hook_log(logbuf);
 }
 __attribute__((constructor(200)))
 static void _install_seccomp_cb(void){install_seccomp();}
