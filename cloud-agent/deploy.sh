@@ -44,7 +44,8 @@ cp "$NATIVE/injector"        $TMP/injector
 cp "$NATIVE/touch_injector"  $TMP/touch_injector
 cp "$SCRIPT_DIR/collect_logs.sh"  $TMP/collect_logs.sh
 cp "$SCRIPT_DIR/df-hijack-root.sh" $TMP/df-hijack-root.sh
-chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector $TMP/collect_logs.sh $TMP/df-hijack-root.sh
+cp "$SCRIPT_DIR/check.sh"          $TMP/check.sh
+chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector $TMP/collect_logs.sh $TMP/df-hijack-root.sh $TMP/check.sh
 chmod 644 $TMP/libforgehook.so
 
 # 更新 hijack so (root 权限可以读 /data/app/)
