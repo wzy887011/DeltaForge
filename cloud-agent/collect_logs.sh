@@ -30,9 +30,12 @@ echo "===== 最新 tombstone ====="
 LATEST=$(ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v '\.pb$' | head -1)
 echo "文件: $LATEST"
 if [ -n "$LATEST" ]; then
-    head -20 "$LATEST"
-    echo "--- 全部线程 pid/tid/pc/backtrace ---"
-    grep -E "pid:|tid:|#00 pc|#01 pc|#02 pc|#03 pc" "$LATEST"
+    echo "--- 崩溃线程 (完整，含寄存器+调用栈) ---"
+    sed -n '1,/^--- --- ---/p' "$LATEST" | head -30
+
+    echo ""
+    echo "--- 其他线程中出现 libtersafe.so 的帧 (可能是第二条kill路径, 忽略普通UE4线程池噪音) ---"
+    grep -B20 "libtersafe" "$LATEST" 2>/dev/null | grep -E "pid:|libtersafe" | sort -u | head -30
 fi
 
 echo ""
