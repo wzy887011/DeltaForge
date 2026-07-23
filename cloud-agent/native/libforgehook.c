@@ -508,6 +508,37 @@ static getenv_t _getenv = NULL;
 char *getenv(const char *name) {
     if (!_getenv) _getenv = (getenv_t)dlsym(RTLD_NEXT, "getenv");
     if (name && (strcmp(name, "LD_PRELOAD") == 0 ||
+
+/* ---- tgkill / kill hook — 拦截 TerSafe 自杀信号 ----
+ * TerSafe 用 tgkill(pid, tid, SIGSEGV) 主动终止进程（SI_TKILL）
+ * Hook 后直接丢弃 SIGSEGV/SIGKILL/SIGABRT 的自发信号，返回0假装成功
+ * 如果 TerSafe 走直接 SVC 而非 libc，则由 seccomp 层兜底
+ */
+typedef long (*tgkill_t)(pid_t, pid_t, int);
+typedef long (*kill_t)(pid_t, int);
+static tgkill_t _tgkill = NULL;
+static kill_t   _kill_fn = NULL;
+
+long tgkill(pid_t tgid, pid_t tid, int sig) {
+    if (!_tgkill) _tgkill = (tgkill_t)dlsym(RTLD_NEXT, "tgkill");
+    /* 拦截：SIGSEGV(11) / SIGKILL(9) / SIGABRT(6) 发向自身 */
+    if (sig == 11 || sig == 9 || sig == 6) return 0;
+    return _tgkill ? _tgkill(tgid, tid, sig) : 0;
+}
+
+long kill(pid_t pid, int sig) {
+    if (!_kill_fn) _kill_fn = (kill_t)dlsym(RTLD_NEXT, "kill");
+    if (sig == 11 || sig == 9 || sig == 6) return 0;
+    return _kill_fn ? _kill_fn(pid, sig) : 0;
+}
+
+/* ---- P0ext: getenv — 拦截 LD_PRELOAD / LD_LIBRARY_PATH 检测 ---- */
+typedef char *(*getenv_t)(const char *);
+static getenv_t _getenv = NULL;
+
+char *getenv(const char *name) {
+    if (!_getenv) _getenv = (getenv_t)dlsym(RTLD_NEXT, "getenv");
+    if (name && (strcmp(name, "LD_PRELOAD") == 0 ||
                  strcmp(name, "LD_LIBRARY_PATH") == 0 ||
                  strcmp(name, "ANDROID_ROOT") == 0))
         return NULL;
