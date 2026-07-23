@@ -121,8 +121,7 @@ static void forge_audit(const char *action, const char *path) {
         return;
     int n = snprintf(g_audit_buf + g_audit_pos,
         (size_t)(AUDIT_BUF_SIZE - g_audit_pos),
-        "[GAP][%s] %s
-", action, path);
+        "[GAP][%s] %s\n", action, path);
     if (n > 0) {
         g_audit_pos += n;
         if (g_audit_pos >= AUDIT_BUF_SIZE - 640) flush_audit();
