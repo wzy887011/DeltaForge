@@ -115,6 +115,7 @@ static const patch_entry_t kTersafePatches[] = {
     {0x2F29D0, 0xD65F03C0},  /* kill router -> RET */
     {0x320D78, 0xD65F03C0},  /* kill wrapper -> RET */
     {0x3233B8, 0xD65F03C0},  /* tgkill call site -> RET */
+};
 
 #define TERSAFE_PATCH_COUNT (sizeof(kTersafePatches)/sizeof(kTersafePatches[0]))
 
