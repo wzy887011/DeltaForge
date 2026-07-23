@@ -501,19 +501,7 @@ int lstat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return
 ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
-/* ---- P0ext: getenv — 拦截 LD_PRELOAD / LD_LIBRARY_PATH 检测 ---- */
-typedef char *(*getenv_t)(const char *);
-static getenv_t _getenv = NULL;
-
-char *getenv(const char *name) {
-    if (!_getenv) _getenv = (getenv_t)dlsym(RTLD_NEXT, "getenv");
-    if (name && (strcmp(name, "LD_PRELOAD") == 0 ||
-
-/* ---- tgkill / kill hook — 拦截 TerSafe 自杀信号 ----
- * TerSafe 用 tgkill(pid, tid, SIGSEGV) 主动终止进程（SI_TKILL）
- * Hook 后直接丢弃 SIGSEGV/SIGKILL/SIGABRT 的自发信号，返回0假装成功
- * 如果 TerSafe 走直接 SVC 而非 libc，则由 seccomp 层兜底
- */
+/* ---- tgkill / kill hook — 拦截 TerSafe 自杀信号 ---- */
 typedef long (*tgkill_t)(pid_t, pid_t, int);
 typedef long (*kill_t)(pid_t, int);
 static tgkill_t _tgkill = NULL;
