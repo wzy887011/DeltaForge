@@ -765,10 +765,59 @@ static void start_game(void) {
     OK("游戏已启动，等待进程出现后注入...");
 }
 
-static int inject_hook(pid_t pid) {
-    char cmd[512];
+/*
+ * stage_hook_so: 把 libforgehook.so 复制到游戏的 native lib 目录
+ * 绕过 Android 8+ linker namespace 隔离:
+ *   dlopen("/data/local/tmp/...") → 失败（不在 app namespace）
+ *   dlopen("/data/app/.../lib/arm64/...") → 成功（已在 app namespace）
+ */
+static void stage_hook_so(pid_t pid, char *out_path, size_t out_sz) {
+    strncpy(out_path, "/data/local/tmp/libforgehook.so", out_sz - 1);
+    out_path[out_sz - 1] = '\0';
+
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *f = fopen(maps_path, "r");
+    if (!f) return;
+
+    char line[1024], dst[768] = {0};
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "/data/app/");
+        if (!p) continue;
+        char *lib = strstr(p, "/lib/arm64/");
+        if (!lib) continue;
+        size_t dir_len = (size_t)(lib - p) + strlen("/lib/arm64/");
+        if (dir_len + 20 > sizeof(dst)) continue;
+        memcpy(dst, p, dir_len);
+        dst[dir_len] = '\0';
+        size_t dl = strlen(dst);
+        while (dl > 0 && (dst[dl-1]=='\n'||dst[dl-1]==' '||dst[dl-1]=='\t')) dst[--dl]='\0';
+        strncat(dst, "libforgehook.so", sizeof(dst) - strlen(dst) - 1);
+        break;
+    }
+    fclose(f);
+    if (!dst[0]) return;
+
+    char cmd[1600];
     snprintf(cmd, sizeof(cmd),
-        "/data/local/tmp/injector %d /data/local/tmp/libforgehook.so 2>/dev/null", pid);
+        "cp /data/local/tmp/libforgehook.so '%s' && chmod 755 '%s' && "
+        "chcon u:object_r:apk_data_file:s0 '%s' 2>/dev/null; true",
+        dst, dst, dst);
+    if (system(cmd) == 0) {
+        strncpy(out_path, dst, out_sz - 1);
+        out_path[out_sz - 1] = '\0';
+        OK("hook 库暂存到 app lib 目录 (绕 namespace): %.80s", out_path);
+    } else {
+        WARN("hook 库暂存失败，保持原路径");
+    }
+}
+
+static int inject_hook(pid_t pid) {
+    char hook_path[768];
+    stage_hook_so(pid, hook_path, sizeof(hook_path));
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "/data/local/tmp/injector %d '%s'", pid, hook_path);
     int rc = system(cmd);
     return (rc == 0) ? 0 : -1;
 }
