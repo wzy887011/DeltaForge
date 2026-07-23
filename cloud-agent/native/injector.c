@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/injector.c v5.5
+// 法器: DeltaForge/cloud-agent/native/injector.c v5.6
 // 描述: ptrace 注入器 — 自动解析 dlopen 所在库，正确计算目标地址
 //   ARM64 上无 mmap syscall, 改用目标进程栈存放路径字符串
 // 编译: clang -Os -Wall injector.c -o injector -ldl
@@ -141,6 +141,26 @@ int main(int argc, char **argv) {
     size_t slen = strlen(so) + 1;
 
     printf("[*] PID=%d SO=%s\n", pid, so);
+
+    /* 检查目标是否已加载该 so（避免重复注入导致问题） */
+    {
+        char maps_path[64];
+        snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+        FILE *mf = fopen(maps_path, "r");
+        if (mf) {
+            char line[1024];
+            const char *basename = strrchr(so, '/');
+            basename = basename ? basename + 1 : so;
+            while (fgets(line, sizeof(line), mf)) {
+                if (strstr(line, basename)) {
+                    printf("[*] %s already loaded in target - skipping injection\n", basename);
+                    fclose(mf);
+                    return 0;  /* already injected, not an error */
+                }
+            }
+            fclose(mf);
+        }
+    }
 
     /* ── ATTACH ── */
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) != 0) {

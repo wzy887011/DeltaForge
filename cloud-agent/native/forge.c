@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/forge.c v5.5
+// 法器: DeltaForge/cloud-agent/native/forge.c v5.6
 // 描述: 三角洲行动云手机过检测核心 - 完整内存补丁 + 环境伪装 + 文件清理
 // 编译: aarch64-linux-android21-clang -static -Os -o forge forge.c
 //   或: 云手机内 gcc -static -Os -o forge forge.c
@@ -40,7 +40,7 @@
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "5.5"
+#define FORGE_VERSION       "5.6"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
@@ -108,11 +108,14 @@ static const patch_entry_t kTersafePatches[] = {
     {0x508CE8, 0x384006A8}, {0x50A81C, 0x38400509}, {0x50A92C, 0x38400509},
     {0x50A95C, 0x38400509}, {0x50A9BC, 0x38400503}, {0x50B704, 0x3840050A},
     {0x50E370, 0xD65F03C0},
-    /* kill 链强制补丁 — 基于 tombstone SI_TKILL 调用栈 */
-    {0x3233B8, 0xD65F03C0},  /* tgkill 调用入口 → RET */
-    {0x419FDC, 0xD2800000},  /* 检测模块入口 → MOV X0,#0 */
-    {0x419FE0, 0xD65F03C0},  /* 检测模块+4 → RET */
-};
+    /* kill chain full coverage - 6 nodes from detect entry to tgkill exit */
+    {0x419FDC, 0xD2800000},  /* detect entry -> MOV X0,#0 (report clean) */
+    {0x419FE0, 0xD65F03C0},  /* detect+4 -> RET */
+    {0x2E7810, 0xD65F03C0},  /* kill dispatch -> RET */
+    {0x2F29D0, 0xD65F03C0},  /* kill router -> RET */
+    {0x320D78, 0xD65F03C0},  /* kill wrapper -> RET */
+    {0x3233B8, 0xD65F03C0},  /* tgkill call site -> RET */
+
 #define TERSAFE_PATCH_COUNT (sizeof(kTersafePatches)/sizeof(kTersafePatches[0]))
 
 /* --- libtersafe.so BSS 段全局检测变量偏移，共 40 个 ---
@@ -967,11 +970,14 @@ static int do_launch(void) {
                     uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;
                     if (ts2) {
                         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
-                            {0x3233B8, 0xD65F03C0},
-                            {0x419FDC, 0xD2800000},
-                            {0x419FE0, 0xD65F03C0},
-                        };
-                        for (int ci = 0; ci < 3; ci++) {
+                                {0x419FDC, 0xD2800000},
+                                {0x419FE0, 0xD65F03C0},
+                                {0x2E7810, 0xD65F03C0},
+                                {0x2F29D0, 0xD65F03C0},
+                                {0x320D78, 0xD65F03C0},
+                                {0x3233B8, 0xD65F03C0},
+                            };
+                            for (int ci = 0; ci < 6; ci++) {
                             uint32_t cur = 0;
                             if (mem_read32(vp2, ts2 + kChk[ci].off, &cur) == 0
                                 && cur != kChk[ci].exp) {

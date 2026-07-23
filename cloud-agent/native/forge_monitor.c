@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/forge_monitor.c v5.5
+// 法器: DeltaForge/cloud-agent/native/forge_monitor.c v5.6
 // 描述: 反作弊行为监控器 — 捕获游戏读了哪些文件/属性，分析封号逻辑
 //   1. inotify 监听游戏数据目录
 //   2. /proc/[pid]/fd 枚举已打开文件
@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
     }
     g_log=fopen(logpath,"a"); if (!g_log){perror("log");return 1;}
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
-    INFO("forge_monitor v5.5 start, log=%s",logpath);
+    INFO("forge_monitor v5.6 start, log=%s",logpath);
 
     int ifd=setup_inotify();
     if (ifd<0) INFO("inotify unavailable — fd-only mode");

@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/touch_injector.c v5.5
+// 法器: DeltaForge/cloud-agent/native/touch_injector.c v5.6
 // 描述: /dev/uinput 底层触摸注入 — 伪装 "fts_ts" I2C 触摸屏
 //       绕开 InputDispatcher 检测层（adb input 在 InputReader 层可见）
 // 编译: aarch64-linux-android21-clang -static -Os -o touch_injector touch_injector.c
