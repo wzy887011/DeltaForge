@@ -49,9 +49,10 @@ cp "$NATIVE/forge_monitor"   "$TMP/forge_monitor"   2>/dev/null || true
 cp "$NATIVE/injector"        "$TMP/injector"        2>/dev/null || true
 cp "$NATIVE/touch_injector"  "$TMP/touch_injector"  2>/dev/null || true
 cp "$SCRIPT_DIR/collect_logs.sh" "$TMP/collect_logs.sh" 2>/dev/null || true
+cp "$SCRIPT_DIR/df-hijack-root.sh" "$TMP/df-hijack-root.sh" 2>/dev/null || true
 
 chmod 755 "$TMP/forge" "$TMP/forge_monitor" "$TMP/injector" \
-          "$TMP/touch_injector" "$TMP/collect_logs.sh" 2>/dev/null || true
+          "$TMP/touch_injector" "$TMP/collect_logs.sh" "$TMP/df-hijack-root.sh" 2>/dev/null || true
 chmod 644 "$TMP/libforgehook.so" 2>/dev/null || true
 
 echo "[+] 部署完成"
