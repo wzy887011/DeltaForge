@@ -778,8 +778,13 @@ static void install_seccomp(void){
     sa.sa_sigaction=sigsys_handler;
     sa.sa_flags=SA_SIGINFO|SA_RESTART|SA_NODEFER;
     sigaction(SIGSYS,&sa,NULL);
-    if(prctl(SECCOMP_SET_MODE_FILTER,0UL,&g_bpf_fprog)!=0){g_bpf_active=0;return;}
-    g_bpf_active=1;
+    /* PR_SET_NO_NEW_PRIVS=38，seccomp 安装前置条件 */
+    prctl(38,1,0,0,0);
+    /* 正确调用 seccomp(2) syscall（aarch64=277），不是 prctl(1,...)=PR_SET_PDEATHSIG
+     * SECCOMP_SET_MODE_FILTER=1，SECCOMP_FILTER_FLAG_TSYNC=1（同步到所有已有线程） */
+    long r = syscall(277, 1, 1, &g_bpf_fprog);
+    if(r != 0) r = syscall(277, 1, 0, &g_bpf_fprog); /* TSYNC 失败则不同步 */
+    g_bpf_active = (r == 0) ? 1 : 0;
 }
 __attribute__((constructor(200)))
 static void _install_seccomp_cb(void){install_seccomp();}
