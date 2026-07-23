@@ -801,7 +801,7 @@ static void stage_hook_so(pid_t pid, char *out_path, size_t out_sz) {
     char cmd[1600];
     snprintf(cmd, sizeof(cmd),
         "cp /data/local/tmp/libforgehook.so '%s' && chmod 755 '%s' && "
-        "chcon u:object_r:apk_data_file:s0 '%s' 2>/dev/null; true",
+        "restorecon '%s' 2>/dev/null; true",
         dst, dst, dst);
     if (system(cmd) == 0) {
         strncpy(out_path, dst, out_sz - 1);
