@@ -573,6 +573,20 @@ struct dirent *readdir(DIR *dirp) {
     return ent;
 }
 
+/* readdir64 — TerSafe 可能走64位版枚举 /proc，同样过滤 */
+typedef struct dirent *(*readdir64_t)(DIR *);
+static readdir64_t _readdir64 = NULL;
+
+struct dirent *readdir64(DIR *dirp) {
+    if (!_readdir64) _readdir64 = (readdir64_t)dlsym(RTLD_NEXT, "readdir64");
+    if (!_readdir64) return NULL;
+    struct dirent *ent;
+    while ((ent = _readdir64(dirp)) != NULL) {
+        if (!dname_filtered(ent->d_name)) break;
+    }
+    return ent;
+}
+
 /* ============================================================
  * P3: TerSafe 运行时指令补丁 — constructor(150)
  *

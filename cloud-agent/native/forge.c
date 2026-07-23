@@ -880,6 +880,8 @@ static int patch_game_process(void) {
 
 /* ============= 全局执行流程 ============= */
 static int do_prepare(void) {
+    /* 伪装 forge 进程名为内核线程，规避进程扫描 */
+    prctl(PR_SET_NAME, "[kworker/u:0]", 0, 0, 0);
     protect_devmode();
     kill_suspicious_procs();
     block_tdm_reporting();  /* ← 新增: iptables 阻断上报 */
