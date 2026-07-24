@@ -1098,8 +1098,12 @@ static void *_patch_tersafe_thread(void *unused) {
     }
     if (!base) {
         hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
+        /* 60s 超时也激活——游戏已完全初始化，不能再等 */
+        if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (60s timeout)\n"); }
         return NULL;
     }
+    /* tersafe 已加载说明游戏完成初始化——现在安全激活 hook */
+    if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (tersafe found)\n"); }
     int ln = snprintf(logbuf, sizeof(logbuf),
         "[patch] base=0x%lx\n", (unsigned long)base);
     if (ln > 0) hook_log(logbuf);
@@ -1132,9 +1136,8 @@ static void _patch_tersafe(void) {
     }
     pthread_attr_destroy(&attr);
     hook_log("[CTOR] 150 _patch_tersafe done\n");
-    /* ACTIVATE all libc hooks — safe now, game init is complete */
-    g_hooks_ready = 1;
-    hook_log("[hooks] all libc hooks activated (g_hooks_ready=1)\n");
+    /* g_hooks_ready 不在这里设——等 tersafe patch 线程找到
+     * libtersafe.so 后再激活。此时游戏已完全初始化完成。 */
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
