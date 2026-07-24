@@ -1543,14 +1543,11 @@ jint JNI_OnLoad(JavaVM *vm,void *reserved){
     } else {
         hook_log("[JNI] WARNING: g_real_qimei_handle is NULL, cannot forward\n");
     }
-    /* 2. JNI hook: 仅保留 Build 字段覆盖 (安全).
-     * jni_hook_system_properties 暂禁用 — RegisterNatives
-     * 替换 SystemProperties 全表导致 inject 模式闪退 */
+    /* 2. JNI hook 暂全部禁用 — jni_overwrite_build_fields/build.SERIAL
+     * 空串 + jni_hook_system_properties/RegisterNatives 均导致 inject 闪退。
+     * 属性伪装由 libc __system_property_get hook 兜底处理。 */
     JNIEnv *env=NULL;
     if((*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_VERSION_1_6;
-    if(!env)return JNI_VERSION_1_6;
-    jni_overwrite_build_fields(env);
-    /* jni_hook_system_properties(env); — disabled, causes crash */
     return JNI_VERSION_1_6;
 }
 
