@@ -82,7 +82,7 @@ static FILE *g_logfile = NULL;
 /* ============= 内存补丁条目 ============= */
 typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
 
-/* --- libtersafe.so (TSS/ACE 核心) 代码段补丁，61 处 ---
+/* --- libtersafe.so (TSS/ACE 核心) 代码段补丁，67 处 (含 kill chain 6) ---
  * 基于 delta_force_detection_final_static_report.md 中的 offset 表
  * 0x2A1F03FF = MOV W0, #0x0FF → 返回 W0=255 (模拟检测通过)
  * 0xD61F03C0 = BR X30 → direct return (skip function body)
@@ -394,7 +394,7 @@ static uint64_t wait_for_module(pid_t pid, const char *mod, int timeout_ms) {
         uint64_t b = get_module_base(pid, mod);
         if (b) return b;
         usleep(delay * 1000);
-        delay = delay < BACKOFF_MAX_MS / 2 ? delay * 2 : BACKOFF_MAX_MS / 2;
+        delay = delay < BACKOFF_MAX_MS ? delay * 2 : BACKOFF_MAX_MS;
     }
     return 0;
 }
@@ -505,6 +505,7 @@ static int delete_matching(const char *dir, const char *substr) {
 /* ============= Shell 命令执行 ============= */
 static int run_cmd(const char *argv[]) {
     pid_t p = fork();
+    if (p == -1) return -1;  /* fork 失败 */
     if (p == 0) {
         int dn = open("/dev/null", O_WRONLY);
         if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); close(dn); }
@@ -902,7 +903,7 @@ static int patch_game_process(void) {
         WARN("tersafe BSS 段未找到 (跳过)");
     }
 
-    /* 4. libUE4.so 引擎检测 7 处 */
+    /* 4. libUE4.so 引擎检测 6 处 */
     uint64_t ue4_base = wait_for_module(pid, "libUE4.so", 20000);
     if (ue4_base) {
         usleep(500000);

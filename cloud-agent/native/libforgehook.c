@@ -754,6 +754,7 @@ static getenv_t _getenv = NULL;
 
 char *getenv(const char *name) {
     if (!_getenv) _getenv = (getenv_t)dlsym(RTLD_NEXT, "getenv");
+    if (!g_hooks_ready) return _getenv ? _getenv(name) : NULL;
     if (name && (strcmp(name, "LD_PRELOAD") == 0 ||
                  strcmp(name, "LD_LIBRARY_PATH") == 0 ||
                  strcmp(name, "ANDROID_ROOT") == 0))
@@ -780,6 +781,7 @@ int dl_iterate_phdr(int (*cb)(struct dl_phdr_info *, size_t, void *), void *data
     if (!_dl_iterate_phdr)
         _dl_iterate_phdr = (dl_iterate_phdr_t)dlsym(RTLD_NEXT, "dl_iterate_phdr");
     if (!_dl_iterate_phdr) return 0;
+    if (!g_hooks_ready) return _dl_iterate_phdr(cb, data);
     struct _phdr_wrap w = {cb, data};
     return _dl_iterate_phdr(_phdr_filter, &w);
 }
@@ -791,6 +793,7 @@ static dlopen_t _dlopen_real = NULL;
 void *dlopen(const char *filename, int flags) {
     if (!_dlopen_real)
         _dlopen_real = (dlopen_t)dlsym(RTLD_NEXT, "dlopen");
+    if (!g_hooks_ready) return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
     if (filename) {
         if (strstr(filename, "libforgehook") ||
             strstr(filename, "libtdmqimei_real") ||
@@ -828,6 +831,7 @@ int dladdr(const void *addr, Dl_info *info) {
     if (!_dladdr_real)
         _dladdr_real = (dladdr_t)dlsym(RTLD_NEXT, "dladdr");
     if (!_dladdr_real) return 0;
+    if (!g_hooks_ready) return _dladdr_real(addr, info);
     int rc = _dladdr_real(addr, info);
     if (rc && info && info->dli_fname) {
         if (strstr(info->dli_fname, "libforgehook") ||
@@ -863,6 +867,7 @@ static int dname_filtered(const char *n) {
 
 DIR *opendir(const char *name) {
     if (!_opendir) _opendir = (opendir_t)dlsym(RTLD_NEXT, "opendir");
+    if (!g_hooks_ready) return _opendir ? _opendir(name) : NULL;
     if (hidden(name)) { errno = ENOENT; return NULL; }
     return _opendir ? _opendir(name) : NULL;
 }
@@ -870,6 +875,7 @@ DIR *opendir(const char *name) {
 struct dirent *readdir(DIR *dirp) {
     if (!_readdir) _readdir = (readdir_t)dlsym(RTLD_NEXT, "readdir");
     if (!_readdir) return NULL;
+    if (!g_hooks_ready) return _readdir(dirp);
     struct dirent *ent;
     while ((ent = _readdir(dirp)) != NULL) {
         if (!dname_filtered(ent->d_name)) break;
@@ -884,6 +890,7 @@ static readdir64_t _readdir64 = NULL;
 struct dirent64 *readdir64(DIR *dirp) {
     if (!_readdir64) _readdir64 = (readdir64_t)dlsym(RTLD_NEXT, "readdir64");
     if (!_readdir64) return NULL;
+    if (!g_hooks_ready) return _readdir64(dirp);
     struct dirent64 *ent;
     while ((ent = _readdir64(dirp)) != NULL) {
         if (!dname_filtered(ent->d_name)) break;
@@ -1109,12 +1116,12 @@ static void *_patch_tersafe_thread(void *unused) {
     }
     if (!base) {
         hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
-        /* DEBUG: 暂不激活 hook，排查是否 hook 导致闪退 */
-        // if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (60s timeout)\n"); }
+        /* 60s 超时也激活—游戏已完全初始化 */
+        if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (60s timeout)\n"); }
         return NULL;
     }
-    /* DEBUG: 暂不激活 — 验证 hook 是否原凶 */
-    // if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (tersafe found)\n"); }
+    /* tersafe 已加载，游戏完成初始化—安全激活全部 hook */
+    if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (tersafe found)\n"); }
     int ln = snprintf(logbuf, sizeof(logbuf),
         "[patch] base=0x%lx\n", (unsigned long)base);
     if (ln > 0) hook_log(logbuf);
