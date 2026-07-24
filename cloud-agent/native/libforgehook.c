@@ -1248,8 +1248,9 @@ static void install_seccomp(void){
     if (ln > 0) hook_log(logbuf);
     hook_log("[CTOR] 49 _install_seccomp_cb done\n");
 }
-/* TEMP: BPF exit_group 拦截疑似导致进程退出异常，暂禁用测试 */
-static void _install_seccomp_cb(void){ /* install_seccomp(); */ hook_log("[CTOR] 49 seccomp SKIPPED (debug)\n"); }
+/* priority=49 - install seccomp before other hooks (no race window) */
+__attribute__((constructor(49)))
+static void _install_seccomp_cb(void){install_seccomp();}
 
 /* ---- __system_property_get hook ---- */
 /* Device profile system — macro-driven, switchable at compile time.

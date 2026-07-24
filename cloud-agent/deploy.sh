@@ -1,10 +1,22 @@
 #!/system/bin/sh
-# Android instrumentation deploy script v6 — compile + deploy with rollback
-# Usage: sh cloud-agent/deploy.sh [--dry-run]
+# DeltaForge v6.1 deploy script — compile + deploy
+# Usage: sh cloud-agent/deploy.sh [--dry-run] [--no-hijack]
+#   --dry-run   编译但不部署，输出 MD5
+#   --no-hijack 跳过 hijack so 更新 (推荐，默认行为将 deprecated)
+#   --auto      部署后自动运行 forge -l 注入启动游戏
+# NOTE: hijack (so替换) 模式已弃用。推荐使用 forge -l inject 模式。
 set -e
 
 DRY_RUN=0
-if [ "$1" = "--dry-run" ]; then DRY_RUN=1; shift; fi
+NO_HIJACK=0
+AUTO_LAUNCH=0
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY_RUN=1;;
+        --no-hijack) NO_HIJACK=1;;
+        --auto) AUTO_LAUNCH=1;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NATIVE="$SCRIPT_DIR/native"
@@ -79,15 +91,18 @@ chmod 644 $TMP/libforgehook.so
 HIJACK=$(find /data/app -name libtdmqimei_real.so 2>/dev/null | head -1)
 if [ -n "$HIJACK" ]; then
     DIR=$(dirname "$HIJACK")
-    cp "$NATIVE/libforgehook.so" "$DIR/libtdmqimei.so"
-    chmod 644 "$DIR/libtdmqimei.so"
-    restorecon "$DIR/libtdmqimei.so" 2>/dev/null
-    echo "[+] Hijack updated: $DIR/libtdmqimei.so"
-    echo "--- MD5 ---"
-    md5sum "$DIR/libtdmqimei.so" $TMP/libforgehook.so
+    if [ "$NO_HIJACK" = "1" ]; then
+        echo "[!] Hijack SKIPPED (--no-hijack). Use inject mode: su -c '$TMP/forge -l'"
+    else
+        cp "$NATIVE/libforgehook.so" "$DIR/libtdmqimei.so"
+        chmod 644 "$DIR/libtdmqimei.so"
+        restorecon "$DIR/libtdmqimei.so" 2>/dev/null
+        echo "[!] Hijack updated: $DIR/libtdmqimei.so (DEPRECATED — use forge -l instead)"
+        echo "--- MD5 ---"
+        md5sum "$DIR/libtdmqimei.so" $TMP/libforgehook.so
+    fi
 else
-    echo "[!] Hijack not found — run df-hijack-root.sh first:"
-    echo "    su -c 'sh $TMP/df-hijack-root.sh'"
+    echo "[!] Hijack not found — inject mode only: su -c '$TMP/forge -l'"
 fi
 
 echo "[+] Deploy done"
@@ -109,4 +124,9 @@ su -c "sh $TMP/check.sh" 2>/dev/null || echo "[!] Diagnostics failed — run man
 
 echo ""
 echo "[+] v6 deploy complete. Rollback: cp $BACKUP_DIR/*.$TIMESTAMP $TMP/"
-echo "    Launch: su -c '/data/local/tmp/forge -l'"
+echo "    Launch (inject mode, recommended): su -c '$TMP/forge -l'"
+echo "    Launch (hijack mode, deprecated): su -c 'am start -n com.tencent.tmgp.dfm/.SplashActivity'"
+if [ "$AUTO_LAUNCH" = "1" ]; then
+    echo "[*] Auto-launching forge -l..."
+    su -c "$TMP/forge -l" &
+fi
