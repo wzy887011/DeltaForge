@@ -18,6 +18,7 @@ if [ ! -f "$DIR/$REAL_NAME" ]; then
     echo "[+] hijack: backup $TARGET_NAME => $REAL_NAME"
     cp "$GAME_LIB" "$DIR/$REAL_NAME" || exit 1
     chmod 644 "$DIR/$REAL_NAME"
+    restorecon "$DIR/$REAL_NAME" 2>/dev/null
 fi
 
 if [ ! -f "$HOOK_SRC" ]; then
@@ -27,6 +28,7 @@ fi
 
 cp "$HOOK_SRC" "$GAME_LIB" || exit 1
 chmod 644 "$GAME_LIB"
+restorecon "$GAME_LIB" 2>/dev/null
 
 # 写入 chainload 路径文件，hook 构造函数只读这一个文件
 REAL_PATH="$DIR/$REAL_NAME"

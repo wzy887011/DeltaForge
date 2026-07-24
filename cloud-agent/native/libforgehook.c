@@ -256,10 +256,13 @@ static void _chainload_real_qimei(void) {
     hook_log("[CTOR] 100 calling dlopen...\n");
     void *h = dlopen(real_path, RTLD_NOW | RTLD_GLOBAL);
     if (!h) {
-        forge_log_raw("chainload: dlopen FAILED: ");
-        forge_log_raw(dlerror());
-        forge_log_raw("\n");
-        hook_log("[CTOR] 100 chainload dlopen FAILED\n");
+        const char *err = dlerror();
+        hook_log("[CTOR] 100 chainload dlopen FAILED: ");
+        hook_log(err ? err : "(null)");
+        hook_log("\n");
+        hook_log("[CTOR] 100 path tried: ");
+        hook_log(real_path);
+        hook_log("\n");
         return;
     }
     forge_log_raw("chainload: dlopen SUCCESS\n");
