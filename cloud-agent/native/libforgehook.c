@@ -29,6 +29,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+/* forward declarations — 函数定义在后，但前向构造函数中需要引用 */
+static uintptr_t get_module_base(const char *so_name);
+static void hook_log(const char *msg);
+
 /* seccomp-bpf constants */
 #ifndef SECCOMP_SET_MODE_FILTER
 #define SECCOMP_SET_MODE_FILTER 1
@@ -406,7 +410,7 @@ static const fake_file_t FAKE_FILES[]={
     {"/proc/net/udp",FAKE_NET_UDP,sizeof(FAKE_NET_UDP)-1},
     {"/proc/net/udp6",FAKE_NET_UDP6,sizeof(FAKE_NET_UDP6)-1},
     {"/proc/self/environ",FAKE_ENVIRON,sizeof(FAKE_ENVIRON)-1},
-    {"/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},  /* catches /proc/*/status */
+    {"/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},  /* broad: /proc/PID/status */
     {NULL,NULL,0}
 };
 
@@ -566,7 +570,7 @@ int open(const char *p,int flags,...){
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     /* 动态过滤 /proc/self/maps — 隐藏注入库行 */
-    if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||strstr(p,"/proc/") && strstr(p,"/task/"))){
+    if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
     const fake_file_t *f=match(p);
@@ -641,8 +645,6 @@ void exit_group(int status) {
     if (!g_ts_text_start) {
         g_ts_text_start = get_module_base("libtersafe.so");
         if (g_ts_text_start) {
-            /* 粗略估算代码段大小: 读 ELF header */
-            uint32_t elf_sz = 0;
             int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
             if (fd >= 0) {
                 /* ELF64 header: e_phoff at offset 32(8 bytes), e_phnum at offset 56(2 bytes) */
@@ -747,7 +749,7 @@ void *dlsym(void *handle, const char *symbol) {
     if (!_dlsym_real)
         _dlsym_real = (dlsym_t)dlsym(RTLD_NEXT, "dlsym");
     /* 放行: 内部 init 调用（函数指针尚未初始化） */
-    if (!_open || !_connect_orig) return _dlsym_real(handle, symbol);
+    if (!_open) return _dlsym_real(handle, symbol);  /* 初始化阶段安全放行 */
     return _dlsym_real ? _dlsym_real(handle, symbol) : NULL;
 }
 
