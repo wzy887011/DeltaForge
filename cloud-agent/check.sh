@@ -1,8 +1,8 @@
 #!/system/bin/sh
-# DeltaForge v5.6 — 诊断脚本
+# DeltaForge v5.8 — 诊断脚本
 # 用法: su -c 'sh /data/local/tmp/check.sh'
 echo "=========================================="
-echo " DeltaForge v5.6 诊断"
+echo " DeltaForge v5.8 诊断"
 echo " $(date)"
 echo "=========================================="
 
@@ -12,7 +12,7 @@ HIJACK=$(find /data/app -name libtdmqimei_real.so 2>/dev/null | head -1)
 if [ -n "$HIJACK" ]; then
     DIR=$(dirname "$HIJACK")
     echo "hijack 已安装: $DIR"
-    echo "  libtdmqimei.so      (应为 v5.6 hook):"
+    echo "  libtdmqimei.so      (应为 v5.8 hook):"
     ls -la "$DIR/libtdmqimei.so" 2>/dev/null
     echo "  libtdmqimei_real.so (应为原版 qimei):"
     ls -la "$DIR/libtdmqimei_real.so" 2>/dev/null

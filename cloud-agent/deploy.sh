@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# DeltaForge v5.6 — Termux 编译 + root 部署
+# DeltaForge v5.8 — Termux 编译 + root 部署
 # 用法: sh cloud-agent/deploy.sh
 set -e
 

@@ -1,5 +1,5 @@
 // ============================================================
-// DeltaForge/cloud-agent/native/libforgehook.c v5.6
+// DeltaForge/cloud-agent/native/libforgehook.c v5.8
 // Shared library — hook __system_property_get, fopen/open, seccomp-bpf, JNI
 //                  getenv(LD_PRELOAD), dl_iterate_phdr, opendir/readdir
 // Compile: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl

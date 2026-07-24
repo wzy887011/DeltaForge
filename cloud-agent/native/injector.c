@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/injector.c v5.6
+// 法器: DeltaForge/cloud-agent/native/injector.c v5.8
 // 描述: ptrace 注入器 — 自动解析 dlopen 所在库，正确计算目标地址
 //   ARM64 上无 mmap syscall, 改用目标进程栈存放路径字符串
 // 编译: clang -Os -Wall injector.c -o injector -ldl

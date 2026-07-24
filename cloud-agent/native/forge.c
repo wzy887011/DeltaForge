@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/forge.c v5.6
+// 法器: DeltaForge/cloud-agent/native/forge.c v5.8
 // 描述: 三角洲行动云手机过检测核心 - 完整内存补丁 + 环境伪装 + 文件清理
 // 编译: aarch64-linux-android21-clang -static -Os -o forge forge.c
 //   或: 云手机内 gcc -static -Os -o forge forge.c
@@ -40,7 +40,7 @@
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "5.6"
+#define FORGE_VERSION       "5.8"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
