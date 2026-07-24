@@ -4,15 +4,21 @@
 #   --dry-run   编译但不部署，输出 MD5
 #   --no-hijack 跳过 hijack so 更新 (推荐，默认行为将 deprecated)
 #   --auto      部署后自动运行 forge -l 注入启动游戏
+#   --restore-qimei  恢复原版 libtdmqimei.so (清理旧 hijack 残留)
 # NOTE: hijack (so替换) 模式已弃用。推荐使用 forge -l inject 模式。
+# BUG: 旧 hijack so 残留会导致 inject 模式闪退——两个版本同时加载冲突
 set -e
 
 DRY_RUN=0
 NO_HIJACK=0
 AUTO_LAUNCH=0
+RESTORE_QIMEI=0
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY_RUN=1;;
+        --no-hijack) NO_HIJACK=1; RESTORE_QIMEI=1;;  /* inject模式必须恢复原版qimei */
+        --restore-qimei) RESTORE_QIMEI=1;;
+        --auto) AUTO_LAUNCH=1;;
         --no-hijack) NO_HIJACK=1;;
         --auto) AUTO_LAUNCH=1;;
     esac
@@ -91,6 +97,12 @@ chmod 644 $TMP/libforgehook.so
 HIJACK=$(find /data/app -name libtdmqimei_real.so 2>/dev/null | head -1)
 if [ -n "$HIJACK" ]; then
     DIR=$(dirname "$HIJACK")
+    if [ "__RESTORE_QIMEI__" = "1" ]; then
+        cp "$DIR/libtdmqimei_real.so" "$DIR/libtdmqimei.so"
+        chmod 644 "$DIR/libtdmqimei.so"
+        restorecon "$DIR/libtdmqimei.so" 2>/dev/null
+        echo "[!] Qimei RESTORED to original — inject mode safe now"
+    fi
     if [ "$NO_HIJACK" = "1" ]; then
         echo "[!] Hijack SKIPPED (--no-hijack). Use inject mode: su -c '$TMP/forge -l'"
     else
@@ -110,6 +122,7 @@ DEPLOY_EOF
 
 sed -i "s|__NATIVE__|$NATIVE|g" "$DEPLOY_SH"
 sed -i "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" "$DEPLOY_SH"
+sed -i "s|__RESTORE_QIMEI__|$RESTORE_QIMEI|g" "$DEPLOY_SH"
 
 echo "[+] Deploy MD5:"
 md5sum forge libforgehook.so
