@@ -90,8 +90,17 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 /* ---- constructor(48) — early probe to confirm library load ---- */
 __attribute__((constructor(48)))
 static void _probe_loaded(void) {
-    const char *msg = "[probe] libforgehook.so loaded\n";
+    const char *msg = "[CTOR] 48 _probe_loaded enter\n";
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
+        "/data/local/tmp/forge_hook.log",
+        O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd >= 0) {
+        size_t len = 0; while (msg[len]) len++;
+        (void)syscall(SYS_write, fd, msg, len);
+        syscall(SYS_close, fd);
+    }
+    msg = "[CTOR] 48 _probe_loaded done\n";
+    fd = (int)syscall(SYS_openat, AT_FDCWD,
         "/data/local/tmp/forge_hook.log",
         O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd >= 0) {
@@ -104,9 +113,10 @@ static void _probe_loaded(void) {
 /* ---- maps filter — priority 50: hide instrumentation before chainload ---- */
 __attribute__((constructor(50)))
 static void _hide_self_from_maps(void) {
+    hook_log("[CTOR] 50 _hide_self_from_maps enter\n");
     srand(time(NULL)^getpid()^(long)pthread_self());
     FILE *maps=fopen("/proc/self/maps","r");
-    if(!maps)return;
+    if(!maps){hook_log("[CTOR] 50 fopen maps FAILED\n");return;}
     char line[512];
     while(fgets(line,sizeof(line),maps)){
         if(strstr(line,"libforgehook")||strstr(line,"libqimei_")){
@@ -119,6 +129,7 @@ static void _hide_self_from_maps(void) {
         }
     }
     fclose(maps);
+    hook_log("[CTOR] 50 _hide_self_from_maps done\n");
 }
 
 /* ---- audit log — buffered writes for I/O efficiency ---- */
@@ -223,6 +234,7 @@ static int find_self_from_maps(char *out, size_t out_sz) {
 
 __attribute__((constructor(100)))
 static void _chainload_real_qimei(void) {
+    hook_log("[CTOR] 100 _chainload_real_qimei enter\n");
     char real_path[1024];
     char self_path[1024];
     Dl_info info;
@@ -237,17 +249,21 @@ static void _chainload_real_qimei(void) {
         forge_log_raw("chainload: /proc/self/maps OK\n");
     } else {
         forge_log_raw("chainload: FAILED to resolve own path\n");
+        hook_log("[CTOR] 100 chainload FAILED (no path)\n");
         return;
     }
     dlerror();
+    hook_log("[CTOR] 100 calling dlopen...\n");
     void *h = dlopen(real_path, RTLD_NOW | RTLD_GLOBAL);
     if (!h) {
         forge_log_raw("chainload: dlopen FAILED: ");
         forge_log_raw(dlerror());
         forge_log_raw("\n");
+        hook_log("[CTOR] 100 chainload dlopen FAILED\n");
         return;
     }
     forge_log_raw("chainload: dlopen SUCCESS\n");
+    hook_log("[CTOR] 100 _chainload_real_qimei done\n");
 }
 
 /* ---- override data tables ---- */
@@ -850,9 +866,10 @@ struct my_r_debug {
 
 __attribute__((constructor(101)))
 static void _hide_from_linker_list(void) {
+    hook_log("[CTOR] 101 _hide_from_linker_list enter\n");
     struct my_r_debug *dbg = (struct my_r_debug *)dlsym(RTLD_DEFAULT, "_r_debug");
     if (!dbg) dbg = (struct my_r_debug *)dlsym(RTLD_DEFAULT, "__r_debug");
-    if (!dbg || !dbg->r_map) return;
+    if (!dbg || !dbg->r_map) { hook_log("[CTOR] 101 no r_debug found\n"); return; }
 
     struct my_link_map *prev = NULL, *cur = dbg->r_map;
     int removed = 0;
@@ -870,6 +887,7 @@ static void _hide_from_linker_list(void) {
         prev = cur;
         cur = cur->l_next;
     }
+    hook_log("[CTOR] 101 _hide_from_linker_list done\n");
 }
 
 /* ---- getaddrinfo hook — DNS resolution filter ---- */
@@ -976,6 +994,7 @@ static const char *eglQueryString_wrapper(EGLDisplay dpy, EGLint name) {
 
 __attribute__((constructor(120)))
 static void _patch_gpu_driver(void) {
+    hook_log("[CTOR] 120 _patch_gpu_driver enter\n");
     /* 在后台线程做，避免阻塞主加载流程 */
     uintptr_t gles_base = 0, egl_base = 0;
     /* 轮询等待 GPU 库加载 (最多 20s) */
@@ -1019,6 +1038,7 @@ static void _patch_gpu_driver(void) {
         hook_log("[gpu] GPU driver strings normalized\n");
     else
         hook_log("[gpu] WARNING: GPU hooks FAILED\n");
+    hook_log("[CTOR] 120 _patch_gpu_driver done\n");
 }
 
 /* ============================================================
@@ -1139,6 +1159,7 @@ static void *_patch_tersafe_thread(void *unused) {
 
 __attribute__((constructor(150)))
 static void _patch_tersafe(void) {
+    hook_log("[CTOR] 150 _patch_tersafe enter\n");
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -1148,6 +1169,7 @@ static void _patch_tersafe(void) {
         _patch_tersafe_thread(NULL);
     }
     pthread_attr_destroy(&attr);
+    hook_log("[CTOR] 150 _patch_tersafe done\n");
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
@@ -1213,6 +1235,7 @@ static struct sock_filter g_bpf_prog[]={
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
 static void install_seccomp(void){
+    hook_log("[CTOR] 49 _install_seccomp_cb enter\n");
     struct sigaction sa;
     memset(&sa,0,sizeof(sa));
     sa.sa_sigaction=sigsys_handler;
@@ -1228,6 +1251,7 @@ static void install_seccomp(void){
         "[seccomp] v6.1 exit_group-only, r=%ld errno=%d tsync=%d active=%d\n",
         r, r!=0?errno:0, used_tsync, g_bpf_active);
     if (ln > 0) hook_log(logbuf);
+    hook_log("[CTOR] 49 _install_seccomp_cb done\n");
 }
 /* priority=49 - install seccomp before other hooks (no race window) */
 __attribute__((constructor(49)))
