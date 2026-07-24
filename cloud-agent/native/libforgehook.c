@@ -958,45 +958,18 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 
 /* ---- GLES/EGL hook — GPU renderer string normalization ---- */
 /* Use raw type declarations for build independence */
-typedef unsigned int        GLenum;
-typedef unsigned char       GLubyte;
-typedef void               *EGLDisplay;
-typedef int                 EGLint;
-
-static const GLubyte OVERRIDE_GL_RENDERER[] = "Adreno (TM) 740";
-static const GLubyte OVERRIDE_GL_VENDOR[]   = "Qualcomm";
-static const char     OVERRIDE_EGL_VENDOR[] = "Qualcomm";
-
-typedef const GLubyte *(*glGetString_t)(GLenum);
-typedef const char     *(*eglQueryString_t)(EGLDisplay, EGLint);
-static glGetString_t    _glGetString    = NULL;
-static eglQueryString_t _eglQueryString = NULL;
-
-static int g_gles_patched = 0;
-static int g_egl_patched  = 0;
-
-/* ARM64: 写入 B <offset> 指令 (无条件跳转) */
-static int patch_branch(uintptr_t from, uintptr_t to) {
-    int64_t delta = (int64_t)to - (int64_t)from;
-    if (delta < -134217728 || delta > 134217724) return -1; /* ±128MB */
-    uint32_t insn = 0x14000000u | ((uint32_t)((delta >> 2) & 0x03FFFFFFu));
-    return patch_insn(from, insn);
-}
-
-static const GLubyte *glGetString_wrapper(GLenum name) {
-    if (name == 0x1F01) return OVERRIDE_GL_RENDERER;
-    if (name == 0x1F00) return OVERRIDE_GL_VENDOR;
-    return _glGetString ? _glGetString(name) : (const GLubyte *)"";
-}
-
-static const char *eglQueryString_wrapper(EGLDisplay dpy, EGLint name) {
-    if (name == 0x3053)      return OVERRIDE_EGL_VENDOR;  /* EGL_VENDOR */
-    if (name == 0x305A)      return (const char *)OVERRIDE_GL_RENDERER; /* EGL_RENDERER_EXT */
-    return _eglQueryString ? _eglQueryString(dpy, name) : "";
-}
-
-/* DISABLED: constructor(120) GPU hook causes black screen on cloud phone
-   — fake GPU strings don't match actual hardware capabilities */
+/* DISABLED (v6.1): GPU hook removed — cloud phone virtual GPU doesn't match
+ * fake Adreno 730 strings. Returning mismatched GPU caps to UE4's renderer
+ * causes EGL/GLES initialization failure → permanent black screen.
+ *
+ * Original approach: patch_branch on glGetString/eglQueryString to return
+ * "Adreno (TM) 730" / "Qualcomm". But if the actual GPU is Mali or a
+ * virtualized GPU with different feature bits, the UE4 RHI layer queries
+ * GL_EXTENSIONS/GL_RENDERER, gets capabilities for Adreno 730, tries to
+ * use Adreno-specific extensions → fails → renderer stuck at init.
+ *
+ * Correct fix (TODO): query actual GPU caps at runtime, generate matching
+ * fake strings. Or use GPU-specific overrides per cloud phone model. */
 __attribute__((constructor(120)))
 static void _patch_gpu_driver(void) {
     hook_log("[CTOR] 120 _patch_gpu_driver SKIPPED (disabled — mismatched GPU caps)\n");
