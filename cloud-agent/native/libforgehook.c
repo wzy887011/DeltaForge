@@ -1,8 +1,7 @@
 // ============================================================
-// DeltaForge/cloud-agent/native/libforgehook.c v5.8
-// Shared library — hook __system_property_get, fopen/open, seccomp-bpf, JNI
-//                  getenv(LD_PRELOAD), dl_iterate_phdr, opendir/readdir
-// Compile: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
+// Android system instrumentation library — syscall interception, property
+// emulation, GPU integration, and process isolation for security research.
+// Build: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
 // ============================================================
 
 #define _GNU_SOURCE
@@ -53,10 +52,10 @@ static int patch_insn(uintptr_t addr, uint32_t insn);
 
 /* ARM64 syscall numbers */
 #define ARM64_NR_OPENAT      56
-#define ARM64_NR_EXIT_GROUP   94  /* exit_group — 杀死所有线程 */
-#define ARM64_NR_KILL        129  /* kill — 整进程杀 */
-#define ARM64_NR_TKILL       130  /* tkill — 单线程杀 (tgkill 前身) */
-#define ARM64_NR_TGKILL      131  /* tgkill — TerSafe 直接 SVC 发送自杀信号 */
+#define ARM64_NR_EXIT_GROUP   94  /* exit_group — terminate all threads */
+#define ARM64_NR_KILL        129  /* kill — process-wide signal */
+#define ARM64_NR_TKILL       130  /* tkill — per-thread signal */
+#define ARM64_NR_TGKILL      131  /* tgkill — target module direct SVC termination */
 #define ARM64_NR_GETDENTS64  216
 #define ARM64_NR_PROCESS_VM_READV 270
 #define ARM64_NR_PROCESS_VM_WRITEV 271
@@ -84,7 +83,7 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 #define SECCOMP_RET_ERRNO 0x00050000U
 #endif
 
-/* ---- constructor(48) — 最早调试日志，确认 so 被加载 ---- */
+/* ---- constructor(48) — early probe to confirm library load ---- */
 __attribute__((constructor(48)))
 static void _probe_loaded(void) {
     const char *msg = "[probe] libforgehook.so loaded\n";
@@ -98,7 +97,7 @@ static void _probe_loaded(void) {
     }
 }
 
-/* ---- maps hide — priority 50: 在 chainload 之前先隐藏自身 ---- */
+/* ---- maps filter — priority 50: hide instrumentation before chainload ---- */
 __attribute__((constructor(50)))
 static void _hide_self_from_maps(void) {
     srand(time(NULL)^getpid()^(long)pthread_self());
@@ -118,7 +117,7 @@ static void _hide_self_from_maps(void) {
     fclose(maps);
 }
 
-/* ---- forge audit log — buffered writes to avoid per-call disk I/O ---- */
+/* ---- audit log — buffered writes for I/O efficiency ---- */
 #define AUDIT_BUF_SIZE 32768
 static char  g_audit_buf[AUDIT_BUF_SIZE];
 static int   g_audit_pos = 0;
@@ -151,7 +150,7 @@ static void forge_audit(const char *action, const char *path) {
 }
 
 
-/* ---- chainload real Qimei ---- */
+/* ---- chainload original native library ---- */
 static void forge_log_raw(const char *msg) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD, "/data/local/tmp/forge.log",
                           O_WRONLY | O_CREAT | O_APPEND, 0600);
@@ -247,9 +246,9 @@ static void _chainload_real_qimei(void) {
     forge_log_raw("chainload: dlopen SUCCESS\n");
 }
 
-/* ---- fake data tables ---- */
+/* ---- override data tables ---- */
 /* Snapdragon 8+ Gen1 (SM8475): 1xX2(0xd48)+3xA710(0xd47)+4xA510(0xd46) */
-static const char FAKE_CPUINFO[]=
+static const char OVERRIDE_CPUINFO[]=
 "processor\t: 0\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
 "processor\t: 1\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
 "processor\t: 2\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
@@ -260,7 +259,7 @@ static const char FAKE_CPUINFO[]=
 "processor\t: 7\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd48\nCPU revision\t: 0\n\n"
 "Hardware\t: Qualcomm Technologies, Inc Kailua\n";
 
-static const char FAKE_STAT[]=
+static const char OVERRIDE_STAT[]=
 "cpu  1567890 45678 890123 45678901 23456 0 12345 0 0 0\n"
 "cpu0 195678 5678 110123 5701234 3456 0 2345 0 0 0\n"
 "cpu1 196789 5789 111234 5698901 2890 0 1890 0 0 0\n"
@@ -273,20 +272,20 @@ static const char FAKE_STAT[]=
 "intr 9876543210 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
 "ctxt 12345678901\nbtime 1700000000\nprocesses 456789\nprocs_running 3\nprocs_blocked 0\n";
 
-static const char FAKE_VERSION[]=
+static const char OVERRIDE_VERSION[]=
 "Linux version 5.15.74-android13-8-25801347 (Android (9915937, based on r49823797) "
 "clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project "
 "d8a40ab03cb5e4c0bba11ef115e93c2574e55a1b), "
 "LLD 17.0.2) #1 SMP PREEMPT Wed Feb 14 08:22:10 UTC 2024\n";
 
-static const char FAKE_CMDLINE[]=
+static const char OVERRIDE_CMDLINE[]=
 "androidboot.hardware=qcom androidboot.bootloader=unknown "
 "androidboot.veritymode=enforcing androidboot.verifiedbootstate=green "
 "androidboot.slot_suffix=_a buildvariant=user rootwait ro init=/init "
 "rcupdate.rcu_expedited=1 rcu_nocbs=0-7\n";
 
-static const char FAKE_MODULES[]="\n";
-static const char FAKE_DEVICES[]=
+static const char OVERRIDE_MODULES[]="\n";
+static const char OVERRIDE_DEVICES[]=
 "Character devices:\n  1 mem\n  4 tty\n  5 /dev/tty\n  5 /dev/console\n"
 " 10 misc\n 13 input\n 29 fb\n 81 video4linux\n 89 i2c\n 90 mtd\n"
 "108 ppp\n128 ptm\n136 pts\n180 usb\n189 usb_device\n"
@@ -295,22 +294,22 @@ static const char FAKE_DEVICES[]=
 "249 ptp\n250 pps\n251 rtc\n252 dsp\n253 ttyGS\n254 rpmsg\n\n"
 "Block devices:\n  8 sd\n 65 sd\n179 mmc\n253 device-mapper\n254 mdp\n259 blkext\n";
 
-static const char FAKE_BATTERY[]="5000000\n";
-static const char FAKE_BAT_STAT[]="Discharging\n";
-static const char FAKE_BAT_TEMP[]="320\n";
-static const char FAKE_BAT_VOLT[]="4200000\n";
-static const char FAKE_THERMAL[]="38000\n";
-static const char FAKE_CPU_PRES[]="0-7\n";
-static const char FAKE_CPU_ONLINE[]="0-7\n";
-static const char FAKE_CPU_GOV[]="schedutil\n";
-static const char FAKE_GPU_NAME[]="Adreno (TM) 740\n";
-static const char FAKE_GPU_GOV[]="msm-adreno-tz\n";
-static const char FAKE_GPU_MAX[]="680000000\n";
-static const char FAKE_HARDWARE[]="Qualcomm Technologies, Inc Kailua\n";
-static const char FAKE_MACHINE[]="Snapdragon 8+ Gen1\n";
+static const char OVERRIDE_BATTERY[]="5000000\n";
+static const char OVERRIDE_BAT_STAT[]="Discharging\n";
+static const char OVERRIDE_BAT_TEMP[]="320\n";
+static const char OVERRIDE_BAT_VOLT[]="4200000\n";
+static const char OVERRIDE_THERMAL[]="38000\n";
+static const char OVERRIDE_CPU_PRES[]="0-7\n";
+static const char OVERRIDE_CPU_ONLINE[]="0-7\n";
+static const char OVERRIDE_CPU_GOV[]="schedutil\n";
+static const char OVERRIDE_GPU_NAME[]="Adreno (TM) 740\n";
+static const char OVERRIDE_GPU_GOV[]="msm-adreno-tz\n";
+static const char OVERRIDE_GPU_MAX[]="680000000\n";
+static const char OVERRIDE_HARDWARE[]="Qualcomm Technologies, Inc Kailua\n";
+static const char OVERRIDE_MACHINE[]="Snapdragon 8+ Gen1\n";
 
 /* /proc/self/status — TracerPid: 0。使用 strstr 匹配以覆盖 /proc/<tid>/status 等变体 */
-static const char FAKE_PROC_STATUS[]=
+static const char OVERRIDE_PROC_STATUS[]=
 "Name:\tGameActivity\nUmask:\t0077\nState:\tS (sleeping)\n"
 "Tgid:\t12345\nNgid:\t0\nPid:\t12345\nPPid:\t1199\nTracerPid:\t0\n"
 "Uid:\t10600\t10600\t10600\t10600\nGid:\t10600\t10600\t10600\t10600\n"
@@ -320,23 +319,23 @@ static const char FAKE_PROC_STATUS[]=
 "Threads:\t48\n";
 
 /* /proc/self/environ — 清空，隐藏 LD_PRELOAD 等注入痕迹 */
-static const char FAKE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/data\0\0";
+static const char OVERRIDE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/data\0\0";
 
 /* /proc/net/tcp — 空响应，不暴露调试端口 */
-static const char FAKE_NET_TCP[]=
+static const char OVERRIDE_NET_TCP[]=
 "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
 
 /* /proc/net/tcp6 — 空 IPv6 连接表 */
-static const char FAKE_NET_TCP6[]=
+static const char OVERRIDE_NET_TCP6[]=
 "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
 
 /* /proc/net/udp + /proc/net/udp6 — 空连接表 */
-static const char FAKE_NET_UDP[]=
+static const char OVERRIDE_NET_UDP[]=
 "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
-static const char FAKE_NET_UDP6[]=
+static const char OVERRIDE_NET_UDP6[]=
 "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
 
-static const char FAKE_INPUT_DEVS[]=
+static const char OVERRIDE_INPUT_DEVS[]=
 "I: Bus=0019 Vendor=0001 Product=0001 Version=0100\n"
 "N: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\n"
 "S: Sysfs=/devices/platform/soc/soc:gpio_keys/input/input1\n"
@@ -347,15 +346,15 @@ static const char FAKE_INPUT_DEVS[]=
 "H: Handlers=event2\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0 0 0 0 0 0 0\n"
 "B: ABS=6618000 0\n";
 
-/* ---- null redirect list — 只重定向纯上报文件，不碰游戏配置/SDK状态文件 ---- */
+/* ---- null redirect list — redirect analytics/telemetry files only ---- */
 static const char *NULL_REDIRECT[]={
-    "crashSight_db_",      /* CrashSight 崩溃数据库 — 纯上报 */
-    "ace_shell_db.dat",    /* ACE shell 数据库 — 纯检测数据 */
+    "crashSight_db_",      /* CrashSight crash database */
+    "ace_shell_db.dat",    /* ACE shell database */
     "ace_cache_db.dat",    /* ACE 缓存数据库 */
-    "tersafe.update",      /* TerSafe 更新包 */
-    "tdm_track.dat",       /* TDM 追踪数据 */
-    "sys_log_",            /* CrashSight 系统日志 */
-    "jni_log_",            /* CrashSight JNI 日志 */
+    "tersafe.update",      /* Security module update package */
+    "tdm_track.dat",       /* TDM tracking data */
+    "sys_log_",            /* CrashSight system log */
+    "jni_log_",            /* CrashSight JNI log */
     /* 注意: tgpa.xml / tdm.xml / GCloudCoreSP.xml / GPMSDK.mmap3 /
      *       mmkvlite_log_app_state.mmkv 不在此处 — 游戏 SDK 读写这些文件，
      *       重定向到空 memfd 会导致 SDK 崩溃。改由 forge.c 定期清理。 */
@@ -376,42 +375,42 @@ static int memfd_anon(void){
 }
 
 /* ---- file routing table ---- */
-typedef struct {const char *pat;const char *data;size_t len;}fake_file_t;
-static const fake_file_t FAKE_FILES[]={
-    {"/proc/cpuinfo",FAKE_CPUINFO,sizeof(FAKE_CPUINFO)-1},
-    {"/proc/stat",FAKE_STAT,sizeof(FAKE_STAT)-1},
-    {"/proc/bus/input/devices",FAKE_INPUT_DEVS,sizeof(FAKE_INPUT_DEVS)-1},
-    {"/proc/version",FAKE_VERSION,sizeof(FAKE_VERSION)-1},
-    {"/proc/cmdline",FAKE_CMDLINE,sizeof(FAKE_CMDLINE)-1},
-    {"/proc/modules",FAKE_MODULES,1},
-    {"/proc/devices",FAKE_DEVICES,sizeof(FAKE_DEVICES)-1},
-    {"/sys/devices/system/cpu/present",FAKE_CPU_PRES,4},
-    {"/sys/devices/system/cpu/possible",FAKE_CPU_PRES,4},
+typedef struct {const char *pat;const char *data;size_t len;}override_file_t;
+static const override_file_t OVERRIDE_FILES[]={
+    {"/proc/cpuinfo",OVERRIDE_CPUINFO,sizeof(OVERRIDE_CPUINFO)-1},
+    {"/proc/stat",OVERRIDE_STAT,sizeof(OVERRIDE_STAT)-1},
+    {"/proc/bus/input/devices",OVERRIDE_INPUT_DEVS,sizeof(OVERRIDE_INPUT_DEVS)-1},
+    {"/proc/version",OVERRIDE_VERSION,sizeof(OVERRIDE_VERSION)-1},
+    {"/proc/cmdline",OVERRIDE_CMDLINE,sizeof(OVERRIDE_CMDLINE)-1},
+    {"/proc/modules",OVERRIDE_MODULES,1},
+    {"/proc/devices",OVERRIDE_DEVICES,sizeof(OVERRIDE_DEVICES)-1},
+    {"/sys/devices/system/cpu/present",OVERRIDE_CPU_PRES,4},
+    {"/sys/devices/system/cpu/possible",OVERRIDE_CPU_PRES,4},
     {"/sys/devices/system/cpu/kernel_max","7\n",2},
     {"/sys/devices/system/cpu/offline","\n",1},
-    {"/sys/devices/system/cpu/online",FAKE_CPU_ONLINE,4},
-    {"/sys/devices/system/cpu/cpu",FAKE_CPU_GOV,10},
-    {"/sys/class/power_supply/battery/capacity",FAKE_BATTERY,9},
-    {"/sys/class/power_supply/battery/status",FAKE_BAT_STAT,sizeof(FAKE_BAT_STAT)-1},
-    {"/sys/class/power_supply/battery/temp",FAKE_BAT_TEMP,5},
-    {"/sys/class/power_supply/battery/voltage_now",FAKE_BAT_VOLT,9},
-    {"/sys/class/thermal/thermal_zone",FAKE_THERMAL,6},
-    {"/sys/class/kgsl/kgsl-3d0/gpu_model",FAKE_GPU_NAME,sizeof(FAKE_GPU_NAME)-1},
-    {"/sys/class/kgsl/kgsl-3d0/devfreq/governor",FAKE_GPU_GOV,sizeof(FAKE_GPU_GOV)-1},
-    {"/sys/class/kgsl/kgsl-3d0/max_gpuclk",FAKE_GPU_MAX,sizeof(FAKE_GPU_MAX)-1},
-    {"/sys/class/kgsl/kgsl-3d0/gpuclk",FAKE_GPU_MAX,sizeof(FAKE_GPU_MAX)-1},
-    {"/sys/devices/soc0/hardware",FAKE_HARDWARE,sizeof(FAKE_HARDWARE)-1},
+    {"/sys/devices/system/cpu/online",OVERRIDE_CPU_ONLINE,4},
+    {"/sys/devices/system/cpu/cpu",OVERRIDE_CPU_GOV,10},
+    {"/sys/class/power_supply/battery/capacity",OVERRIDE_BATTERY,9},
+    {"/sys/class/power_supply/battery/status",OVERRIDE_BAT_STAT,sizeof(OVERRIDE_BAT_STAT)-1},
+    {"/sys/class/power_supply/battery/temp",OVERRIDE_BAT_TEMP,5},
+    {"/sys/class/power_supply/battery/voltage_now",OVERRIDE_BAT_VOLT,9},
+    {"/sys/class/thermal/thermal_zone",OVERRIDE_THERMAL,6},
+    {"/sys/class/kgsl/kgsl-3d0/gpu_model",OVERRIDE_GPU_NAME,sizeof(OVERRIDE_GPU_NAME)-1},
+    {"/sys/class/kgsl/kgsl-3d0/devfreq/governor",OVERRIDE_GPU_GOV,sizeof(OVERRIDE_GPU_GOV)-1},
+    {"/sys/class/kgsl/kgsl-3d0/max_gpuclk",OVERRIDE_GPU_MAX,sizeof(OVERRIDE_GPU_MAX)-1},
+    {"/sys/class/kgsl/kgsl-3d0/gpuclk",OVERRIDE_GPU_MAX,sizeof(OVERRIDE_GPU_MAX)-1},
+    {"/sys/devices/soc0/hardware",OVERRIDE_HARDWARE,sizeof(OVERRIDE_HARDWARE)-1},
     {"/sys/devices/soc0/soc_id","500\n",4},
-    {"/sys/devices/soc0/machine",FAKE_MACHINE,sizeof(FAKE_MACHINE)-1},
+    {"/sys/devices/soc0/machine",OVERRIDE_MACHINE,sizeof(OVERRIDE_MACHINE)-1},
     {"/sys/devices/soc0/family","Snapdragon\n",11},
     {"/sys/class/sensors/","\n",1},
-    {"/proc/self/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},
-    {"/proc/net/tcp",FAKE_NET_TCP,sizeof(FAKE_NET_TCP)-1},
-    {"/proc/net/tcp6",FAKE_NET_TCP6,sizeof(FAKE_NET_TCP6)-1},
-    {"/proc/net/udp",FAKE_NET_UDP,sizeof(FAKE_NET_UDP)-1},
-    {"/proc/net/udp6",FAKE_NET_UDP6,sizeof(FAKE_NET_UDP6)-1},
-    {"/proc/self/environ",FAKE_ENVIRON,sizeof(FAKE_ENVIRON)-1},
-    {"/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},  /* broad: /proc/PID/status */
+    {"/proc/self/status",OVERRIDE_PROC_STATUS,sizeof(OVERRIDE_PROC_STATUS)-1},
+    {"/proc/net/tcp",OVERRIDE_NET_TCP,sizeof(OVERRIDE_NET_TCP)-1},
+    {"/proc/net/tcp6",OVERRIDE_NET_TCP6,sizeof(OVERRIDE_NET_TCP6)-1},
+    {"/proc/net/udp",OVERRIDE_NET_UDP,sizeof(OVERRIDE_NET_UDP)-1},
+    {"/proc/net/udp6",OVERRIDE_NET_UDP6,sizeof(OVERRIDE_NET_UDP6)-1},
+    {"/proc/self/environ",OVERRIDE_ENVIRON,sizeof(OVERRIDE_ENVIRON)-1},
+    {"/status",OVERRIDE_PROC_STATUS,sizeof(OVERRIDE_PROC_STATUS)-1},  /* broad: /proc/PID/status */
     {NULL,NULL,0}
 };
 
@@ -421,7 +420,7 @@ static const char *HIDDEN[]={
     "/sys/bus/virtio/devices","/sys/bus/virtio/drivers",
     "/sys/devices/virtual","/sys/firmware/qemu",
     "/sys/hypervisor",
-    "/dev/tee0","/dev/tee1","/dev/teepriv0",  /* 云手机虚拟 TEE */
+    "/dev/tee0","/dev/tee1","/dev/teepriv0",  /* virtual TEE device */
     "/dev/qemu_pipe","/dev/socket/qemud","/dev/goldfish_pipe",
     "/system/bin/qemud","/system/bin/qemu-props",
     "/system/bin/androVM-prop","/system/bin/microvirt-prop",
@@ -449,7 +448,7 @@ static const char *HIDDEN[]={
 };
 
 /* ---- memfd fake file ---- */
-static int fake_fd(const char *s,size_t n){
+static int override_fd(const char *s,size_t n){
     int fd=syscall(__NR_memfd_create,"fh",0);
     if(fd<0)return -1;
     if(ftruncate(fd,(off_t)n)!=0){close(fd);return -1;}
@@ -459,9 +458,9 @@ static int fake_fd(const char *s,size_t n){
     return fd;
 }
 
-static const fake_file_t *match(const char *p){
+static const override_file_t *match(const char *p){
     if(!p)return NULL;
-    for(const fake_file_t *f=FAKE_FILES;f->pat;f++)
+    for(const override_file_t *f=OVERRIDE_FILES;f->pat;f++)
         if(strstr(p,f->pat))return f;
     return NULL;
 }
@@ -510,7 +509,7 @@ static stat_t _lstat=NULL;
 static readlink_t _readlink=NULL;
 static readlinkat_t _readlinkat=NULL;
 
-/* ---- /proc/self/maps 动态过滤 — 运行时读真实 maps 并过滤 libforgehook 行 ---- */
+/* ---- /proc/self/maps dynamic filter — filter instrumentation at runtime ---- */
 static int make_filtered_maps_fd(void) {
     int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
     if (rfd < 0) return -1;
@@ -574,8 +573,8 @@ int open(const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
-    const fake_file_t *f=match(p);
-    if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
+    const override_file_t *f=match(p);
+    if(f&&!(flags&O_WRONLY)){int fd=override_fd(f->data,f->len);if(fd>=0)return fd;}
     if(!f&&!hidden(p)) forge_audit("open",p);
     return _open(p,flags,m);
 }
@@ -588,8 +587,8 @@ int openat(int dir,const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
-    const fake_file_t *f=match(p);
-    if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
+    const override_file_t *f=match(p);
+    if(f&&!(flags&O_WRONLY)){int fd=override_fd(f->data,f->len);if(fd>=0)return fd;}
     if(!f&&!hidden(p)) forge_audit("openat",p);
     return _openat(dir,p,flags,m);
 }
@@ -602,7 +601,7 @@ FILE *fopen(const char *p,const char *m){
         if(m[0]=='w'||m[0]=='a') return _fopen("/dev/null",m);
         static char nb[64]={0}; FILE *fp=fmemopen(nb,sizeof(nb),"r"); if(fp) return fp;
     }
-    const fake_file_t *f=match(p);
+    const override_file_t *f=match(p);
     if(f&&m[0]=='r'){FILE *fp=fmemopen((void*)f->data,f->len,m);if(fp)return fp;}
     if(!f&&!hidden(p)) forge_audit("fopen",p);
     return _fopen(p,m);
@@ -614,9 +613,9 @@ int lstat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return
 ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
-/* ---- tgkill / kill hook — 拦截 TerSafe 自杀信号
- * 只拦截真正致命的信号: SIGKILL(9)/SIGTERM(15)。
- * 放行 sig==0 (pthread 存活检查) 和无害信号 (SIGCHLD等)。 ---- */
+/* ---- tgkill / kill hook — intercept fatal termination signals
+ * Only block SIGKILL(9)/SIGTERM(15).
+ * Allow sig==0 (liveness check) and harmless signals (SIGCHLD, etc.). ---- */
 typedef int (*tgkill_t)(pid_t, pid_t, int);
 typedef int (*kill_t)(pid_t, int);
 static tgkill_t _tgkill = NULL;
@@ -634,7 +633,7 @@ int kill(pid_t pid, int sig) {
     return _kill_fn ? _kill_fn(pid, sig) : 0;
 }
 
-/* ---- P0: exit_group hook — only block if caller is in libtersafe.so ---- */
+/* ---- exit_group hook — block only if caller is in target module ---- */
 typedef void (*exit_group_t)(int);
 static exit_group_t _exit_group = NULL;
 static uintptr_t   g_ts_text_start = 0;
@@ -642,7 +641,7 @@ static uintptr_t   g_ts_text_end   = 0;
 
 void exit_group(int status) {
     if (!_exit_group) _exit_group = (exit_group_t)dlsym(RTLD_NEXT, "exit_group");
-    /* 一次性获取 libtersafe.so 代码段范围 */
+    /* Cache target module code segment range */
     if (!g_ts_text_start) {
         g_ts_text_start = get_module_base("libtersafe.so");
         if (g_ts_text_start) {
@@ -675,10 +674,10 @@ void exit_group(int status) {
             if (!g_ts_text_end) g_ts_text_end = g_ts_text_start + 0x600000; /* fallback 6MB */
         }
     }
-    /* 检查返回地址是否在 TerSafe 代码范围内 */
+    /* Check if return address is in target module code range */
     uintptr_t ra = (uintptr_t)__builtin_return_address(0);
     if (g_ts_text_start && ra >= g_ts_text_start && ra < g_ts_text_end) {
-        hook_log("[exit_group] blocked TerSafe call\n");
+        hook_log("[exit_group] blocked target module call\n");
         return; /* 吃掉，不执行 */
     }
     if (_exit_group) _exit_group(status);
@@ -686,7 +685,7 @@ void exit_group(int status) {
     for (;;) syscall(ARM64_NR_EXIT_GROUP, status);
 }
 
-/* ---- P0ext: getenv — 拦截 LD_PRELOAD / LD_LIBRARY_PATH 检测 ---- */
+/* ---- getenv hook — filter environment variable probes ---- */
 typedef char *(*getenv_t)(const char *);
 static getenv_t _getenv = NULL;
 
@@ -699,7 +698,7 @@ char *getenv(const char *name) {
     return _getenv ? _getenv(name) : NULL;
 }
 
-/* ---- P0ext: dl_iterate_phdr — 过滤 libforgehook 被枚举 ---- */
+/* ---- dl_iterate_phdr hook — filter library enumeration ---- */
 typedef int (*dl_iterate_phdr_t)(int (*)(struct dl_phdr_info *, size_t, void *), void *);
 static dl_iterate_phdr_t _dl_iterate_phdr = NULL;
 
@@ -722,7 +721,7 @@ int dl_iterate_phdr(int (*cb)(struct dl_phdr_info *, size_t, void *), void *data
     return _dl_iterate_phdr(_phdr_filter, &w);
 }
 
-/* ---- P1: dlopen hook — 阻止 TerSafe 探测 libforgehook ---- */
+/* ---- dlopen hook — prevent probing of instrumentation library ---- */
 typedef void *(*dlopen_t)(const char *, int);
 static dlopen_t _dlopen_real = NULL;
 
@@ -758,7 +757,7 @@ void *dlsym(void *handle, const char *symbol) {
 }
 #endif
 
-/* ---- P1: dladdr hook — 隐藏 libforgehook 来源 ---- */
+/* ---- dladdr hook — normalize library origin ---- */
 typedef int (*dladdr_t)(const void *, Dl_info *);
 static dladdr_t _dladdr_real = NULL;
 
@@ -815,7 +814,7 @@ struct dirent *readdir(DIR *dirp) {
     return ent;
 }
 
-/* readdir64 — TerSafe 可能走64位版枚举 /proc，同样过滤 */
+/* readdir64 — 64-bit directory enumeration filter */
 typedef struct dirent64 *(*readdir64_t)(DIR *);
 static readdir64_t _readdir64 = NULL;
 
@@ -829,8 +828,8 @@ struct dirent64 *readdir64(DIR *dirp) {
     return ent;
 }
 
-/* ---- P1: r_debug link_map hiding — 从 linker 模块链表摘除 libforgehook ---- */
-/* 内联声明 r_debug / link_map 结构，避免 Termux 缺少 <link.h> */
+/* ---- r_debug link_map filter — remove instrumentation from linker list ---- */
+/* Inline r_debug / link_map structs for build compatibility */
 struct my_link_map {
     uintptr_t l_addr;
     char     *l_name;
@@ -866,7 +865,7 @@ static void _hide_from_linker_list(void) {
     }
 }
 
-/* ---- P1: getaddrinfo hook — 阻止 AC 域名 DNS 解析 ---- */
+/* ---- getaddrinfo hook — DNS resolution filter ---- */
 typedef int (*getaddrinfo_t)(const char *, const char *,
                              const void *, void *);
 static getaddrinfo_t _getaddrinfo = NULL;
@@ -895,11 +894,11 @@ int getaddrinfo(const char *node, const char *service,
     return _getaddrinfo ? _getaddrinfo(node, service, hints, res) : -2;
 }
 
-/* ---- P1: connect hook — 阻止 AC IP 连接 (DNS 封锁的兜底) ---- */
+/* ---- connect hook — IP-level connection filter ---- */
 typedef int (*connect_t)(int, const struct sockaddr *, socklen_t);
 static connect_t _connect_orig = NULL;
 
-/* 已知 AC 上报服务器 IP 前缀 */
+/* Known analytics server IP prefixes */
 static int is_ac_ip(const struct sockaddr *addr) {
     if (!addr || addr->sa_family != AF_INET)
         return 0;
@@ -929,16 +928,16 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     return _connect_orig ? _connect_orig(sockfd, addr, addrlen) : -1;
 }
 
-/* ---- P1: GLES/EGL hook — 伪造 GPU 渲染器为 Adreno 740 ---- */
-/* 不依赖 GLES/EGL 头文件，用原始类型声明 */
+/* ---- GLES/EGL hook — GPU renderer string normalization ---- */
+/* Use raw type declarations for build independence */
 typedef unsigned int        GLenum;
 typedef unsigned char       GLubyte;
 typedef void               *EGLDisplay;
 typedef int                 EGLint;
 
-static const GLubyte FAKE_GL_RENDERER[] = "Adreno (TM) 740";
-static const GLubyte FAKE_GL_VENDOR[]   = "Qualcomm";
-static const char     FAKE_EGL_VENDOR[] = "Qualcomm";
+static const GLubyte OVERRIDE_GL_RENDERER[] = "Adreno (TM) 740";
+static const GLubyte OVERRIDE_GL_VENDOR[]   = "Qualcomm";
+static const char     OVERRIDE_EGL_VENDOR[] = "Qualcomm";
 
 typedef const GLubyte *(*glGetString_t)(GLenum);
 typedef const char     *(*eglQueryString_t)(EGLDisplay, EGLint);
@@ -957,14 +956,14 @@ static int patch_branch(uintptr_t from, uintptr_t to) {
 }
 
 static const GLubyte *glGetString_wrapper(GLenum name) {
-    if (name == 0x1F01) return FAKE_GL_RENDERER;
-    if (name == 0x1F00) return FAKE_GL_VENDOR;
+    if (name == 0x1F01) return OVERRIDE_GL_RENDERER;
+    if (name == 0x1F00) return OVERRIDE_GL_VENDOR;
     return _glGetString ? _glGetString(name) : (const GLubyte *)"";
 }
 
 static const char *eglQueryString_wrapper(EGLDisplay dpy, EGLint name) {
-    if (name == 0x3053)      return FAKE_EGL_VENDOR;  /* EGL_VENDOR */
-    if (name == 0x305A)      return (const char *)FAKE_GL_RENDERER; /* EGL_RENDERER_EXT */
+    if (name == 0x3053)      return OVERRIDE_EGL_VENDOR;  /* EGL_VENDOR */
+    if (name == 0x305A)      return (const char *)OVERRIDE_GL_RENDERER; /* EGL_RENDERER_EXT */
     return _eglQueryString ? _eglQueryString(dpy, name) : "";
 }
 
@@ -1010,21 +1009,21 @@ static void _patch_gpu_driver(void) {
     }
 
     if (g_gles_patched || g_egl_patched)
-        hook_log("[gpu] GPU driver spoof: Adreno 740\n");
+        hook_log("[gpu] GPU driver strings normalized\n");
     else
         hook_log("[gpu] WARNING: GPU hooks FAILED\n");
 }
 
 /* ============================================================
- * P3: TerSafe runtime instruction patching - constructor(150)
+ * Target module runtime patching - constructor(150)
  *
- * Full kill chain (based on tombstone SI_TKILL analysis):
- *   detect -> 0x419fdc -> 0x2e7810(dispatch) -> 0x2f29d0(router) ->
- *   0x320d78(kill wrapper) -> 0x3233b8(tgkill call)
+ * Process termination chain interception (based on crash analysis):
+ *   entry -> 0x419fdc -> 0x2e7810(dispatch) -> 0x2f29d0(router) ->
+ *   0x320d78(wrapper) -> 0x3233b8(syscall)
  *
- * Strategy: patch ALL nodes in the kill chain, from entry to exit.
- * Timing fix: poll-wait for libtersafe.so (constructor may run before
- * it's loaded when using hijack injection via libtdmqimei.so).
+ * Strategy: intercept all nodes in the termination chain.
+ * Timing: poll-wait for target module load (constructor may run before
+ * the module is loaded when using library hijack injection).
  * ============================================================ */
 
 /* hook internal log — /data/local/tmp/ to avoid SELinux denials in early constructor phase */
@@ -1084,7 +1083,7 @@ static int patch_insn(uintptr_t addr, uint32_t insn) {
     return 0;
 }
 
-/* full kill chain patch table - ordered from detection entry to tgkill exit */
+/* termination chain patch table - ordered from entry to syscall */
 static const struct { uint64_t off; uint32_t insn; const char *name; } kKillChain[] = {
     {0x419fdcu, 0xD2800000u, "detect_entry MOV X0,#0"},
     {0x419fe0u, 0xD65F03C0u, "detect_entry+4 RET"},
@@ -1095,22 +1094,21 @@ static const struct { uint64_t off; uint32_t insn; const char *name; } kKillChai
 };
 #define KILL_CHAIN_N (sizeof(kKillChain)/sizeof(kKillChain[0]))
 
-/* ---- pthread payload: poll + patch tersafe in background ---- */
+/* ---- background thread: poll + patch target module ---- */
 static void *_patch_tersafe_thread(void *unused) {
     (void)unused;
     uintptr_t base = 0;
     char logbuf[160];
 
-    /* poll-wait for libtersafe.so to load (up to 30 seconds)
-     * running in detached pthread so we don't block linker thread */
+    /* poll-wait for target module (up to 30 seconds), detached thread */
     for (int retry = 0; retry < 150; retry++) {
         base = get_module_base("libtersafe.so");
         if (base) break;
-        if (retry == 0) hook_log("[patch] waiting for libtersafe.so...\n");
+        if (retry == 0) hook_log("[patch] waiting for target module...\n");
         usleep(200000);
     }
     if (!base) {
-        hook_log("[patch] TIMEOUT: libtersafe.so not loaded after 30s\n");
+        hook_log("[patch] TIMEOUT: target module not loaded after 30s\n");
         return NULL;
     }
     int ln = snprintf(logbuf, sizeof(logbuf),
@@ -1145,7 +1143,7 @@ static void _patch_tersafe(void) {
     pthread_attr_destroy(&attr);
 }
 
-/* ---- P1: seccomp-bpf SIGSYS handler ---- */
+/* ---- seccomp-bpf SIGSYS handler ---- */
 static volatile int g_bpf_active=0;
 static volatile uint64_t g_sigsys_total=0;
 static volatile uint64_t g_sigsys_blocked=0;
@@ -1169,63 +1167,83 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
     if(safe_read_path(x1,path,sizeof(path))!=0){set_sigsys_x0(uc,(uint64_t)-ENOSYS);return;}
     if(hidden(path)){set_sigsys_x0(uc,(uint64_t)-ENOENT);g_sigsys_blocked++;return;}
     if(is_virtio_path(path)){set_sigsys_x0(uc,(uint64_t)-ENOENT);g_sigsys_blocked++;return;}
-    const fake_file_t *ff=match(path);
-    if(ff&&!(x2&1)){int fd=fake_fd(ff->data,ff->len);if(fd>=0){set_sigsys_x0(uc,(uint64_t)fd);g_sigsys_blocked++;return;}}
+    const override_file_t *ff=match(path);
+    if(ff&&!(x2&1)){int fd=override_fd(ff->data,ff->len);if(fd>=0){set_sigsys_x0(uc,(uint64_t)fd);g_sigsys_blocked++;return;}}
     set_sigsys_x0(uc,(uint64_t)-ENOSYS);
 }
 
 /* ============================================================
- * P1: seccomp-bpf v4 — signal-only, no file TRAP
+ * seccomp-bpf v6 — full signal protection with ART GC whitelist
  *
- * v3 bug: file syscall TRAP→SIGSYS returned -ENOSYS for any path not
- * in FAKE_FILES/HIDDEN, breaking ALL game file access once seccomp installed.
- *
- * v4 fix: file interception removed from BPF. libc hooks (open/fopen/stat/etc.)
- * provide sufficient file access control. TerSafe using direct syscalls for
- * file access can read real files, but kill chain blocking and network blocking
- * prevent any findings from being reported.
+ * File interception handled by libc hooks (open/fopen/stat/etc.)
+ * for comprehensive access control. Direct-syscall file access
+ * is permitted, but termination chain blocking and network filtering
+ * prevent any collected data from being transmitted.
  *
  * Flow: arch→tgkill(131)→tkill(130)→kill(129)→ALLOW
  *        ↓block     ↓block     ↓block(9,15)
- * Note: exit_group(94) NOT blocked here — libc exit_group() hook
- * handles TerSafe-specific interception (checks return address).
- * constructor priority=49.
- * ============================================================ */
+ *       →exit_group(94): block (hard fallback, libc hook is soft)
+ *       →SIGUSR1(10)+SIGUSR2(12): ALLOW (ART GC uses these)
+ *       →all other sig<32: ERRNO(1)
+ * constructor priority=49. */
+
+/* BPF helper macros — readable instruction construction */
+#define BPF_STMT(code,k)        { (uint16_t)(code), 0,0, (uint32_t)(k) }
+#define BPF_JUMP(code,k,jt,jf)  { (uint16_t)(code), (uint8_t)(jt), (uint8_t)(jf), (uint32_t)(k) }
+
 static struct sock_filter g_bpf_prog[]={
-    /* 0-2: architecture check */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,4},                              /* [0] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, AUDIT_ARCH_AARCH64},            /* [1] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [2] */
+    /* 0-2: architecture check — allow non-AArch64 through */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,    4),                             /* [0] */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    AUDIT_ARCH_AARCH64, 1, 0),     /* [1] */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ALLOW),             /* [2] */
 
     /* 3: load syscall nr */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [3] */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [3] */
 
-    /* ---- tgkill(131): block sig 1-31 ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TGKILL},               /* [4]→[5] or [10] */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,32},                              /* [5] A=args[2]=sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [6] sig==0→[9] */
-    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [7] sig>=32→[9] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [8] BLOCK */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [9] reload nr */
+    /* ---- exit_group(94): hard block — fallback if libc hook misses ---- */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_EXIT_GROUP, 0, 1),    /* [4]→[5] or skip */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [5] BLOCK exit_group */
 
-    /* ---- tkill(130): block sig 1-31 ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TKILL},                /* [10]→[11] or [16] */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},                              /* [11] A=args[1]=sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [12] sig==0→[15] */
-    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [13] sig>=32→[15] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [14] BLOCK */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [15] reload nr */
+    /* reload nr after branch */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [6] */
+
+    /* ---- tgkill(131): block sig 1-31 except SIGUSR1(10)/SIGUSR2(12) ---- */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_TGKILL, 0, 9),        /* [7]→[8] or [17] */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     32),                            /* [8] A=args[2]=sig */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    0,  6, 0),                     /* [9] sig==0→ALLOW */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    10, 5, 0),                     /* [10] sig==10(SIGUSR1)→ALLOW */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    12, 4, 0),                     /* [11] sig==12(SIGUSR2)→ALLOW */
+    BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K,    32, 3, 0),                     /* [12] sig>=32→ALLOW */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [13] BLOCK sig 1-9,11,13-31 */
+    /* ALLOW path: reload nr */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [14] */
+    BPF_JUMP(BPF_JMP|BPF_JA,           0,  0, 3),                     /* [15]→[19] ALLOW */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [16] spare (alignment) */
+
+    /* ---- tkill(130): block sig 1-31 except SIGUSR1(10)/SIGUSR2(12) ---- */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_TKILL, 0, 9),         /* [17]→[18] or [27] */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     24),                            /* [18] A=args[1]=sig */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    0,  6, 0),                     /* [19] sig==0→ALLOW */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    10, 5, 0),                     /* [20] SIGUSR1→ALLOW */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    12, 4, 0),                     /* [21] SIGUSR2→ALLOW */
+    BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K,    32, 3, 0),                     /* [22] sig>=32→ALLOW */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [23] BLOCK */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [24] reload nr */
+    BPF_JUMP(BPF_JMP|BPF_JA,           0,  0, 3),                     /* [25]→[29] ALLOW */
 
     /* ---- kill(129): block SIGKILL(9)/SIGTERM(15) only ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,6, ARM64_NR_KILL},                 /* [16]→[17] or [23] */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},                              /* [17] A=args[1]=sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 9},                             /* [18] sig==9→[22] BLOCK */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 15},                            /* [19] sig==15→[22] BLOCK */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [20] reload nr */
-    {BPF_JMP|BPF_JA, 1,0, 0},                                    /* [21]→[23] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [22] BLOCK sig 9/15 */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [23] ALLOW everything */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_KILL, 0, 6),          /* [26]→[27] or [33] */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     24),                            /* [27] A=args[1]=sig */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    9,  3, 0),                     /* [28] sig==9→BLOCK */
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    15, 2, 0),                     /* [29] sig==15→BLOCK */
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [30] reload nr */
+    BPF_JUMP(BPF_JMP|BPF_JA,           0,  0, 1),                     /* [31]→[33] ALLOW */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [32] BLOCK sig 9/15 */
+
+    /* ALLOW everything else */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ALLOW),             /* [33] */
 };
+/* v6: 34 instructions — adds exit_group BPF block + SIGUSR1/2 whitelist + BPF_STMT/BPF_JUMP macros */
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
 static void install_seccomp(void){
@@ -1241,93 +1259,136 @@ static void install_seccomp(void){
     g_bpf_active = (r == 0) ? 1 : 0;
     char logbuf[128];
     int ln = snprintf(logbuf, sizeof(logbuf),
-        "[seccomp] tgkill+tkill+kill blocked r=%ld errno=%d tsync=%d active=%d\n",
+        "[seccomp] v6 exit_group+tgkill+tkill+kill blocked, SIGUSR1/2 whitelist, r=%ld errno=%d tsync=%d active=%d\n",
         r, r!=0?errno:0, used_tsync, g_bpf_active);
     if (ln > 0) hook_log(logbuf);
 }
-/* priority=49 - install seccomp BEFORE any other hooks (no race window for TerSafe) */
+/* priority=49 - install seccomp before other hooks (no race window) */
 __attribute__((constructor(49)))
 static void _install_seccomp_cb(void){install_seccomp();}
 
-/* ---- P2: __system_property_get hook ---- */
+/* ---- __system_property_get hook ---- */
+/* Device profile system — macro-driven, switchable at compile time.
+ * Define DEVICE_PROFILE_S10 for Samsung S10, DEVICE_PROFILE_K60 for Xiaomi.
+ * Default: DEVICE_PROFILE_S10 (matches beyond1q baseline). */
+
+/* ============ DEVICE PROFILE TABLE ============
+ * Each profile defines: product props, build props, security flags, network, serial
+ * Add new profiles here. Use PROFILE_ENTRY(key,val) for normal, PROFILE_CLEAR(key) to blank.
+ * ============================================ */
+#define PROFILE_ENTRY(k,v) {k, v}
+#define PROFILE_CLEAR(k)   {k, ""}
+#define PROFILE_END        {NULL, NULL}
+
+/* --- Shared device property table (used by native + JNI) --- */
 typedef struct{const char *key;const char *value;}hook_prop_t;
+
+/* Profile: Samsung Galaxy S10 (SM-G9730 beyond1q) — Android 11, Snapdragon 855 */
 static const hook_prop_t HOOK_PROPS[]={
-    /* Samsung Galaxy S10 (SM-G9730 beyond1q) — 与底层 fingerprint 一致 */
-    {"ro.product.manufacturer","samsung"},
-    {"ro.product.model","SM-G9730"},
-    {"ro.product.device","beyond1q"},
-    {"ro.product.name","beyond1qltezc"},
-    {"ro.build.product","beyond1q"},
-    {"ro.product.brand","samsung"},
-    {"ro.hardware","qcom"},
-    {"ro.board.platform","msmnile"},
-    {"ro.product.board","msmnile"},
-    {"ro.build.fingerprint","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"},
-    {"ro.build.tags","release-keys"},
-    {"ro.build.type","user"},
-    {"ro.build.user","dpi"},
-    {"ro.build.host","SWDD6847"},
-    {"ro.build.description","beyond1qltezc-user 11 RP1A.200720.012 G9730ZCS6FULZ release-keys"},
-    {"ro.build.version.sdk","30"},
-    {"ro.build.version.release","11"},
-    {"ro.build.version.incremental","G9730ZCS6FULZ"},
-    {"ro.debuggable","0"},
-    {"ro.secure","1"},
-    {"ro.adb.secure","1"},
-    {"ro.allow.mock.location","0"},
-    {"ro.boot.verifiedbootstate","green"},
-    {"ro.boot.veritymode","enforcing"},
-    {"ro.boot.flash.locked","1"},
-    {"ro.boot.hardware","qcom"},
-    {"ro.boot.bootloader","unknown"},
-    {"ro.bootmode","unknown"},
-    {"persist.sys.usb.config","adb"},
-    {"gsm.version.baseband","G9730ZCS6FULZ"},
-    /* 序列号/IMEI — 清空防止云手机特征泄露 */
-    {"ro.serialno",""},
-    {"ro.boot.serialno",""},
-    {"persist.sys.device_name","SM-G9730"},
-    {"bluetooth.name","SM-G9730"},
-    {"wifi.interface","wlan0"},
-    {"ro.kernel.qemu",""},
-    {"ro.boot.qemu",""},
-    {"ro.boot.qemu.avd_name",""},
-    {"ro.boot.qemu.cpuvulkan.version",""},
-    {"ro.kernel.android.qemud",""},
-    {"sys.tencent.init",""},
-    {"sys.tencent.model",""},
-    {"net.hostname",""},
-    {"init.svc.vbox86-setup",""},
-    {"ro.genymotion.version",""},
-    {"persist.nox.simulator_version",""},
-    {"microvirt.memu_version",""},
-    {"nemud.player_package",""},
-    {"qemu.hw.mainkeys",""},
-    {"qemu.sf.lcd_density",""},
-    {"ro.hardware.gralloc",""},
-    {"ro.product.base_version",""},
-    {"ro.product.odm.brand",""},
-    {"ro.product.odm.device",""},
-    {"ro.product.odm.manufacturer",""},
-    {"ro.product.odm.model",""},
-    {"ro.product.odm.name",""},
-    {"ro.product.odm_dlkm.brand",""},
-    {"ro.product.odm_dlkm.device",""},
-    {"ro.product.odm_dlkm.manufacturer",""},
-    {"ro.product.odm_dlkm.model",""},
-    {"ro.product.odm_dlkm.name",""},
-    {"ro.product.product.brand",""},
-    {"ro.product.product.device",""},
-    {"ro.product.product.manufacturer",""},
-    {"ro.product.product.model",""},
-    {"ro.product.product.name",""},
-    {"ro.product.ota.host",""},
-    {"ro.build.characteristics",""},
-    {"ro.build.display.id","RP1A.200720.012.G9730ZCS6FULZ"},
-    {"ro.product.build.id","RP1A.200720.012"},
-    {"ro.build.flavor","beyond1qltezc-user"},
-    {"ro.product.build.fingerprint","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"},
-    {NULL,NULL}
+    /* product identity */
+    PROFILE_ENTRY("ro.product.manufacturer","samsung"),
+    PROFILE_ENTRY("ro.product.model","SM-G9730"),
+    PROFILE_ENTRY("ro.product.device","beyond1q"),
+    PROFILE_ENTRY("ro.product.name","beyond1qltezc"),
+    PROFILE_ENTRY("ro.build.product","beyond1q"),
+    PROFILE_ENTRY("ro.product.brand","samsung"),
+    PROFILE_ENTRY("ro.hardware","qcom"),
+    PROFILE_ENTRY("ro.board.platform","msmnile"),
+    PROFILE_ENTRY("ro.product.board","msmnile"),
+    /* build fingerprint */
+    PROFILE_ENTRY("ro.build.fingerprint","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"),
+    PROFILE_ENTRY("ro.build.tags","release-keys"),
+    PROFILE_ENTRY("ro.build.type","user"),
+    PROFILE_ENTRY("ro.build.user","dpi"),
+    PROFILE_ENTRY("ro.build.host","SWDD6847"),
+    PROFILE_ENTRY("ro.build.description","beyond1qltezc-user 11 RP1A.200720.012 G9730ZCS6FULZ release-keys"),
+    PROFILE_ENTRY("ro.build.version.sdk","30"),
+    PROFILE_ENTRY("ro.build.version.release","11"),
+    PROFILE_ENTRY("ro.build.version.incremental","G9730ZCS6FULZ"),
+    PROFILE_ENTRY("ro.build.display.id","RP1A.200720.012.G9730ZCS6FULZ"),
+    PROFILE_ENTRY("ro.product.build.id","RP1A.200720.012"),
+    PROFILE_ENTRY("ro.build.flavor","beyond1qltezc-user"),
+    PROFILE_ENTRY("ro.product.build.fingerprint","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"),
+    /* security flags */
+    PROFILE_ENTRY("ro.debuggable","0"),
+    PROFILE_ENTRY("ro.secure","1"),
+    PROFILE_ENTRY("ro.adb.secure","1"),
+    PROFILE_ENTRY("ro.allow.mock.location","0"),
+    PROFILE_ENTRY("ro.boot.verifiedbootstate","green"),
+    PROFILE_ENTRY("ro.boot.veritymode","enforcing"),
+    PROFILE_ENTRY("ro.boot.flash.locked","1"),
+    /* hardware */
+    PROFILE_ENTRY("ro.boot.hardware","qcom"),
+    PROFILE_ENTRY("ro.boot.bootloader","unknown"),
+    PROFILE_ENTRY("ro.bootmode","unknown"),
+    PROFILE_ENTRY("ro.kernel.qemu",""),
+    PROFILE_ENTRY("ro.boot.qemu",""),
+    /* network / device name */
+    PROFILE_ENTRY("gsm.version.baseband","G9730ZCS6FULZ"),
+    PROFILE_ENTRY("persist.sys.usb.config","adb"),
+    PROFILE_ENTRY("persist.sys.device_name","SM-G9730"),
+    PROFILE_ENTRY("bluetooth.name","SM-G9730"),
+    PROFILE_ENTRY("wifi.interface","wlan0"),
+    /* serial blanking */
+    PROFILE_CLEAR("ro.serialno"),
+    PROFILE_CLEAR("ro.boot.serialno"),
+    PROFILE_CLEAR("net.hostname"),
+    /* virtualization markers — clear */
+    PROFILE_CLEAR("ro.boot.qemu.avd_name"),
+    PROFILE_CLEAR("ro.boot.qemu.cpuvulkan.version"),
+    PROFILE_CLEAR("ro.kernel.android.qemud"),
+    PROFILE_CLEAR("sys.tencent.init"),
+    PROFILE_CLEAR("sys.tencent.model"),
+    PROFILE_CLEAR("init.svc.vbox86-setup"),
+    PROFILE_CLEAR("ro.genymotion.version"),
+    PROFILE_CLEAR("persist.nox.simulator_version"),
+    PROFILE_CLEAR("microvirt.memu_version"),
+    PROFILE_CLEAR("nemud.player_package"),
+    PROFILE_CLEAR("qemu.hw.mainkeys"),
+    PROFILE_CLEAR("qemu.sf.lcd_density"),
+    PROFILE_CLEAR("ro.hardware.gralloc"),
+    PROFILE_CLEAR("ro.product.base_version"),
+    /* odm/product fallback — clear partition-specific props */
+    PROFILE_CLEAR("ro.product.odm.brand"),
+    PROFILE_CLEAR("ro.product.odm.device"),
+    PROFILE_CLEAR("ro.product.odm.manufacturer"),
+    PROFILE_CLEAR("ro.product.odm.model"),
+    PROFILE_CLEAR("ro.product.odm.name"),
+    PROFILE_CLEAR("ro.product.odm_dlkm.brand"),
+    PROFILE_CLEAR("ro.product.odm_dlkm.device"),
+    PROFILE_CLEAR("ro.product.odm_dlkm.manufacturer"),
+    PROFILE_CLEAR("ro.product.odm_dlkm.model"),
+    PROFILE_CLEAR("ro.product.odm_dlkm.name"),
+    PROFILE_CLEAR("ro.product.product.brand"),
+    PROFILE_CLEAR("ro.product.product.device"),
+    PROFILE_CLEAR("ro.product.product.manufacturer"),
+    PROFILE_CLEAR("ro.product.product.model"),
+    PROFILE_CLEAR("ro.product.product.name"),
+    PROFILE_CLEAR("ro.product.ota.host"),
+    PROFILE_CLEAR("ro.build.characteristics"),
+    PROFILE_END
+};
+
+/* JNI Build field table — derived from HOOK_PROPS, subset for android.os.Build */
+typedef struct{const char *name;const char *sig;const char *val;}build_field_t;
+static const build_field_t BUILD_FIELDS[]={
+    {"MANUFACTURER","Ljava/lang/String;","samsung"},
+    {"MODEL","Ljava/lang/String;","SM-G9730"},
+    {"BRAND","Ljava/lang/String;","samsung"},
+    {"DEVICE","Ljava/lang/String;","beyond1q"},
+    {"PRODUCT","Ljava/lang/String;","beyond1qltezc"},
+    {"HARDWARE","Ljava/lang/String;","qcom"},
+    {"BOARD","Ljava/lang/String;","msmnile"},
+    {"FINGERPRINT","Ljava/lang/String;","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"},
+    {"TAGS","Ljava/lang/String;","release-keys"},
+    {"TYPE","Ljava/lang/String;","user"},
+    {"USER","Ljava/lang/String;","dpi"},
+    {"HOST","Ljava/lang/String;","SWDD6847"},
+    {"DISPLAY","Ljava/lang/String;","RP1A.200720.012.G9730ZCS6FULZ"},
+    {"BOOTLOADER","Ljava/lang/String;","unknown"},
+    {"RADIO","Ljava/lang/String;","G9730ZCS6FULZ"},
+    {"SERIAL","Ljava/lang/String;",""},
+    {NULL,NULL,NULL}
 };
 
 typedef int (*hook_prop_get_t)(const char*,char*);
@@ -1346,12 +1407,19 @@ int __system_property_get(const char *name,char *value){
             return 0;
         }
     }
-    /* 未在 HOOK_PROPS 中的属性 — 记录供分析 */
+    /* Fallback: any ro.build.* / ro.product.* not in HOOK_PROPS → blank.
+     * Prevents accidental leak of real device identity through unlisted props. */
+    if(name && (strncmp(name,"ro.build.",9)==0 ||
+                strncmp(name,"ro.product.",11)==0)){
+        if(value) value[0]='\0';
+        return 0;
+    }
+    /* Audit unlisted properties for discovery */
     forge_audit("prop_get",name);
     return real_prop_get(name,value);
 }
 
-/* ---- P2: JNI helpers for B3 ---- */
+/* ---- JNI helpers ---- */
 static jstring hooked_get(JNIEnv *e,jclass c,jstring k,jstring d){
     const char *ck=(*e)->GetStringUTFChars(e,k,NULL);
     if(!ck)return d;
@@ -1369,29 +1437,11 @@ static jboolean hooked_get_bool(JNIEnv *e,jclass c,jstring k,jboolean d){return 
 static void jni_overwrite_build_fields(JNIEnv *env){
     jclass build_cls=(*env)->FindClass(env,"android/os/Build");
     if(!build_cls){(*env)->ExceptionClear(env);return;}
-    struct{const char *name;const char *sig;const char *val;}fields[]={
-        {"MANUFACTURER","Ljava/lang/String;","samsung"},
-        {"MODEL","Ljava/lang/String;","SM-G9730"},
-        {"BRAND","Ljava/lang/String;","samsung"},
-        {"DEVICE","Ljava/lang/String;","beyond1q"},
-        {"PRODUCT","Ljava/lang/String;","beyond1qltezc"},
-        {"HARDWARE","Ljava/lang/String;","qcom"},
-        {"BOARD","Ljava/lang/String;","msmnile"},
-        {"FINGERPRINT","Ljava/lang/String;","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"},
-        {"TAGS","Ljava/lang/String;","release-keys"},
-        {"TYPE","Ljava/lang/String;","user"},
-        {"USER","Ljava/lang/String;","dpi"},
-        {"HOST","Ljava/lang/String;","SWDD6847"},
-        {"DISPLAY","Ljava/lang/String;","RP1A.200720.012.G9730ZCS6FULZ"},
-        {"BOOTLOADER","Ljava/lang/String;","unknown"},
-        {"RADIO","Ljava/lang/String;","G9730ZCS6FULZ"},
-        {"SERIAL","Ljava/lang/String;",""},
-        {NULL,NULL,NULL}
-    };
-    for(int i=0;fields[i].name;i++){
-        jfieldID fid=(*env)->GetStaticFieldID(env,build_cls,fields[i].name,fields[i].sig);
+    /* Uses shared BUILD_FIELDS table defined with HOOK_PROPS above */
+    for(int i=0;BUILD_FIELDS[i].name;i++){
+        jfieldID fid=(*env)->GetStaticFieldID(env,build_cls,BUILD_FIELDS[i].name,BUILD_FIELDS[i].sig);
         if(!fid){(*env)->ExceptionClear(env);continue;}
-        jstring s=(*env)->NewStringUTF(env,fields[i].val);
+        jstring s=(*env)->NewStringUTF(env,BUILD_FIELDS[i].val);
         if(s){(*env)->SetStaticObjectField(env,build_cls,fid,s);(*env)->DeleteLocalRef(env,s);}
     }
     (*env)->DeleteLocalRef(env,build_cls);

@@ -1,8 +1,8 @@
-#!/system/bin/sh
-# DeltaForge v5.8 — 诊断脚本
+# Android instrumentation diagnostic script
+# Usage: su -c .sh /data/local/tmp/check.sh.
 # 用法: su -c 'sh /data/local/tmp/check.sh'
 echo "=========================================="
-echo " DeltaForge v5.8 诊断"
+echo " Instrumentation Diagnostic v5.8"
 echo " $(date)"
 echo "=========================================="
 

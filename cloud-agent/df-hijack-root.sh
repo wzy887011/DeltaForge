@@ -1,4 +1,4 @@
-#!/system/bin/sh
+# Library hijack installation script — root-side setup
 # df-hijack-root.sh — root 侧 library hijack 安装
 PKG="com.tencent.tmgp.dfm"
 HOOK_SRC="/data/local/tmp/libforgehook.so"

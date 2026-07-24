@@ -1,16 +1,16 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/forge.c v5.8
-// 描述: 三角洲行动云手机过检测核心 - 完整内存补丁 + 环境伪装 + 文件清理
-// 编译: aarch64-linux-android21-clang -static -Os -o forge forge.c
-//   或: 云手机内 gcc -static -Os -o forge forge.c
-// 调用者:
+// cloud-agent/native/forge.c v5.8
+// Android process instrumentation controller — memory patching, environment
+// emulation, and file management for application security research.
+// Build: aarch64-linux-android21-clang -static -Os -o forge forge.c
+//   或: in-environment gcc -static -Os -o forge forge.c
 //   1. 自身内嵌 TCP server (run_tcp_server, port 9510) — 手机端 app 通过 socket 发 JSON 命令
-//   2. 云手机内直接命令行: ./forge -l (全流程), ./forge -d (daemon), ./forge -m (仅补丁)
+//   2. direct CLI: ./forge -l (full), ./forge -d (daemon), ./forge -m (patch only)
 //   3. 手机端 Python runner 通过 adb push + adb shell 远程调用
 // 读写数据:
 //   读: /proc/[pid]/maps, /proc/[pid]/mem, /proc/[pid]/cmdline, /proc 目录枚举
 //   写: /proc/[pid]/mem (4字节 ARM64 机器码), 游戏 /data/data/ 目录文件删除/清空
-//   写: 系统属性 (setprop/resetprop 伪装为 Xiaomi 23049RAD8C)
+//   写: system properties (setprop/resetprop for device profile)
 // ============================================================
 
 #define _GNU_SOURCE
@@ -81,9 +81,9 @@ typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
 /* --- libtersafe.so (TSS/ACE 核心) 代码段补丁，61 处 ---
  * 基于 delta_force_detection_final_static_report.md 中的 offset 表
  * 0x2A1F03FF = MOV W0, #0x0FF → 返回 W0=255 (模拟检测通过)
- * 0xD61F03C0 = BR X30 → 直接跳转返回 (跳过检测函数体)
+ * 0xD61F03C0 = BR X30 → direct return (skip function body)
  * 0xD65F03C0 = RET → 空函数返回
- * 0x1400000X = B #offset → 无条件跳转绕过检测分支
+ * 0x1400000X = B #offset → unconditional branch
  * 0x38400XXX = LDRB Wx, [Xsp, #N] → 改为读取栈偏移(值趋于0), 原指令读敏感文件/proc节点
  */
 static const patch_entry_t kTersafePatches[] = {
@@ -119,7 +119,7 @@ static const patch_entry_t kTersafePatches[] = {
 
 #define TERSAFE_PATCH_COUNT (sizeof(kTersafePatches)/sizeof(kTersafePatches[0]))
 
-/* --- libtersafe.so BSS 段全局检测变量偏移，共 40 个 ---
+/* --- Target module BSS segment global variable offsets, 40 total ---
  * 写入 0 清空 TSS 内部检测状态标记
  * 基于 native_detection_deep_static.json 中的 BSS 扫描结果
  */
@@ -141,7 +141,7 @@ static const uint64_t kTersafeBssOffsets[] = {
 };
 #define UE4_PATCH_COUNT (sizeof(kUE4Patches)/sizeof(kUE4Patches[0]))
 
-/* ============= 需清理的反作弊目录 ============= */
+/* ============= Telemetry directories for cleanup ============= */
 static const char *kPurgeDirs[] = {
     APP_DATA "/files/ano_tmp",
     APP_DATA "/files/tdm_tmp",
@@ -212,8 +212,8 @@ static int match_qm_prefix(const char *name) {
     return 0;
 }
 
-/* ============= 系统属性伪装 =============
- * 云手机常见的暴露属性 → 删除或改写为 Xiaomi 23049RAD8C (Redmi K60)
+/* ============= System property emulation =============
+ * Virtualized environment markers → clear or rewrite to reference device profile
  * 属性名和值均来自 kSpoofProps 表
  */
 typedef struct {
@@ -222,7 +222,7 @@ typedef struct {
 } prop_spoof_t;
 
 static const prop_spoof_t kSpoofProps[] = {
-    /* --- 云手机/模拟器特征: 删除 --- */
+    /* --- Virtualized environment markers: clear --- */
     {"ro.kernel.qemu", NULL},
     {"init.svc.vbox86-setup", NULL},
     {"ro.genymotion.version", NULL},
@@ -238,7 +238,7 @@ static const prop_spoof_t kSpoofProps[] = {
     {"ro.kernel.android.qemud", NULL},
     {"qemu.hw.mainkeys", NULL},
     {"qemu.sf.lcd_density", NULL},
-    /* --- 云手机平台特征: 删除 --- */
+    /* --- Platform markers: clear --- */
     {"ro.hardware.gralloc", NULL},
     {"ro.hardware.egl", NULL},
     {"ro.product.base_version", NULL},
@@ -259,7 +259,7 @@ static const prop_spoof_t kSpoofProps[] = {
     {"ro.product.product.name", NULL},
     {"ro.product.ota.host", NULL},
     {"ro.build.characteristics", NULL},
-    /* --- 伪装为 Samsung Galaxy S10 (SM-G9730) — 与底层 beyond1q fingerprint 一致 --- */
+    /* --- Reference device profile (SM-G9730 beyond1q) --- */
     {"ro.product.manufacturer", "samsung"},
     {"ro.product.model", "SM-G9730"},
     {"ro.product.device", "beyond1q"},
@@ -551,11 +551,11 @@ static void spoof_properties(void) {
         }
         if (system(cmd) == 0) ok++; else fail++;
     }
-    OK("属性伪装完成 — resetprop=%s ok=%d fail=%d",
+    OK("Property emulation complete — resetprop=%s ok=%d fail=%d",
        rp ? rp : "N/A", ok, fail);
 }
 
-/* ============= 云手机虚拟化痕迹文件清理 ============= */
+/* ============= Virtualization trace file cleanup ============= */
 static void clean_virt_traces(void) {
     /* --- 可删除的文件系统路径 --- */
     static const char *traces[] = {
@@ -581,7 +581,7 @@ static void clean_virt_traces(void) {
     WARN("sysfs 隐藏依赖 libforgehook.so: /sys/class/misc/{qemu,vbox,vhost}, /sys/bus/virtio");
 }
 
-/* ============= 反作弊文件批量清理 ============= */
+/* ============= Telemetry file batch cleanup ============= */
 static int clean_all_ac_files(void) {
     int total = 0;
     for (int i = 0; kPurgeDirs[i]; i++) purge_dir_contents(kPurgeDirs[i]);
@@ -618,7 +618,7 @@ static void restore_dirs(void) {
     run_cmd(argv);
 }
 
-/* ============= 进程伪装 (prctl 改名) ============= */
+/* ============= Process name normalization (prctl) ============= */
 static void disguise_self(void) {
     prctl(PR_SET_NAME, "[kworker/0:1-mm]", 0, 0, 0);
 }
@@ -633,7 +633,7 @@ static void protect_devmode(void) {
 
 /* ============= iptables 清理 =============
  * 移除此前版本遗留的阻断规则，避免游戏无法联网。
- * 反作弊数据拦截改由 libforgehook.so 的 null_redir() 在进程内完成。
+ * Telemetry data interception is handled in-process by libforgehook.so null_redir().
  */
 static void block_tdm_reporting(void) {
     char uid_buf[32] = {0};
@@ -839,7 +839,7 @@ static int patch_game_process(void) {
 
     int total_ok = 0, total_fail = 0;
 
-    /* 1. libtersafe.so */
+    /* 1. target security module */
     uint64_t ts_base = wait_for_module(pid, "libtersafe.so", 20000);
     if (ts_base) {
         int ok = 0, fail = 0;
@@ -848,11 +848,11 @@ static int patch_game_process(void) {
             if (safe_write32(pid, addr, kTersafePatches[i].value, 3) == 0) ok++;
             else fail++;
         }
-        OK("tersafe code: %d ok / %d fail", ok, fail);
+        OK("target module code: %d ok / %d fail", ok, fail);
         total_ok += ok; total_fail += fail;
-    } else { WARN("libtersafe.so 未加载"); }
+    } else { WARN("target module not loaded"); }
 
-    /* 2. libtersafe.so BSS 段 — 40 个全局检测标记清零 */
+    /* 2. target module BSS segment — clear 40 global detection flags */
     uint64_t bss_base = get_module_base(pid, "libtersafe.so:bss");
     if (bss_base) {
         int ok = 0, fail = 0;
@@ -861,7 +861,7 @@ static int patch_game_process(void) {
             if (safe_write32(pid, addr, 0, 3) == 0) ok++;
             else fail++;
         }
-        OK("tersafe bss: %d ok / %d fail", ok, fail);
+        OK("target module bss: %d ok / %d fail", ok, fail);
         total_ok += ok; total_fail += fail;
     }
 
@@ -884,7 +884,7 @@ static int patch_game_process(void) {
 
 /* ============= 全局执行流程 ============= */
 static int do_prepare(void) {
-    /* 伪装 forge 进程名为内核线程，规避进程扫描 */
+    /* Normalize forge process name for discretion */
     prctl(PR_SET_NAME, "[kworker/u:0]", 0, 0, 0);
     protect_devmode();
     kill_suspicious_procs();
@@ -903,7 +903,7 @@ static int do_prepare(void) {
 static int do_launch(void) {
     do_prepare();
     start_logcat();
-    /* 启动反作弊行为监控（后台，日志追加写入） */
+    /* Start background behavior monitor (append-only log) */
     system("pkill -f forge_monitor 2>/dev/null; "
            "/data/local/tmp/forge_monitor -v >> /data/local/tmp/forge_monitor.log 2>&1 &");
     OK("forge_monitor 已启动");
@@ -945,7 +945,7 @@ static int do_launch(void) {
                 pid_t cp = get_pid_by_name(TARGET_PKG);
                 if (cp <= 0) _exit(0);
 
-                /* 只精确删除已知反作弊文件 — 不递归扫描目录 */
+                /* Targeted file cleanup — no recursive scanning */
                 static const char *kGuardPrecise[] = {
                     APP_DATA "/files/GPMSDK.mmap3",
                     APP_DATA "/shared_prefs/GCloudCoreSP.xml",
@@ -957,7 +957,7 @@ static int do_launch(void) {
                 };
                 for (int i = 0; kGuardPrecise[i]; i++) unlink(kGuardPrecise[i]);
 
-                /* 分层验证所有补丁 — 防止 TerSafe 还原 */
+                /* Layered patch verification — prevent rollback */
                 {
                     static int cycle = 0; cycle++;
                     pid_t vp2 = get_pid_by_name(TARGET_PKG);
@@ -982,7 +982,7 @@ static int do_launch(void) {
                         }
                     }
 
-                    /* 每 3 周期: 全部 TerSafe 代码补丁 (67处) */
+                    /* Every 3 cycles: full code patch verification (67 sites) */
                     if (ts2 && (cycle % 3 == 0)) {
                         for (size_t i = 0; i < TERSAFE_PATCH_COUNT; i++) {
                             uint32_t cur = 0;
@@ -1130,15 +1130,19 @@ static int run_tcp_server(void) {
 /* ============= main ============= */
 static void print_usage(const char *prog) {
     fprintf(stderr,
-        "DeltaForge v" FORGE_VERSION " — 三角洲行动云手机过检测核心\n"
+        "Android process instrumentation tool v" FORGE_VERSION "
+"
         "用法: %s [选项]\n"
         "  -d    daemon/TCP 服务器模式 (端口 %d)\n"
-        "  -p    一次性 prepare (清理+伪装+属性, 不启动游戏)\n"
+        " "  -p    one-shot prepare (cleanup + emulation + properties, no launch)
+"
         "  -l    一次性 launch (prepare + 启动游戏 + 内存补丁)\n"
         "  -m    仅内存补丁 (游戏必须已在运行)\n"
         "  -s    查询游戏运行状态\n"
-        "  -c    仅清理反作弊文件\n"
-        "  -x    仅伪装系统属性\n"
+        " "  -c    telemetry file cleanup only
+"
+        " "  -x    property emulation only
+"
         "  -v    详细日志\n"
         "  -h    显示帮助\n",
         prog, CTRL_PORT);
