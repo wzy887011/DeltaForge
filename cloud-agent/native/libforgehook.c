@@ -32,6 +32,7 @@
 /* forward declarations — 函数定义在后，但前向构造函数中需要引用 */
 static uintptr_t get_module_base(const char *so_name);
 static void hook_log(const char *msg);
+static int patch_insn(uintptr_t addr, uint32_t insn);
 
 /* seccomp-bpf constants */
 #ifndef SECCOMP_SET_MODE_FILTER
@@ -891,12 +892,12 @@ int getaddrinfo(const char *node, const char *service,
 }
 
 /* ---- P1: connect hook — 阻止 AC IP 连接 (DNS 封锁的兜底) ---- */
-typedef int (*connect_t)(int, const void *, unsigned int);
+typedef int (*connect_t)(int, const struct sockaddr *, socklen_t);
 static connect_t _connect_orig = NULL;
 
 /* 已知 AC 上报服务器 IP 前缀 */
 static int is_ac_ip(const struct sockaddr *addr) {
-    if (!addr || ((const struct sockaddr_in *)addr)->sin_family != 2) /* AF_INET */
+    if (!addr || addr->sa_family != AF_INET)
         return 0;
     uint32_t ip = ((const struct sockaddr_in *)addr)->sin_addr.s_addr;
     static const uint32_t kACNets[] = {
@@ -913,10 +914,10 @@ static int is_ac_ip(const struct sockaddr *addr) {
     return 0;
 }
 
-int connect(int sockfd, const void *addr, unsigned int addrlen) {
+int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!_connect_orig)
         _connect_orig = (connect_t)dlsym(RTLD_NEXT, "connect");
-    if (is_ac_ip((const struct sockaddr *)addr)) {
+    if (is_ac_ip(addr)) {
         hook_log("[net] blocked connect to AC IP\n");
         errno = ECONNREFUSED;
         return -1;
