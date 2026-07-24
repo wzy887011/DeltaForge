@@ -232,7 +232,11 @@ static int find_self_from_maps(char *out, size_t out_sz) {
     return 0;
 }
 
-__attribute__((constructor(100)))
+/* CRITICAL: constructor(47) — MUST be earliest constructor.
+ * BIND_LAZY 延迟绑定意味着其他 .so 的构造函数可能在 chainload
+ * 完成前就调用 qimei 导出符号 → PLT 解析失败 → SIGSEGV。
+ * 优先级 47 确保在原版 libforgehook.c constructor(48) 之前执行。 */
+__attribute__((constructor(47)))
 static void _chainload_real_qimei(void) {
     hook_log("[CTOR] 100 _chainload_real_qimei enter\n");
     char real_path[1024];
