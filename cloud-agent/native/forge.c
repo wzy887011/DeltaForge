@@ -923,6 +923,27 @@ static int patch_game_process(void) {
             total_fail, PATCH_FAIL_ABORT_THRESHOLD);
         return -1;
     }
+
+    /* 立即验证 kill chain — tersafe 可能在补丁后几十毫秒内恢复 */
+    if (ts_base) {
+        usleep(50000); /* 等 50ms 让 tersafe 的恢复线程跑完 */
+        static const struct { uint64_t off; uint32_t exp; } kChk[] = {
+            {0x419FDC, 0xD2800000}, {0x419FE0, 0xD65F03C0},
+            {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
+            {0x320D78, 0xD65F03C0}, {0x3233B8, 0xD65F03C0},
+        };
+        int reverted = 0;
+        for (int ci = 0; ci < 6; ci++) {
+            uint32_t cur = 0;
+            if (mem_read32(pid, ts_base + kChk[ci].off, &cur) == 0
+                && cur != kChk[ci].exp) {
+                safe_write32(pid, ts_base + kChk[ci].off, kChk[ci].exp, 3);
+                reverted++;
+            }
+        }
+        if (reverted > 0)
+            WARN("kill chain 立即验证: %d/6 处已被恢复并重打", reverted);
+    }
     return 0;
 }
 
@@ -994,7 +1015,7 @@ static int do_launch(void) {
             /* 以下是真正的清理 daemon */
             prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
             while (1) {
-                sleep(1);  /* 1s 间隔 — 快速响应 TerSafe 补丁还原 */
+                usleep(200000);  /* 200ms 间隔 — 快速响应 TerSafe 补丁还原 */
                 pid_t cp = get_pid_by_name(TARGET_PKG);
                 if (cp <= 0) _exit(0);
 
