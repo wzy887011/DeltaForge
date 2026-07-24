@@ -1290,6 +1290,9 @@ static struct sock_filter g_bpf_prog[]={
 /* v6.1: 7 instructions — exit_group only, tgkill/tkill/kill removed (crashed ART) */
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
+/* DISABLED: BPF exit_group拦截，待libc exit_group hook联合启用后恢复。
+ * kill chain 6节点已从源头干掉tersafe杀进程逻辑,BPF在这个阶段冗余。 */
+__attribute__((unused))
 static void install_seccomp(void){
     hook_log("[CTOR] 49 _install_seccomp_cb enter\n");
     struct sigaction sa;
@@ -1313,6 +1316,7 @@ static void install_seccomp(void){
  * kill chain 6节点已从源头堵住tersafe杀进程逻辑，
  * BPF exit_group兜底在当前版本反而有害——恢复时需配合libc exit_group hook。 */
 /* __attribute__((constructor(49))) */
+__attribute__((unused))
 static void _install_seccomp_cb(void){ hook_log("[CTOR] 49 seccomp SKIPPED (requires libc exit_group hook co-enablement)\n"); }
 
 /* ---- __system_property_get hook ---- */
