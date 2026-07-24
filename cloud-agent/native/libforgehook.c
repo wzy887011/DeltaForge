@@ -321,7 +321,14 @@ static const char FAKE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/d
 static const char FAKE_NET_TCP[]=
 "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
 
+/* /proc/net/tcp6 — 空 IPv6 连接表 */
 static const char FAKE_NET_TCP6[]=
+"  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
+
+/* /proc/net/udp + /proc/net/udp6 — 空连接表 */
+static const char FAKE_NET_UDP[]=
+"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
+static const char FAKE_NET_UDP6[]=
 "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
 
 static const char FAKE_INPUT_DEVS[]=
@@ -396,7 +403,10 @@ static const fake_file_t FAKE_FILES[]={
     {"/proc/self/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},
     {"/proc/net/tcp",FAKE_NET_TCP,sizeof(FAKE_NET_TCP)-1},
     {"/proc/net/tcp6",FAKE_NET_TCP6,sizeof(FAKE_NET_TCP6)-1},
+    {"/proc/net/udp",FAKE_NET_UDP,sizeof(FAKE_NET_UDP)-1},
+    {"/proc/net/udp6",FAKE_NET_UDP6,sizeof(FAKE_NET_UDP6)-1},
     {"/proc/self/environ",FAKE_ENVIRON,sizeof(FAKE_ENVIRON)-1},
+    {"/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},  /* catches /proc/*/status */
     {NULL,NULL,0}
 };
 
@@ -411,7 +421,9 @@ static const char *HIDDEN[]={
     "/system/bin/qemud","/system/bin/qemu-props",
     "/system/bin/androVM-prop","/system/bin/microvirt-prop",
     "/system/bin/nox-prop","/system/bin/ttVM-prop",
-    "/system/bin/droid4x-prop","/system/lib/libdroid4x.so",
+    "/system/bin/droid4x-prop","/system/bin/nemud-prop",
+    "/system/bin/genymotion-prop","/system/bin/windroye-prop",
+    "/system/lib/libdroid4x.so",
     "/system/lib/vbox","/system/lib/ko",
     "/proc/iomem","/proc/ioports",
     "/proc/device-tree","/proc/sys/abi",
@@ -493,6 +505,50 @@ static stat_t _lstat=NULL;
 static readlink_t _readlink=NULL;
 static readlinkat_t _readlinkat=NULL;
 
+/* ---- /proc/self/maps 动态过滤 — 运行时读真实 maps 并过滤 libforgehook 行 ---- */
+static int make_filtered_maps_fd(void) {
+    int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    if (rfd < 0) return -1;
+    char buf[65536];
+    ssize_t nr = (ssize_t)syscall(SYS_read, rfd, buf, sizeof(buf) - 1);
+    syscall(SYS_close, rfd);
+    if (nr <= 0) return -1;
+    buf[nr] = '\0';
+
+    int mfd = syscall(__NR_memfd_create, "maps", 0);
+    if (mfd < 0) return -1;
+
+    char *line = buf, *out = buf; /* 原地过滤（向后移） */
+    size_t out_len = 0;
+    while (line && *line) {
+        char *eol = strchr(line, '\n');
+        if (!eol) break;
+        *eol = '\0';
+        int keep = 1;
+        if (strstr(line, "libforgehook") || strstr(line, "libtdmqimei_real") ||
+            strstr(line, "libqimei_") || strstr(line, "libinject") ||
+            strstr(line, "libfrida") || strstr(line, "libsubstrate") ||
+            strstr(line, "libxposed"))
+            keep = 0;
+        if (keep) {
+            size_t ll = (size_t)(eol - line) + 1;
+            memmove(out + out_len, line, ll);
+            out_len += ll;
+        }
+        *eol = '\n';
+        line = eol + 1;
+    }
+    if (out_len > 0) {
+        if (ftruncate(mfd, (off_t)out_len) != 0) { syscall(SYS_close, mfd); return -1; }
+        void *a = mmap(NULL, out_len, PROT_WRITE, MAP_SHARED, mfd, 0);
+        if (a == MAP_FAILED) { syscall(SYS_close, mfd); return -1; }
+        memcpy(a, out, out_len);
+        munmap(a, out_len);
+        lseek(mfd, 0, SEEK_SET);
+    }
+    return mfd;
+}
+
 #define INIT() do{ \
     if(!_open)_open=(open_t)dlsym(RTLD_NEXT,"open"); \
     if(!_openat)_openat=(openat_t)dlsym(RTLD_NEXT,"openat"); \
@@ -508,8 +564,11 @@ int open(const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(hidden(p)){errno=ENOENT;return -1;}
-    /* 反作弊数据文件重定向到匿名内存 — 写入不落盘 */
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
+    /* 动态过滤 /proc/self/maps — 隐藏注入库行 */
+    if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||strstr(p,"/proc/") && strstr(p,"/task/"))){
+        int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
     const fake_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
     if(!f&&!hidden(p)) forge_audit("open",p);
@@ -521,6 +580,9 @@ int openat(int dir,const char *p,int flags,...){
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
+    if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
+        int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
     const fake_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=fake_fd(f->data,f->len);if(fd>=0)return fd;}
     if(!f&&!hidden(p)) forge_audit("openat",p);
@@ -718,6 +780,8 @@ static const char *FILT_NAMES[] = {
     "frida", "gdbserver", "gdb", "magisk", ".magisk", "supersu",
     "xposed", "lsposed", "edxposed", "substrate",
     "qemu", "vbox", "vhost", "goldfish", "libdroid4x",
+    "nox", "ttVM", "androVM", "microvirt", "droid4x",
+    "nemud", "genymotion", "windroye", "bluestacks",
     NULL
 };
 

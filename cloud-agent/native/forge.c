@@ -957,26 +957,67 @@ static int do_launch(void) {
                 };
                 for (int i = 0; kGuardPrecise[i]; i++) unlink(kGuardPrecise[i]);
 
-                /* 每1秒回读关键补丁：若 TerSafe 已还原则立刻重写 */
+                /* 分层验证所有补丁 — 防止 TerSafe 还原 */
                 {
+                    static int cycle = 0; cycle++;
                     pid_t vp2 = get_pid_by_name(TARGET_PKG);
                     uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;
+                    uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, "libUE4.so") : 0;
+
+                    /* 每周期: kill chain 6 节点 (最关键的防线) */
                     if (ts2) {
                         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
-                                {0x419FDC, 0xD2800000},
-                                {0x419FE0, 0xD65F03C0},
-                                {0x2E7810, 0xD65F03C0},
-                                {0x2F29D0, 0xD65F03C0},
-                                {0x320D78, 0xD65F03C0},
-                                {0x3233B8, 0xD65F03C0},
-                            };
-                            for (int ci = 0; ci < 6; ci++) {
+                            {0x419FDC, 0xD2800000}, {0x419FE0, 0xD65F03C0},
+                            {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
+                            {0x320D78, 0xD65F03C0}, {0x3233B8, 0xD65F03C0},
+                        };
+                        for (int ci = 0; ci < 6; ci++) {
                             uint32_t cur = 0;
                             if (mem_read32(vp2, ts2 + kChk[ci].off, &cur) == 0
                                 && cur != kChk[ci].exp) {
                                 WARN("patch reverted off=0x%llx cur=0x%08x — repatch",
                                      (unsigned long long)kChk[ci].off, cur);
                                 safe_write32(vp2, ts2 + kChk[ci].off, kChk[ci].exp, 3);
+                            }
+                        }
+                    }
+
+                    /* 每 3 周期: 全部 TerSafe 代码补丁 (67处) */
+                    if (ts2 && (cycle % 3 == 0)) {
+                        for (size_t i = 0; i < TERSAFE_PATCH_COUNT; i++) {
+                            uint32_t cur = 0;
+                            if (mem_read32(vp2, ts2 + kTersafePatches[i].offset, &cur) == 0
+                                && cur != kTersafePatches[i].value) {
+                                WARN("code patch reverted off=0x%llx — repatch",
+                                     (unsigned long long)kTersafePatches[i].offset);
+                                safe_write32(vp2, ts2 + kTersafePatches[i].offset,
+                                             kTersafePatches[i].value, 3);
+                            }
+                        }
+                    }
+
+                    /* 每 5 周期: BSS 清零验证 (40处) */
+                    if (ts2 && (cycle % 5 == 0)) {
+                        uint64_t bss2 = get_module_base(vp2, "libtersafe.so:bss");
+                        if (bss2) {
+                            for (size_t i = 0; i < TERSAFE_BSS_COUNT; i++) {
+                                uint32_t cur = 0;
+                                if (mem_read32(vp2, bss2 + kTersafeBssOffsets[i], &cur) == 0
+                                    && cur != 0) {
+                                    safe_write32(vp2, bss2 + kTersafeBssOffsets[i], 0, 3);
+                                }
+                            }
+                        }
+                    }
+
+                    /* 每 2 周期: UE4 引擎补丁 (6处) */
+                    if (ue4b && (cycle % 2 == 0)) {
+                        for (size_t i = 0; i < UE4_PATCH_COUNT; i++) {
+                            uint32_t cur = 0;
+                            if (mem_read32(vp2, ue4b + kUE4Patches[i].offset, &cur) == 0
+                                && cur != kUE4Patches[i].value) {
+                                safe_write32(vp2, ue4b + kUE4Patches[i].offset,
+                                             kUE4Patches[i].value, 3);
                             }
                         }
                     }
