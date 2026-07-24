@@ -1180,18 +1180,13 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
 }
 
 /* ============================================================
- * seccomp-bpf v6 — full signal protection with ART GC whitelist
+ * seccomp-bpf v6.1 — exit_group only, no signal blocking
  *
- * File interception handled by libc hooks (open/fopen/stat/etc.)
- * for comprehensive access control. Direct-syscall file access
- * is permitted, but termination chain blocking and network filtering
- * prevent any collected data from being transmitted.
+ * v6.0 的 tgkill/tkill/kill 拦截导致 ART 线程管理失败闪退。
+ * kill chain 6 节点内存补丁已从源头干掉 tersafe 杀进程逻辑，
+ * BPF 只需兜底拦截 exit_group(94)。其余 syscall 全放行。
  *
- * Flow: arch→tgkill(131)→tkill(130)→kill(129)→ALLOW
- *        ↓block     ↓block     ↓block(9,15)
- *       →exit_group(94): block (hard fallback, libc hook is soft)
- *       →SIGUSR1(10)+SIGUSR2(12): ALLOW (ART GC uses these)
- *       →all other sig<32: ERRNO(1)
+ * Flow: arch→exit_group(94)→BLOCK →ALLOW all else
  * constructor priority=49. */
 
 /* BPF helper macros — readable instruction construction */
@@ -1211,46 +1206,10 @@ static struct sock_filter g_bpf_prog[]={
     BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_EXIT_GROUP, 0, 1),    /* [4]→[5] or skip */
     BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [5] BLOCK exit_group */
 
-    /* reload nr after branch */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [6] */
-
-    /* ---- tgkill(131): block sig 1-31 except SIGUSR1(10)/SIGUSR2(12) ---- */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_TGKILL, 0, 9),        /* [7]→[8] or [17] */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     32),                            /* [8] A=args[2]=sig */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    0,  6, 0),                     /* [9] sig==0→ALLOW */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    10, 5, 0),                     /* [10] sig==10(SIGUSR1)→ALLOW */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    12, 4, 0),                     /* [11] sig==12(SIGUSR2)→ALLOW */
-    BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K,    32, 3, 0),                     /* [12] sig>=32→ALLOW */
-    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [13] BLOCK sig 1-9,11,13-31 */
-    /* ALLOW path: reload nr */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [14] */
-    BPF_JUMP(BPF_JMP|BPF_JA,           0,  0, 3),                     /* [15]→[19] ALLOW */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [16] spare (alignment) */
-
-    /* ---- tkill(130): block sig 1-31 except SIGUSR1(10)/SIGUSR2(12) ---- */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_TKILL, 0, 9),         /* [17]→[18] or [27] */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     24),                            /* [18] A=args[1]=sig */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    0,  6, 0),                     /* [19] sig==0→ALLOW */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    10, 5, 0),                     /* [20] SIGUSR1→ALLOW */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    12, 4, 0),                     /* [21] SIGUSR2→ALLOW */
-    BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K,    32, 3, 0),                     /* [22] sig>=32→ALLOW */
-    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [23] BLOCK */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [24] reload nr */
-    BPF_JUMP(BPF_JMP|BPF_JA,           0,  0, 3),                     /* [25]→[29] ALLOW */
-
-    /* ---- kill(129): block SIGKILL(9)/SIGTERM(15) only ---- */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    ARM64_NR_KILL, 0, 6),          /* [26]→[27] or [33] */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     24),                            /* [27] A=args[1]=sig */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    9,  3, 0),                     /* [28] sig==9→BLOCK */
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,    15, 2, 0),                     /* [29] sig==15→BLOCK */
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,     0),                             /* [30] reload nr */
-    BPF_JUMP(BPF_JMP|BPF_JA,           0,  0, 1),                     /* [31]→[33] ALLOW */
-    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ERRNO|1),           /* [32] BLOCK sig 9/15 */
-
     /* ALLOW everything else */
-    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ALLOW),             /* [33] */
+    BPF_STMT(BPF_RET|BPF_K,            SECCOMP_RET_ALLOW),             /* [6] */
 };
-/* v6: 34 instructions — adds exit_group BPF block + SIGUSR1/2 whitelist + BPF_STMT/BPF_JUMP macros */
+/* v6.1: 7 instructions — exit_group only, tgkill/tkill/kill removed (crashed ART) */
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
 static void install_seccomp(void){
@@ -1266,7 +1225,7 @@ static void install_seccomp(void){
     g_bpf_active = (r == 0) ? 1 : 0;
     char logbuf[128];
     int ln = snprintf(logbuf, sizeof(logbuf),
-        "[seccomp] v6 exit_group+tgkill+tkill+kill blocked, SIGUSR1/2 whitelist, r=%ld errno=%d tsync=%d active=%d\n",
+        "[seccomp] v6.1 exit_group-only, r=%ld errno=%d tsync=%d active=%d\n",
         r, r!=0?errno:0, used_tsync, g_bpf_active);
     if (ln > 0) hook_log(logbuf);
 }
