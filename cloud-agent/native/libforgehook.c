@@ -1539,13 +1539,12 @@ jint JNI_OnLoad(JavaVM *vm,void *reserved){
     } else {
         hook_log("[JNI] WARNING: g_real_qimei_handle is NULL, cannot forward\n");
     }
-    /* 2. 诊断: 临时禁用 JNI hooks 测试是否是它们导致闪退 */
+    /* 2. 我们的 JNI hook — Build字段 + SystemProperties */
     JNIEnv *env=NULL;
     if((*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_VERSION_1_6;
     if(!env)return JNI_VERSION_1_6;
-    hook_log("[JNI] JNI hooks SKIPPED (debug — testing crash cause)\n");
-    // jni_overwrite_build_fields(env);
-    // jni_hook_system_properties(env);
+    jni_overwrite_build_fields(env);
+    jni_hook_system_properties(env);
     return JNI_VERSION_1_6;
 }
 
