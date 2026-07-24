@@ -142,7 +142,9 @@ int main(int argc, char **argv) {
 
     printf("[*] PID=%d SO=%s\n", pid, so);
 
-    /* 检查目标是否已加载该 so（避免重复注入导致问题） */
+    /* 检查目标是否已加载该 so（避免重复注入导致问题）
+     * hijack 模式下 libforgehook.so 被重命名为 libtdmqimei.so 放到游戏目录,
+     * 仅按参数 basename 搜会漏掉, 需同时搜 "forgehook" 和 hijack 副本 */
     {
         char maps_path[64];
         snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -151,14 +153,20 @@ int main(int argc, char **argv) {
             char line[1024];
             const char *basename = strrchr(so, '/');
             basename = basename ? basename + 1 : so;
+            int already = 0;
             while (fgets(line, sizeof(line), mf)) {
-                if (strstr(line, basename)) {
-                    printf("[*] %s already loaded in target - skipping injection\n", basename);
-                    fclose(mf);
-                    return 0;  /* already injected, not an error */
-                }
+                if (strstr(line, basename)) { already = 1; break; }
+                /* hijack 模式: libforgehook.so 以 libtdmqimei.so 名字加载,
+                 * 但 /proc/pid/maps 中路径包含 "libtdmqimei" 且不是 _real 副本 */
+                if (strstr(line, "libtdmqimei") && !strstr(line, "libtdmqimei_real")) { already = 1; break; }
+                /* 兜底: 任何路径含 forgehook 即认为已加载 */
+                if (strstr(line, "forgehook")) { already = 1; break; }
             }
             fclose(mf);
+            if (already) {
+                printf("[*] hook SO already loaded in target - skipping injection\n");
+                return 0;
+            }
         }
     }
 

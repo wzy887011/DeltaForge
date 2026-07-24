@@ -754,14 +754,10 @@ static void stop_game(void) {
 static void start_game(void) {
     char buf[1024];
 
-    /* Step 0: 尝试 wrap 属性 — 让系统在进程启动时 LD_PRELOAD hook 库 */
-    snprintf(buf, sizeof(buf),
-        "setprop wrap.%s 'LD_PRELOAD=/data/local/tmp/libforgehook.so' 2>/dev/null",
-        TARGET_PKG);
-    system(buf);
-    OK("尝试 wrap LD_PRELOAD: %s", TARGET_PKG);
-
-    /* Step 1: 裸启游戏 */
+    /* Step 1: 裸启游戏
+     * Android 8+ linker namespace 隔离: /data/local/tmp/ 不在 app namespace,
+     * wrap.xxx LD_PRELOAD 和 setprop 均无效, libforgehook.so 通过 hijack 或
+     * ptrace 注入加载 */
     snprintf(buf, sizeof(buf),
         "am start -n %s/com.epicgames.ue4.SplashActivity 2>/dev/null",
         TARGET_PKG);

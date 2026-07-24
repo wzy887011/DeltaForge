@@ -54,6 +54,7 @@ if [ -n "$HIJACK" ]; then
     DIR=$(dirname "$HIJACK")
     cp "$NATIVE/libforgehook.so" "$DIR/libtdmqimei.so"
     chmod 644 "$DIR/libtdmqimei.so"
+    restorecon "$DIR/libtdmqimei.so" 2>/dev/null
     echo "[+] hijack updated: $DIR/libtdmqimei.so"
     echo "--- MD5 ---"
     md5sum "$DIR/libtdmqimei.so" $TMP/libforgehook.so

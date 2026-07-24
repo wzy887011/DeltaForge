@@ -712,22 +712,23 @@ static const struct { uint64_t off; uint32_t insn; const char *name; } kKillChai
 };
 #define KILL_CHAIN_N (sizeof(kKillChain)/sizeof(kKillChain[0]))
 
-__attribute__((constructor(150)))
-static void _patch_tersafe(void) {
+/* ---- pthread payload: poll + patch tersafe in background ---- */
+static void *_patch_tersafe_thread(void *unused) {
+    (void)unused;
     uintptr_t base = 0;
     char logbuf[160];
 
-    /* poll-wait for libtersafe.so to load (up to 10 seconds)
-     * when hijack path is used, libtersafe.so may load before OR after us */
-    for (int retry = 0; retry < 50; retry++) {
+    /* poll-wait for libtersafe.so to load (up to 30 seconds)
+     * running in detached pthread so we don't block linker thread */
+    for (int retry = 0; retry < 150; retry++) {
         base = get_module_base("libtersafe.so");
         if (base) break;
         if (retry == 0) hook_log("[patch] waiting for libtersafe.so...\n");
         usleep(200000);
     }
     if (!base) {
-        hook_log("[patch] TIMEOUT: libtersafe.so not loaded after 10s\n");
-        return;
+        hook_log("[patch] TIMEOUT: libtersafe.so not loaded after 30s\n");
+        return NULL;
     }
     int ln = snprintf(logbuf, sizeof(logbuf),
         "[patch] base=0x%lx\n", (unsigned long)base);
@@ -745,6 +746,20 @@ static void _patch_tersafe(void) {
     ln = snprintf(logbuf, sizeof(logbuf),
         "[patch] done: %d/%zu ok\n", ok, KILL_CHAIN_N);
     if (ln > 0) hook_log(logbuf);
+    return NULL;
+}
+
+__attribute__((constructor(150)))
+static void _patch_tersafe(void) {
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&tid, &attr, _patch_tersafe_thread, NULL) != 0) {
+        hook_log("[patch] FATAL: pthread_create failed, patching inline...\n");
+        _patch_tersafe_thread(NULL);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 /* ---- P1: seccomp-bpf SIGSYS handler ---- */
