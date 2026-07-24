@@ -1223,9 +1223,10 @@ static void _patch_tersafe(void) {
         _patch_tersafe_thread(NULL);
     }
     pthread_attr_destroy(&attr);
+    /* inject 模式: 游戏已运行，立即激活 hook。
+     * hijack 模式: tersafe 线程二次确认，防止过早介入初始化。 */
+    if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated at ctor 150\n"); }
     hook_log("[CTOR] 150 _patch_tersafe done\n");
-    /* g_hooks_ready 不在这里设——等 tersafe patch 线程找到
-     * libtersafe.so 后再激活。此时游戏已完全初始化完成。 */
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
