@@ -1309,9 +1309,11 @@ static void install_seccomp(void){
     if (ln > 0) hook_log(logbuf);
     hook_log("[CTOR] 49 _install_seccomp_cb done\n");
 }
-/* priority=49 - install seccomp before other hooks (no race window) */
-__attribute__((constructor(49)))
-static void _install_seccomp_cb(void){install_seccomp();}
+/* DISABLED: BPF exit_group拦截导致inject模式下进程退出异常。
+ * kill chain 6节点已从源头堵住tersafe杀进程逻辑，
+ * BPF exit_group兜底在当前版本反而有害——恢复时需配合libc exit_group hook。 */
+/* __attribute__((constructor(49))) */
+static void _install_seccomp_cb(void){ hook_log("[CTOR] 49 seccomp SKIPPED (requires libc exit_group hook co-enablement)\n"); }
 
 /* ---- __system_property_get hook ---- */
 /* Device profile system — macro-driven, switchable at compile time.
