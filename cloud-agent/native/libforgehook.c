@@ -526,7 +526,8 @@ ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=E
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
 /* ---- tgkill / kill hook — 拦截 TerSafe 自杀信号
- * 拦截所有发向自身的 fatal 信号(1-31)，sig==0 放行(pthread 存活检查) ---- */
+ * 只拦截真正致命的信号: SIGKILL(9)/SIGTERM(15)。
+ * 放行 sig==0 (pthread 存活检查) 和无害信号 (SIGCHLD等)。 ---- */
 typedef int (*tgkill_t)(pid_t, pid_t, int);
 typedef int (*kill_t)(pid_t, int);
 static tgkill_t _tgkill = NULL;
@@ -534,15 +535,13 @@ static kill_t   _kill_fn = NULL;
 
 int tgkill(pid_t tgid, pid_t tid, int sig) {
     if (!_tgkill) _tgkill = (tgkill_t)dlsym(RTLD_NEXT, "tgkill");
-    /* sig==0 是 pthread_kill 的线程存活检查，放行 */
-    if (sig > 0 && sig <= 31) return 0;
+    if (sig == 9 || sig == 15) return 0;
     return _tgkill ? _tgkill(tgid, tid, sig) : 0;
 }
 
 int kill(pid_t pid, int sig) {
     if (!_kill_fn) _kill_fn = (kill_t)dlsym(RTLD_NEXT, "kill");
-    /* 拦截所有发向自身的 fatal 信号 */
-    if (sig > 0 && sig <= 31) return 0;
+    if (sig == 9 || sig == 15) return 0;
     return _kill_fn ? _kill_fn(pid, sig) : 0;
 }
 
@@ -644,11 +643,11 @@ struct dirent64 *readdir64(DIR *dirp) {
  * it's loaded when using hijack injection via libtdmqimei.so).
  * ============================================================ */
 
-/* game-process-writable patch log - lives inside game's own data dir */
+/* hook internal log — /data/local/tmp/ to avoid SELinux denials in early constructor phase */
 static void hook_log(const char *msg) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
-        "/data/data/com.tencent.tmgp.dfm/files/forge_hook.log",
-        O_WRONLY | O_CREAT | O_APPEND, 0644);
+        "/data/local/tmp/forge_hook.log",
+        O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0) return;
     size_t len = 0; while (msg[len]) len++;
     (void)syscall(SYS_write, fd, msg, len);
@@ -792,49 +791,53 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
 }
 
 /* ============================================================
- * P1: seccomp-bpf - kernel-level kill syscall interception
+ * P1: seccomp-bpf v2 — 24-instruction linear chain, no dead code
  *
- * Blocks: tgkill(131) sig!=0, tkill(130) sig!=0, kill(129) all signals
- * Allows: sig==0 (thread existence check via pthread_kill)
- * File syscalls continue to TRAP -> SIGSYS handler for path replacement.
+ * v1 bug: tgkill match→check sig→RET ALLOW, then tkill+file checks
+ * were unreachable dead code after RET. Kernel verifier rejected
+ * the program → Seccomp: 0.
+ *
+ * v2 fix: tgkill/tkill "allowed" paths jump to the NEXT check instead
+ * of RET ALLOW. BLOCK paths RET ERRNO. Only terminal RET at the end.
+ *
+ * Flow: arch→tgkill(131)→tkill(130)→file6→ALLOW
+ *        ↓block     ↓block          ↓TRAP
  * constructor priority=49 - installed BEFORE any other hooks/patches.
  * ============================================================ */
 static struct sock_filter g_bpf_prog[]={
     /* 0-2: architecture check */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,4},
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, AUDIT_ARCH_AARCH64},
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,4},                              /* [0] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, AUDIT_ARCH_AARCH64},            /* [1] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [2] */
+
     /* 3: load syscall nr */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [3] */
 
-    /* ---- tgkill(131): block sig 1-31, allow 0 and >=32 ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,4, ARM64_NR_TGKILL},
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,32},            /* args[2] = sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 0},           /* sig==0 -> ALLOW (pthread check) */
-    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},          /* sig>=32 -> ALLOW (RT signals) */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK sig 1-31 -> -EPERM */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},
+    /* ---- tgkill(131): block sig 1-31 ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TGKILL},               /* [4] not tgkill→skip5 to [10] */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,32},                              /* [5] A=args[2]=sig */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [6] sig==0→skip2 to [9] */
+    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [7] sig>=32→skip1 to [9] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [8] BLOCK sig 1-31 */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [9] reload nr */
 
-    /* ---- tkill(130): block sig 1-31, allow 0 and >=32 ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,4, ARM64_NR_TKILL},
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},            /* args[1] = sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 0},           /* sig==0 -> ALLOW */
-    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},          /* sig>=32 -> ALLOW */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1}, /* BLOCK sig 1-31 -> -EPERM */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},
+    /* ---- tkill(130): block sig 1-31 ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TKILL},                /* [10] not tkill→skip5 to [16] */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},                              /* [11] A=args[1]=sig */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [12] sig==0→skip2 to [15] */
+    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [13] sig>=32→skip1 to [15] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [14] BLOCK sig 1-31 */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [15] reload nr */
 
-    /* ---- kill(129): 不拦 — Android runtime 用 kill() 做进程组信令,拦截会瞬间崩溃 ---- */
-
-    /* ---- file syscalls -> TRAP -> SIGSYS handler ---- */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_OPENAT},
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_READLINKAT},
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_NEWFSTATAT},
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_OPENAT2},
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_GETDENTS64},
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,0, ARM64_NR_FACCESSAT2},
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_TRAP},
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},
+    /* ---- file syscalls → TRAP → SIGSYS handler ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 6,0, ARM64_NR_OPENAT},               /* [16]→[23] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 5,0, ARM64_NR_READLINKAT},           /* [17]→[23] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 4,0, ARM64_NR_NEWFSTATAT},           /* [18]→[23] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, ARM64_NR_OPENAT2},              /* [19]→[23] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, ARM64_NR_GETDENTS64},           /* [20]→[23] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_FACCESSAT2},           /* [21]→[23] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [22] not a file syscall */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_TRAP},                       /* [23] file syscall → SIGSYS */
 };
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 

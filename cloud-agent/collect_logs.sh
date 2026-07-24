@@ -18,6 +18,15 @@ echo "===== forge_hook.log (若存在) ====="
 cat /data/local/tmp/forge_hook.log 2>/dev/null
 
 echo ""
+echo "===== seccomp status ====="
+PID=$(pidof com.tencent.tmgp.dfm 2>/dev/null)
+if [ -n "$PID" ]; then
+    grep -i seccomp /proc/$PID/status 2>/dev/null
+else
+    echo "game dead"
+fi
+
+echo ""
 echo "===== detect_now.log (tail 20) ====="
 tail -20 /data/local/tmp/detect_now.log 2>/dev/null
 
