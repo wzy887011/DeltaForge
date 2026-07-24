@@ -1248,9 +1248,8 @@ static void install_seccomp(void){
     if (ln > 0) hook_log(logbuf);
     hook_log("[CTOR] 49 _install_seccomp_cb done\n");
 }
-/* priority=49 - install seccomp before other hooks (no race window) */
-__attribute__((constructor(49)))
-static void _install_seccomp_cb(void){install_seccomp();}
+/* TEMP: BPF exit_group 拦截疑似导致进程退出异常，暂禁用测试 */
+static void _install_seccomp_cb(void){ /* install_seccomp(); */ hook_log("[CTOR] 49 seccomp SKIPPED (debug)\n"); }
 
 /* ---- __system_property_get hook ---- */
 /* Device profile system — macro-driven, switchable at compile time.
@@ -1372,7 +1371,7 @@ static const build_field_t BUILD_FIELDS[]={
     {"DISPLAY","Ljava/lang/String;","RP1A.200720.012.G9730ZCS6FULZ"},
     {"BOOTLOADER","Ljava/lang/String;","unknown"},
     {"RADIO","Ljava/lang/String;","G9730ZCS6FULZ"},
-    {"SERIAL","Ljava/lang/String;",""},
+    /* SERIAL 保持原值，空串会导致某些游戏退出 */
     {NULL,NULL,NULL}
 };
 
