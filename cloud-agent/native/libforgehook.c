@@ -1,7 +1,11 @@
 // ============================================================
-// Android system instrumentation library — syscall interception, property
-// emulation, GPU integration, and process isolation for security research.
-// Build: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
+// libforgehook.c v6.0 — LD_PRELOAD 注入库
+// Android syscall 拦截 + 属性模拟 + GPU 适配 + 文件伪造
+// 编译: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
+// 关键安全修复 (v6.0):
+//   - memfd_create 失败 fallback 到 /dev/shm tmpfs
+//   - tersafe 轮询 150→300 次 (60s 超时)
+//   - 属性 hook 未命中时返回空串 (不泄露真实值)
 // ============================================================
 
 #define _GNU_SOURCE
@@ -368,10 +372,11 @@ static int null_redir(const char *p){
     return 0;
 }
 
-/* 返回匿名内存 fd：读写均在内存中，不落盘 */
+/* 返回匿名内存 fd：memfd_create → /dev/shm fallback → 堆缓冲区 */
 static int memfd_anon(void){
     int fd=(int)syscall(__NR_memfd_create,"ac",0);
-    return fd; /* 失败返回 -1，调用方 fallback 到 /dev/null */
+    if(fd<0)fd=syscall(SYS_openat,AT_FDCWD,"/dev/shm/.ac",O_RDWR|O_CREAT|O_CLOEXEC,0600);
+    return fd; /* 失败返回 -1，调用方用 /dev/null fallback */
 }
 
 /* ---- file routing table ---- */
@@ -447,13 +452,15 @@ static const char *HIDDEN[]={
     NULL
 };
 
-/* ---- memfd fake file ---- */
+/* ---- memfd fake file — memfd_create + /dev/shm fallback ---- */
 static int override_fd(const char *s,size_t n){
     int fd=syscall(__NR_memfd_create,"fh",0);
+    /* Fallback: /dev/shm tmpfs */
+    if(fd<0){fd=syscall(SYS_openat,AT_FDCWD,"/dev/shm/.fh",O_RDWR|O_CREAT|O_CLOEXEC,0600);}
     if(fd<0)return -1;
-    if(ftruncate(fd,(off_t)n)!=0){close(fd);return -1;}
+    if(ftruncate(fd,(off_t)n)!=0){close(fd);if(fd)syscall(SYS_unlink,"/dev/shm/.fh");return -1;}
     void *a=mmap(NULL,n,PROT_WRITE,MAP_SHARED,fd,0);
-    if(a==MAP_FAILED){close(fd);return -1;}
+    if(a==MAP_FAILED){close(fd);if(fd)syscall(SYS_unlink,"/dev/shm/.fh");return -1;}
     memcpy(a,s,n);munmap(a,n);lseek(fd,0,SEEK_SET);
     return fd;
 }
@@ -1100,15 +1107,15 @@ static void *_patch_tersafe_thread(void *unused) {
     uintptr_t base = 0;
     char logbuf[160];
 
-    /* poll-wait for target module (up to 30 seconds), detached thread */
-    for (int retry = 0; retry < 150; retry++) {
+    /* poll-wait for target module (up to 60 seconds), detached thread */
+    for (int retry = 0; retry < 300; retry++) {
         base = get_module_base("libtersafe.so");
         if (base) break;
         if (retry == 0) hook_log("[patch] waiting for target module...\n");
         usleep(200000);
     }
     if (!base) {
-        hook_log("[patch] TIMEOUT: target module not loaded after 30s\n");
+        hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
         return NULL;
     }
     int ln = snprintf(logbuf, sizeof(logbuf),

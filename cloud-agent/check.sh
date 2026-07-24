@@ -1,8 +1,7 @@
-# Android instrumentation diagnostic script
-# Usage: su -c .sh /data/local/tmp/check.sh.
+# DeltaForge v6.0 — 诊断脚本
 # 用法: su -c 'sh /data/local/tmp/check.sh'
 echo "=========================================="
-echo " Instrumentation Diagnostic v5.8"
+echo " DeltaForge v6.0 诊断"
 echo " $(date)"
 echo "=========================================="
 

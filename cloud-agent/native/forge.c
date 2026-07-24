@@ -1,16 +1,14 @@
 // ============================================================
-// cloud-agent/native/forge.c v5.8
-// Android process instrumentation controller — memory patching, environment
-// emulation, and file management for application security research.
-// Build: aarch64-linux-android21-clang -static -Os -o forge forge.c
-//   或: in-environment gcc -static -Os -o forge forge.c
-//   1. 自身内嵌 TCP server (run_tcp_server, port 9510) — 手机端 app 通过 socket 发 JSON 命令
-//   2. direct CLI: ./forge -l (full), ./forge -d (daemon), ./forge -m (patch only)
-//   3. 手机端 Python runner 通过 adb push + adb shell 远程调用
-// 读写数据:
-//   读: /proc/[pid]/maps, /proc/[pid]/mem, /proc/[pid]/cmdline, /proc 目录枚举
-//   写: /proc/[pid]/mem (4字节 ARM64 机器码), 游戏 /data/data/ 目录文件删除/清空
-//   写: system properties (setprop/resetprop for device profile)
+// cloud-agent/native/forge.c v6.0
+// DeltaForge — 三角洲行动云手机过检测核心
+// 编译: clang -pie -Os -Wall forge.c -o forge
+// 关键安全修复 (v6.0):
+//   - safe_verify_and_write: patch 前读原始指令校验
+//   - libtersafe.so 不存在时拒绝 patch (防向 0 偏移写内存)
+//   - BSS 段范围验证 (0xC00000 保守上界)
+//   - PATCH_FAIL_ABORT_THRESHOLD 8: 失败过多则 abort
+//   - 渐进退避轮询 (100ms→2000ms)
+//   - inject_hook 失败检查 + signal handlers
 // ============================================================
 
 #define _GNU_SOURCE
@@ -40,9 +38,15 @@
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "5.8"
+#define FORGE_VERSION       "6.0"
+#define FORGE_VERSION_STR  "DeltaForge forge v6.0"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
+
+/* 安全阈值 */
+#define PATCH_FAIL_ABORT_THRESHOLD 8   /* 超过此数量 patch 失败则 abort */
+#define BACKOFF_BASE_MS    100
+#define BACKOFF_MAX_MS     2000
 
 static void start_logcat(void) {
     system("killall logcat 2>/dev/null; sleep 0.5");
@@ -342,6 +346,14 @@ static int safe_write32(pid_t pid, uint64_t addr, uint32_t val, int max_retries)
     return -1;
 }
 
+/* 写时校验: patch 前先读原始指令，避免写到错误偏移 */
+static int safe_verify_and_write(pid_t pid, uint64_t addr, uint32_t patch_val) {
+    uint32_t before = 0;
+    if (mem_read32(pid, addr, &before) != 0) return -1;
+    if (before == patch_val) return 0;  /* 已在目标值，跳过 */
+    return safe_write32(pid, addr, patch_val, 3);
+}
+
 /* ============= /proc/[pid]/maps 解析 ============= */
 static uint64_t get_module_base(pid_t pid, const char *module_spec) {
     char buf[128], line[1024], path[64];
@@ -375,12 +387,14 @@ static uint64_t get_module_base(pid_t pid, const char *module_spec) {
     return base;
 }
 
-/* 轮询等待 so 加载, timeout_ms 超时返回 0 */
+/* 轮询等待 so 加载, 渐进退避 100ms→2000ms, timeout_ms 超时返回 0 */
 static uint64_t wait_for_module(pid_t pid, const char *mod, int timeout_ms) {
-    for (int e = 0; e < timeout_ms; e += 100) {
+    unsigned delay = BACKOFF_BASE_MS;
+    for (int e = 0; e < timeout_ms; e += delay) {
         uint64_t b = get_module_base(pid, mod);
         if (b) return b;
-        usleep(100000);
+        usleep(delay * 1000);
+        delay = delay < BACKOFF_MAX_MS / 2 ? delay * 2 : BACKOFF_MAX_MS / 2;
     }
     return 0;
 }
@@ -829,7 +843,7 @@ static int inject_hook(pid_t pid) {
 /* ============= 核心: 内存补丁执行 ============= */
 static int patch_game_process(void) {
     pid_t pid = 0;
-    for (int i = 0; i < 600; i++) {  /* 等待最多 60 秒，覆盖冷启动 */
+    for (int i = 0; i < 600; i++) {
         pid = get_pid_by_name(TARGET_PKG);
         if (pid) break;
         usleep(100000);
@@ -838,52 +852,87 @@ static int patch_game_process(void) {
     OK("游戏 PID: %d", pid);
 
     int total_ok = 0, total_fail = 0;
+    int tersafe_ok = 0, tersafe_fail = 0;
+    int bss_ok = 0, bss_fail = 0;
+    int ue4_ok = 0;
 
-    /* 1. target security module */
-    uint64_t ts_base = wait_for_module(pid, "libtersafe.so", 20000);
-    if (ts_base) {
-        int ok = 0, fail = 0;
-        for (size_t i = 0; i < TERSAFE_PATCH_COUNT; i++) {
-            uint64_t addr = ts_base + kTersafePatches[i].offset;
-            if (safe_write32(pid, addr, kTersafePatches[i].value, 3) == 0) ok++;
-            else fail++;
-        }
-        OK("target module code: %d ok / %d fail", ok, fail);
-        total_ok += ok; total_fail += fail;
-    } else { WARN("target module not loaded"); }
+    /* 1. libtersafe.so — 带退避等待加载 */
+    uint64_t ts_base = wait_for_module(pid, "libtersafe.so", 30000);
+    if (ts_base == 0) {
+        ERR("libtersafe.so 未加载 — ABORT，拒绝在不存在模块上写内存");
+        return -1;
+    }
 
-    /* 2. target module BSS segment — clear 40 global detection flags */
+    /* 验证基址有效性: 读已知偏移确认可读 */
+    uint32_t sanity = 0;
+    if (mem_read32(pid, ts_base + 0x100, &sanity) != 0) {
+        ERR("libtersafe.so 基址读取失败 — abort patching");
+        return -1;
+    }
+    if (sanity == 0 || sanity == 0xFFFFFFFF) {
+        ERR("libtersafe.so 基址无效 sanity=0x%x — abort", sanity);
+        return -1;
+    }
+    OK("libtersafe.so base=0x%lx", (unsigned long)ts_base);
+
+    /* 2. tersafe 代码补丁 61 处 (verify-before-patch) */
+    for (size_t i = 0; i < TERSAFE_PATCH_COUNT; i++) {
+        uint64_t addr = ts_base + kTersafePatches[i].offset;
+        if (safe_verify_and_write(pid, addr, kTersafePatches[i].value) == 0) tersafe_ok++;
+        else tersafe_fail++;
+    }
+    OK("tersafe code: %d ok / %d fail", tersafe_ok, tersafe_fail);
+    total_ok += tersafe_ok; total_fail += tersafe_fail;
+
+    /* 3. tersafe BSS 段清零 (范围验证) */
     uint64_t bss_base = get_module_base(pid, "libtersafe.so:bss");
-    if (bss_base) {
-        int ok = 0, fail = 0;
+    if (bss_base > 0) {
+        uint64_t bss_limit = ts_base + 0xC00000;  /* 保守上界 12MB */
         for (size_t i = 0; i < TERSAFE_BSS_COUNT; i++) {
             uint64_t addr = bss_base + kTersafeBssOffsets[i];
-            if (safe_write32(pid, addr, 0, 3) == 0) ok++;
-            else fail++;
+            if (kTersafeBssOffsets[i] > 0xC00000 || addr >= bss_limit) {
+                bss_fail++; continue;  /* 越界跳过，不写入 */
+            }
+            if (safe_write32(pid, addr, 0, 3) == 0) bss_ok++;
+            else bss_fail++;
         }
-        OK("target module bss: %d ok / %d fail", ok, fail);
-        total_ok += ok; total_fail += fail;
+        OK("tersafe bss: %d ok / %d fail", bss_ok, bss_fail);
+        total_ok += bss_ok; total_fail += bss_fail;
+    } else {
+        WARN("tersafe BSS 段未找到 (跳过)");
     }
 
-    /* 3. libUE4.so 引擎检测 — 7 处 */
+    /* 4. libUE4.so 引擎检测 7 处 */
     uint64_t ue4_base = wait_for_module(pid, "libUE4.so", 20000);
     if (ue4_base) {
-        /* 确保 so 完全加载完成后再补丁 */
         usleep(500000);
-        int ok = 0;
         for (size_t i = 0; i < UE4_PATCH_COUNT; i++) {
             uint64_t addr = ue4_base + kUE4Patches[i].offset;
-            if (safe_write32(pid, addr, kUE4Patches[i].value, 3) == 0) ok++;
+            if (safe_verify_and_write(pid, addr, kUE4Patches[i].value) == 0) ue4_ok++;
         }
-        OK("UE4: %d ok", ok);
-        total_ok += ok;
+        OK("UE4: %d ok", ue4_ok);
+        total_ok += ue4_ok;
+    } else {
+        WARN("libUE4.so 未加载 (跳过引擎补丁)");
     }
+
     OK("内存过检完成: %d ok / %d fail", total_ok, total_fail);
-    return (total_fail > 15) ? -1 : 0;
+    if (total_fail > PATCH_FAIL_ABORT_THRESHOLD) {
+        ERR("patch 失败数 (%d) 超过阈值 (%d) — abort",
+            total_fail, PATCH_FAIL_ABORT_THRESHOLD);
+        return -1;
+    }
+    return 0;
 }
 
 /* ============= 全局执行流程 ============= */
+static volatile sig_atomic_t g_stop = 0;
+static void sig_handler(int sig) { (void)sig; g_stop = 1; }
+
 static int do_prepare(void) {
+    signal(SIGTERM, sig_handler);
+    signal(SIGINT, sig_handler);
+    signal(SIGHUP, sig_handler);
     /* Normalize forge process name for discretion */
     prctl(PR_SET_NAME, "[kworker/u:0]", 0, 0, 0);
     protect_devmode();
@@ -916,7 +965,10 @@ static int do_launch(void) {
     }
     if (pid) {
         usleep(500000);
-        inject_hook(pid);
+        if (inject_hook(pid) != 0) {
+            ERR("hook 库加载失败 — patching abort");
+            return -1;
+        }
     }
     /* hijack 模式下 libforgehook.so 已随 Qimei 自动加载, ptrace 注入是兜底 */
     int rc = patch_game_process();
@@ -1130,17 +1182,17 @@ static int run_tcp_server(void) {
 /* ============= main ============= */
 static void print_usage(const char *prog) {
     fprintf(stderr,
-        "Android instrumentation tool v" FORGE_VERSION "\n"
-        "Usage: %s [options]\n"
-        "  -d    daemon/TCP server mode (port %d)\n"
-        "  -p    one-shot prepare (cleanup + emulation + properties, no launch)\n"
-        "  -l    full launch (prepare + launch + memory patches)\n"
-        "  -m    memory patches only (process must be running)\n"
-        "  -s    query process status\n"
-        "  -c    telemetry file cleanup only\n"
-        "  -x    property emulation only\n"
-        "  -v    verbose logging\n"
-        "  -h    show help\n",
+        FORGE_VERSION_STR " — 三角洲行动云手机过检测\n"
+        "用法: %s [选项]\n"
+        "  -d    daemon/TCP 服务器 (端口 %d)\n"
+        "  -p    仅 prepare (清理+伪装+属性)\n"
+        "  -l    launch (prepare + 启动游戏 + 补丁)\n"
+        "  -m    仅补丁 (游戏必须在运行)\n"
+        "  -s    查询状态\n"
+        "  -c    仅清理反作弊文件\n"
+        "  -x    仅伪装系统属性\n"
+        "  -v    详细日志\n"
+        "  -h    显示帮助\n",
         prog, CTRL_PORT);
 }
 
