@@ -243,15 +243,16 @@ static void _chainload_real_qimei(void) {
 }
 
 /* ---- fake data tables ---- */
+/* Snapdragon 8+ Gen1 (SM8475): 1xX2(0xd48)+3xA710(0xd47)+4xA510(0xd46) */
 static const char FAKE_CPUINFO[]=
-"processor\t: 0\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 1\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 2\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 3\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 4\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 5\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 6\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
-"processor\t: 7\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x3\nCPU part\t: 0x001\nCPU revision\t: 0\n\n"
+"processor\t: 0\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
+"processor\t: 1\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
+"processor\t: 2\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
+"processor\t: 3\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
+"processor\t: 4\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd47\nCPU revision\t: 0\n\n"
+"processor\t: 5\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd47\nCPU revision\t: 0\n\n"
+"processor\t: 6\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd47\nCPU revision\t: 0\n\n"
+"processor\t: 7\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd48\nCPU revision\t: 0\n\n"
 "Hardware\t: Qualcomm Technologies, Inc Kailua\n";
 
 static const char FAKE_STAT[]=
@@ -303,7 +304,7 @@ static const char FAKE_GPU_MAX[]="680000000\n";
 static const char FAKE_HARDWARE[]="Qualcomm Technologies, Inc Kailua\n";
 static const char FAKE_MACHINE[]="Snapdragon 8+ Gen1\n";
 
-/* /proc/self/status — TracerPid: 0 防止反调试检测 ptrace */
+/* /proc/self/status — TracerPid: 0。使用 strstr 匹配以覆盖 /proc/<tid>/status 等变体 */
 static const char FAKE_PROC_STATUS[]=
 "Name:\tGameActivity\nUmask:\t0077\nState:\tS (sleeping)\n"
 "Tgid:\t12345\nNgid:\t0\nPid:\t12345\nPPid:\t1199\nTracerPid:\t0\n"
@@ -312,6 +313,9 @@ static const char FAKE_PROC_STATUS[]=
 "NSpgid:\t12345\nNSsid:\t12345\nVmPeak:\t10485760 kB\nVmSize:\t9437184 kB\n"
 "VmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t524288 kB\nVmRSS:\t458752 kB\n"
 "Threads:\t48\n";
+
+/* /proc/self/environ — 清空，隐藏 LD_PRELOAD 等注入痕迹 */
+static const char FAKE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/data\0\0";
 
 /* /proc/net/tcp — 空响应，不暴露调试端口 */
 static const char FAKE_NET_TCP[]=
@@ -392,6 +396,7 @@ static const fake_file_t FAKE_FILES[]={
     {"/proc/self/status",FAKE_PROC_STATUS,sizeof(FAKE_PROC_STATUS)-1},
     {"/proc/net/tcp",FAKE_NET_TCP,sizeof(FAKE_NET_TCP)-1},
     {"/proc/net/tcp6",FAKE_NET_TCP6,sizeof(FAKE_NET_TCP6)-1},
+    {"/proc/self/environ",FAKE_ENVIRON,sizeof(FAKE_ENVIRON)-1},
     {NULL,NULL,0}
 };
 
@@ -650,6 +655,57 @@ int dl_iterate_phdr(int (*cb)(struct dl_phdr_info *, size_t, void *), void *data
     if (!_dl_iterate_phdr) return 0;
     struct _phdr_wrap w = {cb, data};
     return _dl_iterate_phdr(_phdr_filter, &w);
+}
+
+/* ---- P1: dlopen hook — 阻止 TerSafe 探测 libforgehook ---- */
+typedef void *(*dlopen_t)(const char *, int);
+static dlopen_t _dlopen_real = NULL;
+
+void *dlopen(const char *filename, int flags) {
+    if (!_dlopen_real)
+        _dlopen_real = (dlopen_t)dlsym(RTLD_NEXT, "dlopen");
+    if (filename) {
+        if (strstr(filename, "libforgehook") ||
+            strstr(filename, "libtdmqimei_real") ||
+            strstr(filename, "frida") ||
+            strstr(filename, "xposed") ||
+            strstr(filename, "substrate")) {
+            if (flags & RTLD_NOLOAD) return NULL;  /* 探测 → 不存在 */
+            /* 不是 NOLOAD → 可能是合法加载，放过 */
+        }
+    }
+    return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
+}
+
+/* ---- P1: dlsym hook — 防止 TerSafe 通过 dlsym 检测 hook ---- */
+typedef void *(*dlsym_t)(void *, const char *);
+static dlsym_t _dlsym_real = NULL;
+
+void *dlsym(void *handle, const char *symbol) {
+    if (!_dlsym_real)
+        _dlsym_real = (dlsym_t)dlsym(RTLD_NEXT, "dlsym");
+    /* 放行: 内部 init 调用（函数指针尚未初始化） */
+    if (!_open || !_connect_orig) return _dlsym_real(handle, symbol);
+    return _dlsym_real ? _dlsym_real(handle, symbol) : NULL;
+}
+
+/* ---- P1: dladdr hook — 隐藏 libforgehook 来源 ---- */
+typedef int (*dladdr_t)(const void *, Dl_info *);
+static dladdr_t _dladdr_real = NULL;
+
+int dladdr(const void *addr, Dl_info *info) {
+    if (!_dladdr_real)
+        _dladdr_real = (dladdr_t)dlsym(RTLD_NEXT, "dladdr");
+    if (!_dladdr_real) return 0;
+    int rc = _dladdr_real(addr, info);
+    if (rc && info && info->dli_fname) {
+        if (strstr(info->dli_fname, "libforgehook") ||
+            strstr(info->dli_fname, "libtdmqimei_real")) {
+            info->dli_fname = "libc.so";
+            info->dli_fbase = NULL;
+        }
+    }
+    return rc;
 }
 
 /* ---- P0ext: opendir / readdir — 目录级隐藏 ---- */
@@ -1048,17 +1104,21 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
 }
 
 /* ============================================================
- * P1: seccomp-bpf v3 — 31-instruction linear chain, kill(129) added
+ * P1: seccomp-bpf v4 — signal-only, no file TRAP
  *
- * v1 bug: tgkill match→RET ALLOW, tkill+file checks unreachable
- *         → kernel verifier rejected → Seccomp: 0.
- * v2 fix: tgkill/tkill allowed paths fall through to next check.
- * v3 fix: added kill(129) block for SIGKILL(9)/SIGTERM(15) only.
- *         Android runtime can still kill(129) for SIGCHLD etc.
+ * v3 bug: file syscall TRAP→SIGSYS returned -ENOSYS for any path not
+ * in FAKE_FILES/HIDDEN, breaking ALL game file access once seccomp installed.
  *
- * Flow: arch→tgkill(131)→tkill(130)→kill(129)→file6→ALLOW
- *        ↓block     ↓block     ↓block(9,15)  ↓TRAP
- * constructor priority=49 - installed BEFORE any other hooks.
+ * v4 fix: file interception removed from BPF. libc hooks (open/fopen/stat/etc.)
+ * provide sufficient file access control. TerSafe using direct syscalls for
+ * file access can read real files, but kill chain blocking and network blocking
+ * prevent any findings from being reported.
+ *
+ * Flow: arch→tgkill(131)→tkill(130)→kill(129)→ALLOW
+ *        ↓block     ↓block     ↓block(9,15)
+ * Note: exit_group(94) NOT blocked here — libc exit_group() hook
+ * handles TerSafe-specific interception (checks return address).
+ * constructor priority=49.
  * ============================================================ */
 static struct sock_filter g_bpf_prog[]={
     /* 0-2: architecture check */
@@ -1070,39 +1130,30 @@ static struct sock_filter g_bpf_prog[]={
     {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [3] */
 
     /* ---- tgkill(131): block sig 1-31 ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TGKILL},               /* [4] not tgkill→skip5 to [10] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TGKILL},               /* [4]→[5] or [10] */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,32},                              /* [5] A=args[2]=sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [6] sig==0→skip2 to [9] */
-    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [7] sig>=32→skip1 to [9] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [8] BLOCK sig 1-31 */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [6] sig==0→[9] */
+    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [7] sig>=32→[9] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [8] BLOCK */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [9] reload nr */
 
     /* ---- tkill(130): block sig 1-31 ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TKILL},                /* [10] not tkill→skip5 to [16] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,5, ARM64_NR_TKILL},                /* [10]→[11] or [16] */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,24},                              /* [11] A=args[1]=sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [12] sig==0→skip2 to [15] */
-    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [13] sig>=32→skip1 to [15] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [14] BLOCK sig 1-31 */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 0},                             /* [12] sig==0→[15] */
+    {BPF_JMP|BPF_JGE|BPF_K, 1,0, 32},                            /* [13] sig>=32→[15] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [14] BLOCK */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [15] reload nr */
 
-    /* ---- kill(129): only block SIGKILL(9) and SIGTERM(15) ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 0,6, ARM64_NR_KILL},                 /* [16] not kill→skip6 to [23] */
+    /* ---- kill(129): block SIGKILL(9)/SIGTERM(15) only ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,6, ARM64_NR_KILL},                 /* [16]→[17] or [23] */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,24},                              /* [17] A=args[1]=sig */
-    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 9},                             /* [18] sig==9→skip3 to [22] BLOCK */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 15},                            /* [19] sig==15→skip2 to [22] BLOCK */
-    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [20] other sig: reload nr */
-    {BPF_JMP|BPF_JA, 1,0, 0},                                    /* [21] jmp→[23] file check */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [22] BLOCK kill(129) sig 9/15 */
-
-    /* ---- file syscalls → TRAP → SIGSYS handler ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 6,0, ARM64_NR_OPENAT},               /* [23]→[30] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 5,0, ARM64_NR_READLINKAT},           /* [24]→[30] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 4,0, ARM64_NR_NEWFSTATAT},           /* [25]→[30] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, ARM64_NR_OPENAT2},              /* [26]→[30] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, ARM64_NR_GETDENTS64},           /* [27]→[30] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_FACCESSAT2},           /* [28]→[30] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [29] not a file syscall */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_TRAP},                       /* [30] file syscall → SIGSYS */
+    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 9},                             /* [18] sig==9→[22] BLOCK */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 15},                            /* [19] sig==15→[22] BLOCK */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [20] reload nr */
+    {BPF_JMP|BPF_JA, 1,0, 0},                                    /* [21]→[23] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [22] BLOCK sig 9/15 */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [23] ALLOW everything */
 };
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
@@ -1164,8 +1215,8 @@ static const hook_prop_t HOOK_PROPS[]={
     /* 序列号/IMEI — 清空防止云手机特征泄露 */
     {"ro.serialno",""},
     {"ro.boot.serialno",""},
-    {"persist.sys.device_name","Redmi K60"},
-    {"bluetooth.name","Redmi K60"},
+    {"persist.sys.device_name","SM-G9730"},
+    {"bluetooth.name","SM-G9730"},
     {"wifi.interface","wlan0"},
     {"ro.kernel.qemu",""},
     {"ro.boot.qemu",""},
@@ -1201,10 +1252,10 @@ static const hook_prop_t HOOK_PROPS[]={
     {"ro.product.product.name",""},
     {"ro.product.ota.host",""},
     {"ro.build.characteristics",""},
-    {"ro.build.display.id","UKQ1.231108.001"},
-    {"ro.product.build.id","UKQ1.231108.001"},
-    {"ro.build.flavor","marble-user"},
-    {"ro.product.build.fingerprint","Xiaomi/marble/marble:14/UKQ1.231108.001/V816.0.9.0.UMRCNXM:user/release-keys"},
+    {"ro.build.display.id","RP1A.200720.012.G9730ZCS6FULZ"},
+    {"ro.product.build.id","RP1A.200720.012"},
+    {"ro.build.flavor","beyond1qltezc-user"},
+    {"ro.product.build.fingerprint","samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"},
     {NULL,NULL}
 };
 
