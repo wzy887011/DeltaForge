@@ -26,6 +26,8 @@
 #include <jni.h>
 #include <time.h>
 #include <link.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 /* seccomp-bpf constants */
 #ifndef SECCOMP_SET_MODE_FILTER
@@ -46,12 +48,13 @@
 
 /* ARM64 syscall numbers */
 #define ARM64_NR_OPENAT      56
-#define ARM64_NR_READLINKAT  78
-#define ARM64_NR_NEWFSTATAT  79
+#define ARM64_NR_EXIT_GROUP   94  /* exit_group — 杀死所有线程 */
 #define ARM64_NR_KILL        129  /* kill — 整进程杀 */
 #define ARM64_NR_TKILL       130  /* tkill — 单线程杀 (tgkill 前身) */
 #define ARM64_NR_TGKILL      131  /* tgkill — TerSafe 直接 SVC 发送自杀信号 */
 #define ARM64_NR_GETDENTS64  216
+#define ARM64_NR_PROCESS_VM_READV 270
+#define ARM64_NR_PROCESS_VM_WRITEV 271
 #define ARM64_NR_OPENAT2     437
 #define ARM64_NR_FACCESSAT2  439
 
@@ -559,6 +562,60 @@ int kill(pid_t pid, int sig) {
     return _kill_fn ? _kill_fn(pid, sig) : 0;
 }
 
+/* ---- P0: exit_group hook — only block if caller is in libtersafe.so ---- */
+typedef void (*exit_group_t)(int);
+static exit_group_t _exit_group = NULL;
+static uintptr_t   g_ts_text_start = 0;
+static uintptr_t   g_ts_text_end   = 0;
+
+void exit_group(int status) {
+    if (!_exit_group) _exit_group = (exit_group_t)dlsym(RTLD_NEXT, "exit_group");
+    /* 一次性获取 libtersafe.so 代码段范围 */
+    if (!g_ts_text_start) {
+        g_ts_text_start = get_module_base("libtersafe.so");
+        if (g_ts_text_start) {
+            /* 粗略估算代码段大小: 读 ELF header */
+            uint32_t elf_sz = 0;
+            int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
+            if (fd >= 0) {
+                /* ELF64 header: e_phoff at offset 32(8 bytes), e_phnum at offset 56(2 bytes) */
+                syscall(__NR_lseek, fd, (off_t)(g_ts_text_start + 32), SEEK_SET);
+                uint64_t phoff = 0; uint16_t phnum = 0;
+                syscall(SYS_read, fd, &phoff, 8);
+                syscall(__NR_lseek, fd, (off_t)(g_ts_text_start + 56), SEEK_SET);
+                syscall(SYS_read, fd, &phnum, 2);
+                /* scan program headers for PT_LOAD with execute permission */
+                for (int i = 0; i < phnum && i < 32; i++) {
+                    uint32_t ph[2]; /* p_type + p_flags */
+                    uint64_t p_vaddr, p_memsz;
+                    off_t ph_addr = (off_t)(g_ts_text_start + phoff + i * 56);
+                    syscall(__NR_lseek, fd, ph_addr, SEEK_SET);
+                    syscall(SYS_read, fd, ph, 8);
+                    syscall(__NR_lseek, fd, ph_addr + 16, SEEK_SET);
+                    syscall(SYS_read, fd, &p_vaddr, 8);
+                    syscall(__NR_lseek, fd, ph_addr + 40, SEEK_SET);
+                    syscall(SYS_read, fd, &p_memsz, 8);
+                    if (ph[1] & 1) { /* PF_X */
+                        g_ts_text_end = g_ts_text_start + p_vaddr + p_memsz;
+                        break;
+                    }
+                }
+                syscall(SYS_close, fd);
+            }
+            if (!g_ts_text_end) g_ts_text_end = g_ts_text_start + 0x600000; /* fallback 6MB */
+        }
+    }
+    /* 检查返回地址是否在 TerSafe 代码范围内 */
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+    if (g_ts_text_start && ra >= g_ts_text_start && ra < g_ts_text_end) {
+        hook_log("[exit_group] blocked TerSafe call\n");
+        return; /* 吃掉，不执行 */
+    }
+    if (_exit_group) _exit_group(status);
+    /* 不应到达这里 */
+    for (;;) syscall(ARM64_NR_EXIT_GROUP, status);
+}
+
 /* ---- P0ext: getenv — 拦截 LD_PRELOAD / LD_LIBRARY_PATH 检测 ---- */
 typedef char *(*getenv_t)(const char *);
 static getenv_t _getenv = NULL;
@@ -643,6 +700,192 @@ struct dirent64 *readdir64(DIR *dirp) {
         if (!dname_filtered(ent->d_name)) break;
     }
     return ent;
+}
+
+/* ---- P1: r_debug link_map hiding — 从 linker 模块链表摘除 libforgehook ---- */
+/* 内联声明 r_debug / link_map 结构，避免 Termux 缺少 <link.h> */
+struct my_link_map {
+    uintptr_t l_addr;
+    char     *l_name;
+    void     *l_ld;
+    struct my_link_map *l_next;
+};
+struct my_r_debug {
+    int r_version;
+    struct my_link_map *r_map;
+};
+
+__attribute__((constructor(101)))
+static void _hide_from_linker_list(void) {
+    struct my_r_debug *dbg = (struct my_r_debug *)dlsym(RTLD_DEFAULT, "_r_debug");
+    if (!dbg) dbg = (struct my_r_debug *)dlsym(RTLD_DEFAULT, "__r_debug");
+    if (!dbg || !dbg->r_map) return;
+
+    struct my_link_map *prev = NULL, *cur = dbg->r_map;
+    int removed = 0;
+    while (cur && removed < 2) {
+        const char *name = cur->l_name;
+        if (name && name[0] && (strstr(name, "libforgehook") ||
+                                 strstr(name, "libtdmqimei_real"))) {
+            if (prev) prev->l_next = cur->l_next;
+            else     dbg->r_map   = cur->l_next;
+            hook_log("[r_debug] unlinked from linker list\n");
+            removed++;
+            cur = prev ? prev->l_next : dbg->r_map;
+            continue;
+        }
+        prev = cur;
+        cur = cur->l_next;
+    }
+}
+
+/* ---- P1: getaddrinfo hook — 阻止 AC 域名 DNS 解析 ---- */
+typedef int (*getaddrinfo_t)(const char *, const char *,
+                             const void *, void *);
+static getaddrinfo_t _getaddrinfo = NULL;
+
+static const char *AC_DOMAINS[] = {
+    "tdm.qq.com", "tdm.3g.qq.com", "crashsight.qq.com",
+    "gcloud.tencent.com", "report.qq.com", "stat.qq.com",
+    "cloud.tencent.com", "gamelobby.qq.com", "igame.qq.com",
+    "qimei.qq.com", "snowflake.qq.com", "tpns.qq.com",
+    "beacon.qq.com", "bugly.qq.com",
+    NULL
+};
+
+int getaddrinfo(const char *node, const char *service,
+                const void *hints, void *res) {
+    if (!_getaddrinfo)
+        _getaddrinfo = (getaddrinfo_t)dlsym(RTLD_NEXT, "getaddrinfo");
+    if (node) {
+        for (const char **d = AC_DOMAINS; *d; d++) {
+            if (strstr(node, *d)) {
+                hook_log("[net] blocked getaddrinfo\n");
+                return -2; /* EAI_NONAME */
+            }
+        }
+    }
+    return _getaddrinfo ? _getaddrinfo(node, service, hints, res) : -2;
+}
+
+/* ---- P1: connect hook — 阻止 AC IP 连接 (DNS 封锁的兜底) ---- */
+typedef int (*connect_t)(int, const void *, unsigned int);
+static connect_t _connect_orig = NULL;
+
+/* 已知 AC 上报服务器 IP 前缀 */
+static int is_ac_ip(const struct sockaddr *addr) {
+    if (!addr || ((const struct sockaddr_in *)addr)->sin_family != 2) /* AF_INET */
+        return 0;
+    uint32_t ip = ((const struct sockaddr_in *)addr)->sin_addr.s_addr;
+    static const uint32_t kACNets[] = {
+        0x6DEF7700u, /* 118.239.119.x */
+        0x3BA8A800u, /* 59.168.168.x */
+        0x197B1900u, /* 123.25.25.x */
+        0x2D760B00u, /* 45.118.11.x */
+        0x6BEF7100u, /* 107.239.113.x */
+        0
+    };
+    for (const uint32_t *n = kACNets; *n; n++) {
+        if ((ip & 0xFFFFFF00u) == (*n & 0xFFFFFF00u)) return 1;
+    }
+    return 0;
+}
+
+int connect(int sockfd, const void *addr, unsigned int addrlen) {
+    if (!_connect_orig)
+        _connect_orig = (connect_t)dlsym(RTLD_NEXT, "connect");
+    if (is_ac_ip((const struct sockaddr *)addr)) {
+        hook_log("[net] blocked connect to AC IP\n");
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    return _connect_orig ? _connect_orig(sockfd, addr, addrlen) : -1;
+}
+
+/* ---- P1: GLES/EGL hook — 伪造 GPU 渲染器为 Adreno 740 ---- */
+/* 不依赖 GLES/EGL 头文件，用原始类型声明 */
+typedef unsigned int        GLenum;
+typedef unsigned char       GLubyte;
+typedef void               *EGLDisplay;
+typedef int                 EGLint;
+
+static const GLubyte FAKE_GL_RENDERER[] = "Adreno (TM) 740";
+static const GLubyte FAKE_GL_VENDOR[]   = "Qualcomm";
+static const char     FAKE_EGL_VENDOR[] = "Qualcomm";
+
+typedef const GLubyte *(*glGetString_t)(GLenum);
+typedef const char     *(*eglQueryString_t)(EGLDisplay, EGLint);
+static glGetString_t    _glGetString    = NULL;
+static eglQueryString_t _eglQueryString = NULL;
+
+static int g_gles_patched = 0;
+static int g_egl_patched  = 0;
+
+/* ARM64: 写入 B <offset> 指令 (无条件跳转) */
+static int patch_branch(uintptr_t from, uintptr_t to) {
+    int64_t delta = (int64_t)to - (int64_t)from;
+    if (delta < -134217728 || delta > 134217724) return -1; /* ±128MB */
+    uint32_t insn = 0x14000000u | ((uint32_t)((delta >> 2) & 0x03FFFFFFu));
+    return patch_insn(from, insn);
+}
+
+static const GLubyte *glGetString_wrapper(GLenum name) {
+    if (name == 0x1F01) return FAKE_GL_RENDERER;
+    if (name == 0x1F00) return FAKE_GL_VENDOR;
+    return _glGetString ? _glGetString(name) : (const GLubyte *)"";
+}
+
+static const char *eglQueryString_wrapper(EGLDisplay dpy, EGLint name) {
+    if (name == 0x3053)      return FAKE_EGL_VENDOR;  /* EGL_VENDOR */
+    if (name == 0x305A)      return (const char *)FAKE_GL_RENDERER; /* EGL_RENDERER_EXT */
+    return _eglQueryString ? _eglQueryString(dpy, name) : "";
+}
+
+__attribute__((constructor(120)))
+static void _patch_gpu_driver(void) {
+    /* 在后台线程做，避免阻塞主加载流程 */
+    uintptr_t gles_base = 0, egl_base = 0;
+    /* 轮询等待 GPU 库加载 (最多 20s) */
+    for (int i = 0; i < 100; i++) {
+        if (!gles_base) gles_base = get_module_base("libGLESv2.so");
+        if (!egl_base)  egl_base  = get_module_base("libEGL.so");
+        if (gles_base && egl_base) break;
+        usleep(200000);
+    }
+
+    if (gles_base) {
+        /* glGetString 的地址 = libGLESv2 base + 函数偏移 */
+        void *h = dlopen("libGLESv2.so", RTLD_NOLOAD | RTLD_LAZY);
+        if (h) {
+            _glGetString = (glGetString_t)dlsym(h, "glGetString");
+            if (_glGetString) {
+                uintptr_t fn = (uintptr_t)_glGetString;
+                uintptr_t wr = (uintptr_t)&glGetString_wrapper;
+                if (patch_branch(fn, wr) == 0) g_gles_patched = 1;
+                hook_log("[gpu] glGetString patched\n");
+            }
+            dlclose(h);
+        }
+    }
+
+    if (egl_base) {
+        void *h = dlopen("libEGL.so", RTLD_NOLOAD | RTLD_LAZY);
+        if (h) {
+            _eglQueryString = (eglQueryString_t)dlsym(h, "eglQueryString");
+            if (_eglQueryString) {
+                uintptr_t fn = (uintptr_t)_eglQueryString;
+                uintptr_t wr = (uintptr_t)&eglQueryString_wrapper;
+                if (patch_branch(fn, wr) == 0) g_egl_patched = 1;
+                hook_log("[gpu] eglQueryString patched\n");
+            }
+            dlclose(h);
+        }
+    }
+
+    if (g_gles_patched || g_egl_patched)
+        hook_log("[gpu] GPU driver spoof: Adreno 740\n");
+    else
+        hook_log("[gpu] WARNING: GPU hooks FAILED\n");
 }
 
 /* ============================================================
