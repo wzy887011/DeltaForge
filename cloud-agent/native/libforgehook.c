@@ -1448,14 +1448,24 @@ typedef jint (*JNI_OnLoad_t)(JavaVM*,void*);
 
 __attribute__((visibility("default")))
 jint JNI_OnLoad(JavaVM *vm,void *reserved){
+    /* 诊断: 确认 JNI_OnLoad 是否被调用 */
+    hook_log("[JNI] JNI_OnLoad called, g_real_qimei_handle=");
+    hook_log(g_real_qimei_handle ? "set" : "NULL");
+    hook_log("\n");
     /* 1. 转发原版 qimei JNI_OnLoad（注册 native 方法） */
     if (g_real_qimei_handle) {
         JNI_OnLoad_t real_JNI_OnLoad =
             (JNI_OnLoad_t)dlsym(g_real_qimei_handle, "JNI_OnLoad");
         if (real_JNI_OnLoad) {
+            hook_log("[JNI] forwarding to real JNI_OnLoad...\n");
             jint real_rc = real_JNI_OnLoad(vm, reserved);
+            hook_log("[JNI] real JNI_OnLoad returned\n");
             if (real_rc < JNI_VERSION_1_6) return real_rc;
+        } else {
+            hook_log("[JNI] WARNING: real JNI_OnLoad not found in chainloaded so\n");
         }
+    } else {
+        hook_log("[JNI] WARNING: g_real_qimei_handle is NULL, cannot forward\n");
     }
     /* 2. 我们的 JNI hook */
     JNIEnv *env=NULL;
