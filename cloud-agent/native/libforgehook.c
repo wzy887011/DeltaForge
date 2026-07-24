@@ -995,53 +995,11 @@ static const char *eglQueryString_wrapper(EGLDisplay dpy, EGLint name) {
     return _eglQueryString ? _eglQueryString(dpy, name) : "";
 }
 
+/* DISABLED: constructor(120) GPU hook causes black screen on cloud phone
+   — fake GPU strings don't match actual hardware capabilities */
 __attribute__((constructor(120)))
 static void _patch_gpu_driver(void) {
-    hook_log("[CTOR] 120 _patch_gpu_driver enter\n");
-    /* 在后台线程做，避免阻塞主加载流程 */
-    uintptr_t gles_base = 0, egl_base = 0;
-    /* 轮询等待 GPU 库加载 (最多 20s) */
-    for (int i = 0; i < 100; i++) {
-        if (!gles_base) gles_base = get_module_base("libGLESv2.so");
-        if (!egl_base)  egl_base  = get_module_base("libEGL.so");
-        if (gles_base && egl_base) break;
-        usleep(200000);
-    }
-
-    if (gles_base) {
-        /* glGetString 的地址 = libGLESv2 base + 函数偏移 */
-        void *h = dlopen("libGLESv2.so", RTLD_NOLOAD | RTLD_LAZY);
-        if (h) {
-            _glGetString = (glGetString_t)dlsym(h, "glGetString");
-            if (_glGetString) {
-                uintptr_t fn = (uintptr_t)_glGetString;
-                uintptr_t wr = (uintptr_t)&glGetString_wrapper;
-                if (patch_branch(fn, wr) == 0) g_gles_patched = 1;
-                hook_log("[gpu] glGetString patched\n");
-            }
-            dlclose(h);
-        }
-    }
-
-    if (egl_base) {
-        void *h = dlopen("libEGL.so", RTLD_NOLOAD | RTLD_LAZY);
-        if (h) {
-            _eglQueryString = (eglQueryString_t)dlsym(h, "eglQueryString");
-            if (_eglQueryString) {
-                uintptr_t fn = (uintptr_t)_eglQueryString;
-                uintptr_t wr = (uintptr_t)&eglQueryString_wrapper;
-                if (patch_branch(fn, wr) == 0) g_egl_patched = 1;
-                hook_log("[gpu] eglQueryString patched\n");
-            }
-            dlclose(h);
-        }
-    }
-
-    if (g_gles_patched || g_egl_patched)
-        hook_log("[gpu] GPU driver strings normalized\n");
-    else
-        hook_log("[gpu] WARNING: GPU hooks FAILED\n");
-    hook_log("[CTOR] 120 _patch_gpu_driver done\n");
+    hook_log("[CTOR] 120 _patch_gpu_driver SKIPPED (disabled — mismatched GPU caps)\n");
 }
 
 /* ============================================================
