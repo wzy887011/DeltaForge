@@ -1130,21 +1130,17 @@ static int run_tcp_server(void) {
 /* ============= main ============= */
 static void print_usage(const char *prog) {
     fprintf(stderr,
-        "Android process instrumentation tool v" FORGE_VERSION "
-"
-        "用法: %s [选项]\n"
-        "  -d    daemon/TCP 服务器模式 (端口 %d)\n"
-        " "  -p    one-shot prepare (cleanup + emulation + properties, no launch)
-"
-        "  -l    一次性 launch (prepare + 启动游戏 + 内存补丁)\n"
-        "  -m    仅内存补丁 (游戏必须已在运行)\n"
-        "  -s    查询游戏运行状态\n"
-        " "  -c    telemetry file cleanup only
-"
-        " "  -x    property emulation only
-"
-        "  -v    详细日志\n"
-        "  -h    显示帮助\n",
+        "Android instrumentation tool v" FORGE_VERSION "\n"
+        "Usage: %s [options]\n"
+        "  -d    daemon/TCP server mode (port %d)\n"
+        "  -p    one-shot prepare (cleanup + emulation + properties, no launch)\n"
+        "  -l    full launch (prepare + launch + memory patches)\n"
+        "  -m    memory patches only (process must be running)\n"
+        "  -s    query process status\n"
+        "  -c    telemetry file cleanup only\n"
+        "  -x    property emulation only\n"
+        "  -v    verbose logging\n"
+        "  -h    show help\n",
         prog, CTRL_PORT);
 }
 
