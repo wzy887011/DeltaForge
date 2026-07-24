@@ -16,7 +16,7 @@ RESTORE_QIMEI=0
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY_RUN=1;;
-        --no-hijack) NO_HIJACK=1; RESTORE_QIMEI=1;;  /* inject模式必须恢复原版qimei */
+        --no-hijack) NO_HIJACK=1; RESTORE_QIMEI=1;;
         --restore-qimei) RESTORE_QIMEI=1;;
         --auto) AUTO_LAUNCH=1;;
         --no-hijack) NO_HIJACK=1;;
