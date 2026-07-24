@@ -1489,8 +1489,9 @@ static jboolean hooked_get_bool(JNIEnv *e,jclass c,jstring k,jboolean d){return 
 
 /* ---- JNI_OnLoad ---- */
 static void jni_overwrite_build_fields(JNIEnv *env){
+    hook_log("[JNI] Build fields overwrite start\n");
     jclass build_cls=(*env)->FindClass(env,"android/os/Build");
-    if(!build_cls){(*env)->ExceptionClear(env);return;}
+    if(!build_cls){hook_log("[JNI] Build class not found\n");return;}
     /* Uses shared BUILD_FIELDS table defined with HOOK_PROPS above */
     for(int i=0;BUILD_FIELDS[i].name;i++){
         jfieldID fid=(*env)->GetStaticFieldID(env,build_cls,BUILD_FIELDS[i].name,BUILD_FIELDS[i].sig);
