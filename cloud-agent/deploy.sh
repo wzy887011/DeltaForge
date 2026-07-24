@@ -81,7 +81,10 @@ TMP=/data/local/tmp
 NATIVE="__NATIVE__"
 SCRIPT_DIR="__SCRIPT_DIR__"
 
-pkill -f "$TMP/forge" 2>/dev/null; sleep 1
+# 关键: 先杀旧进程，确保新二进制能写入
+pkill -9 -f "$TMP/forge" 2>/dev/null
+pkill -9 -f "$TMP/forge_monitor" 2>/dev/null
+sleep 3
 
 cp "$NATIVE/forge"           $TMP/forge
 cp "$NATIVE/libforgehook.so" $TMP/libforgehook.so
