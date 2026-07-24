@@ -579,6 +579,26 @@ static int make_filtered_maps_fd(void) {
     return mfd;
 }
 
+/* ============================================================
+ * CRITICAL: g_hooks_ready — 延迟激活所有 libc hook
+ *
+ * BUG (v6.0, 数小时排查): hijack 模式 (替换 libtdmqimei.so) 下游戏闪退，
+ * ptrace 注入模式 (forge -l) 正常工作。根因是加载时机差异:
+ *   hijack: so 在进程第一瞬间加载 → open/fopen/tgkill/connect/getaddrinfo
+ *           /__system_property_get 等 hook 在 ART/动态链接器/UE4 引擎
+ *           初始化之前就拦截了所有系统调用 → 进程静默死亡
+ *   inject: so 在游戏完全初始化后 ptrace 注入 → hook 不影响初始化
+ *
+ * FIX: g_hooks_ready 初始为 0，constructor(150) 完成后设为 1。
+ *      所有 hook 在 g_hooks_ready=0 期间透传原始调用，不做任何拦截。
+ *      这样 hijack 和 inject 两种模式都安全——hijack 的 hook 在游戏
+ *      初始化完成后才生效。
+ *
+ * 血的教训: 永远不要在 LD_PRELOAD/hijack 场景下让 hook 进程启动阶段
+ * 就介入。加延迟激活是最小代价的解决方案。
+ * ============================================================ */
+static volatile int g_hooks_ready = 0;
+
 #define INIT() do{ \
     if(!_open)_open=(open_t)dlsym(RTLD_NEXT,"open"); \
     if(!_openat)_openat=(openat_t)dlsym(RTLD_NEXT,"openat"); \
@@ -593,6 +613,7 @@ static int make_filtered_maps_fd(void) {
 int open(const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
+    if(!g_hooks_ready) return _open(p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     /* 动态过滤 /proc/self/maps — 隐藏注入库行 */
@@ -608,6 +629,7 @@ int open(const char *p,int flags,...){
 int openat(int dir,const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
+    if(!g_hooks_ready) return _openat(dir,p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
@@ -621,6 +643,7 @@ int openat(int dir,const char *p,int flags,...){
 
 FILE *fopen(const char *p,const char *m){
     INIT();
+    if(!g_hooks_ready) return _fopen(p,m);
     if(hidden(p)){errno=ENOENT;return NULL;}
     if(null_redir(p)){
         /* 写入模式 → /dev/null；读取模式 → 空内存 */
@@ -633,11 +656,11 @@ FILE *fopen(const char *p,const char *m){
     return _fopen(p,m);
 }
 
-int access(const char *p,int m){INIT();if(hidden(p)){errno=ENOENT;return -1;}forge_audit("access",p);return _access(p,m);}
-int stat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return -1;}forge_audit("stat",p);return _stat(p,b);}
-int lstat(const char *p,struct stat *b){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _lstat(p,b);}
-ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
-ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
+int access(const char *p,int m){INIT();if(!g_hooks_ready) return _access(p,m);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("access",p);return _access(p,m);}
+int stat(const char *p,struct stat *b){INIT();if(!g_hooks_ready) return _stat(p,b);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("stat",p);return _stat(p,b);}
+int lstat(const char *p,struct stat *b){INIT();if(!g_hooks_ready) return _lstat(p,b);if(hidden(p)){errno=ENOENT;return -1;}return _lstat(p,b);}
+ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(!g_hooks_ready) return _readlink(p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
+ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(!g_hooks_ready) return _readlinkat(dir,p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
 /* ---- tgkill / kill hook — intercept fatal termination signals
  * Only block SIGKILL(9)/SIGTERM(15).
@@ -649,12 +672,14 @@ static kill_t   _kill_fn = NULL;
 
 int tgkill(pid_t tgid, pid_t tid, int sig) {
     if (!_tgkill) _tgkill = (tgkill_t)dlsym(RTLD_NEXT, "tgkill");
+    if (!g_hooks_ready) return _tgkill ? _tgkill(tgid, tid, sig) : 0;
     if (sig == 9 || sig == 15) return 0;
     return _tgkill ? _tgkill(tgid, tid, sig) : 0;
 }
 
 int kill(pid_t pid, int sig) {
     if (!_kill_fn) _kill_fn = (kill_t)dlsym(RTLD_NEXT, "kill");
+    if (!g_hooks_ready) return _kill_fn ? _kill_fn(pid, sig) : 0;
     if (sig == 9 || sig == 15) return 0;
     return _kill_fn ? _kill_fn(pid, sig) : 0;
 }
@@ -667,6 +692,7 @@ static uintptr_t   g_ts_text_end   = 0;
 
 void exit_group(int status) {
     if (!_exit_group) _exit_group = (exit_group_t)dlsym(RTLD_NEXT, "exit_group");
+    if (!g_hooks_ready) { _exit_group(status); return; }
     /* Cache target module code segment range */
     if (!g_ts_text_start) {
         g_ts_text_start = get_module_base("libtersafe.so");
@@ -911,6 +937,7 @@ int getaddrinfo(const char *node, const char *service,
                 const void *hints, void *res) {
     if (!_getaddrinfo)
         _getaddrinfo = (getaddrinfo_t)dlsym(RTLD_NEXT, "getaddrinfo");
+    if (!g_hooks_ready) return _getaddrinfo ? _getaddrinfo(node, service, hints, res) : -2;
     if (node) {
         for (const char **d = AC_DOMAINS; *d; d++) {
             if (strstr(node, *d)) {
@@ -948,6 +975,7 @@ static int is_ac_ip(const struct sockaddr *addr) {
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!_connect_orig)
         _connect_orig = (connect_t)dlsym(RTLD_NEXT, "connect");
+    if (!g_hooks_ready) return _connect_orig ? _connect_orig(sockfd, addr, addrlen) : -1;
     if (is_ac_ip(addr)) {
         hook_log("[net] blocked connect to AC IP\n");
         errno = ECONNREFUSED;
@@ -1104,6 +1132,9 @@ static void _patch_tersafe(void) {
     }
     pthread_attr_destroy(&attr);
     hook_log("[CTOR] 150 _patch_tersafe done\n");
+    /* ACTIVATE all libc hooks — safe now, game init is complete */
+    g_hooks_ready = 1;
+    hook_log("[hooks] all libc hooks activated (g_hooks_ready=1)\n");
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
@@ -1320,6 +1351,7 @@ static hook_prop_get_t real_prop_get=NULL;
 
 int __system_property_get(const char *name,char *value){
     if(!real_prop_get)real_prop_get=(hook_prop_get_t)dlsym(RTLD_NEXT,"__system_property_get");
+    if(!g_hooks_ready) return real_prop_get(name,value);
     for(const hook_prop_t *e=HOOK_PROPS;e->key;e++){
         if(strcmp(name,e->key)==0){
             if(e->value[0]){
