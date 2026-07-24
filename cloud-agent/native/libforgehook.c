@@ -742,17 +742,21 @@ void *dlopen(const char *filename, int flags) {
     return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
 }
 
-/* ---- P1: dlsym hook — 防止 TerSafe 通过 dlsym 检测 hook ---- */
+/* ---- P1: dlsym hook — REMOVED (recursive: dlsym→self→stack overflow)
+ * All hooks use dlsym(RTLD_NEXT) for resolution; hooking dlsym itself
+ * creates infinite recursion when _dlsym_real is NULL. The hook was a
+ * no-op passthrough anyway — no symbol filtering was implemented. ---- */
+#if 0  /* dead code preserved for reference — DO NOT re-enable */
 typedef void *(*dlsym_t)(void *, const char *);
 static dlsym_t _dlsym_real = NULL;
 
 void *dlsym(void *handle, const char *symbol) {
     if (!_dlsym_real)
         _dlsym_real = (dlsym_t)dlsym(RTLD_NEXT, "dlsym");
-    /* 放行: 内部 init 调用（函数指针尚未初始化） */
-    if (!_open) return _dlsym_real(handle, symbol);  /* 初始化阶段安全放行 */
+    if (!_open) return _dlsym_real(handle, symbol);
     return _dlsym_real ? _dlsym_real(handle, symbol) : NULL;
 }
+#endif
 
 /* ---- P1: dladdr hook — 隐藏 libforgehook 来源 ---- */
 typedef int (*dladdr_t)(const void *, Dl_info *);
