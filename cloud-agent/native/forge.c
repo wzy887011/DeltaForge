@@ -597,30 +597,10 @@ static void clean_virt_traces(void) {
 }
 
 /* ============= Telemetry file batch cleanup ============= */
+/* 文件清理暂时禁用 - 激进删除反作弊文件被游戏检测为第三方插件 */
 static int clean_all_ac_files(void) {
-    int total = 0;
-    for (int i = 0; kPurgeDirs[i]; i++) purge_dir_contents(kPurgeDirs[i]);
-    for (int i = 0; kPreciseDeleteFiles[i]; i++) { unlink(kPreciseDeleteFiles[i]); total++; }
-    for (int i = 0; kExtraDeleteFiles[i]; i++) { unlink(kExtraDeleteFiles[i]); total++; }
-
-    DIR *d = opendir(kQmDir);
-    if (d) {
-        struct dirent *ent;
-        while ((ent = readdir(d)) != NULL) {
-            if (match_qm_prefix(ent->d_name)) {
-                char full[4096];
-                snprintf(full, sizeof(full), "%s/%s", kQmDir, ent->d_name);
-                unlink(full); total++;
-            }
-        }
-        closedir(d);
-    }
-    for (int i = 0; kScanDirs[i]; i++) {
-        for (int j = 0; kPatternSubstrings[j]; j++)
-            total += delete_matching(kScanDirs[i], kPatternSubstrings[j]);
-    }
-    /* 不再递归全 APP_DATA 删除 >4MB 文件 */
-    return total;
+    WARN("文件清理已禁用 (被game检测为third-party plugin)");
+    return 0;
 }
 
 /* ============= 目录重建 + SELinux 上下文修复 ============= */
