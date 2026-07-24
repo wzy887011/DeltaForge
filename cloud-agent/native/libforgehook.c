@@ -166,6 +166,9 @@ static void forge_audit(const char *action, const char *path) {
 
 
 /* ---- chainload original native library ---- */
+/* 保存 chainloaded 原版 qimei 的 dlopen handle，供 JNI_OnLoad 转发 */
+static void *g_real_qimei_handle = NULL;
+
 static void forge_log_raw(const char *msg) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD, "/data/local/tmp/forge.log",
                           O_WRONLY | O_CREAT | O_APPEND, 0600);
@@ -233,9 +236,12 @@ static int find_self_from_maps(char *out, size_t out_sz) {
 }
 
 /* CRITICAL: constructor(47) — MUST be earliest constructor.
- * BIND_LAZY 延迟绑定意味着其他 .so 的构造函数可能在 chainload
- * 完成前就调用 qimei 导出符号 → PLT 解析失败 → SIGSEGV。
- * 优先级 47 确保在原版 libforgehook.c constructor(48) 之前执行。 */
+ * Android linker ALWAYS uses BIND_NOW (RTLD_NOW), resolving all symbols
+ * during link_image() Phase 2 BEFORE constructors run in Phase 3.
+ * Any library that DT_NEEDED-depends on libtdmqimei.so will have its
+ * symbols resolved from OUR so (since we replaced the original).
+ * RTLD_GLOBAL chainload of libtdmqimei_real.so in constructor(47)
+ * ensures qimei symbols are available for all subsequent loads. */
 __attribute__((constructor(47)))
 static void _chainload_real_qimei(void) {
     hook_log("[CTOR] 100 _chainload_real_qimei enter\n");
@@ -269,6 +275,7 @@ static void _chainload_real_qimei(void) {
         hook_log("\n");
         return;
     }
+    g_real_qimei_handle = h; /* 保存 handle 供 JNI_OnLoad 转发 */
     forge_log_raw("chainload: dlopen SUCCESS\n");
     hook_log("[CTOR] 100 _chainload_real_qimei done\n");
 }
@@ -1426,9 +1433,24 @@ static void jni_hook_system_properties(JNIEnv *env){
     (*env)->DeleteLocalRef(env,sp_cls);
 }
 
+/* ---- JNI_OnLoad — 先转发原版 qimei，再做我们的 hook ---- */
+/* 关键: System.loadLibrary("tdmqimei") 只调用我们的 JNI_OnLoad，
+ * 原版 qimei 的永远不会执行 → native 方法未注册 → UnsatisfiedLinkError。
+ * 必须从 chainloaded so dlsym 原版 JNI_OnLoad 并手动调用。 */
+typedef jint (*JNI_OnLoad_t)(JavaVM*,void*);
+
 __attribute__((visibility("default")))
 jint JNI_OnLoad(JavaVM *vm,void *reserved){
-    (void)reserved;
+    /* 1. 转发原版 qimei JNI_OnLoad（注册 native 方法） */
+    if (g_real_qimei_handle) {
+        JNI_OnLoad_t real_JNI_OnLoad =
+            (JNI_OnLoad_t)dlsym(g_real_qimei_handle, "JNI_OnLoad");
+        if (real_JNI_OnLoad) {
+            jint real_rc = real_JNI_OnLoad(vm, reserved);
+            if (real_rc < JNI_VERSION_1_6) return real_rc;
+        }
+    }
+    /* 2. 我们的 JNI hook */
     JNIEnv *env=NULL;
     if((*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_VERSION_1_6;
     if(!env)return JNI_VERSION_1_6;
