@@ -793,6 +793,15 @@ static dlopen_t _dlopen_real = NULL;
 void *dlopen(const char *filename, int flags) {
     if (!_dlopen_real)
         _dlopen_real = (dlopen_t)dlsym(RTLD_NEXT, "dlopen");
+    /* 关键修复: hijack 模式下 libtdmqimei.so 是我们的 so。
+     * 如果 tersafe/其他库 dlopen("libtdmqimei.so") 然后 dlsym 查找
+     * qimei 符号，会返回 NULL（我们的 so 不导出原版符号）。
+     * 重定向到 chainloaded 原版 handle 解决此问题。 */
+    if (filename && strstr(filename, "libtdmqimei") &&
+        !strstr(filename, "libtdmqimei_real") && g_real_qimei_handle) {
+        if (flags & RTLD_NOLOAD) return g_real_qimei_handle;  /* 探测 → 返回原版 */
+        return g_real_qimei_handle;  /* 直接返回 chainloaded handle */
+    }
     if (!g_hooks_ready) return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
     if (filename) {
         if (strstr(filename, "libforgehook") ||
@@ -1467,13 +1476,12 @@ jint JNI_OnLoad(JavaVM *vm,void *reserved){
     } else {
         hook_log("[JNI] WARNING: g_real_qimei_handle is NULL, cannot forward\n");
     }
-    /* 2. 二分测试: 只开 Build 字段覆盖，不开 SystemProperties hook */
+    /* 2. 我们的 JNI hook */
     JNIEnv *env=NULL;
     if((*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_VERSION_1_6;
     if(!env)return JNI_VERSION_1_6;
     jni_overwrite_build_fields(env);
-    /* jni_hook_system_properties disabled for test */
-    hook_log("[JNI] jni_overwrite_build_fields done, SystemProperties SKIPPED\n");
+    jni_hook_system_properties(env);
     return JNI_VERSION_1_6;
 }
 
