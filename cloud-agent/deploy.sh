@@ -103,7 +103,7 @@ if [ -n "$HIJACK" ]; then
         restorecon "$DIR/libtdmqimei.so" 2>/dev/null
         echo "[!] Qimei RESTORED to original — inject mode safe now"
     fi
-    if [ "$NO_HIJACK" = "1" ]; then
+    if [ "__NO_HIJACK__" = "1" ]; then
         echo "[!] Hijack SKIPPED (--no-hijack). Use inject mode: su -c '$TMP/forge -l'"
     else
         cp "$NATIVE/libforgehook.so" "$DIR/libtdmqimei.so"
@@ -123,6 +123,7 @@ DEPLOY_EOF
 sed -i "s|__NATIVE__|$NATIVE|g" "$DEPLOY_SH"
 sed -i "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" "$DEPLOY_SH"
 sed -i "s|__RESTORE_QIMEI__|$RESTORE_QIMEI|g" "$DEPLOY_SH"
+sed -i "s|__NO_HIJACK__|$NO_HIJACK|g" "$DEPLOY_SH"
 
 echo "[+] Deploy MD5:"
 md5sum forge libforgehook.so
