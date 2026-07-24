@@ -1144,7 +1144,7 @@ static uint64_t pattern_scan4(uintptr_t base, uint32_t pattern, size_t max_scan)
 
 /* 回退: 如果硬编码偏移处不是预期指令，用 pattern scan 重新定位 */
 static uint64_t resolve_patch_offset(uintptr_t base, uint64_t hard_off,
-                                      uint32_t expected_insn, uint32_t *sig, int sig_len) {
+                                      uint32_t expected_insn, const uint32_t *sig, int sig_len) {
     /* 先验证硬编码偏移 */
     uint32_t cur = 0;
     int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);

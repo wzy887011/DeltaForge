@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
