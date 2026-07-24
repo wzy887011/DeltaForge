@@ -458,9 +458,9 @@ static int override_fd(const char *s,size_t n){
     /* Fallback: /dev/shm tmpfs */
     if(fd<0){fd=syscall(SYS_openat,AT_FDCWD,"/dev/shm/.fh",O_RDWR|O_CREAT|O_CLOEXEC,0600);}
     if(fd<0)return -1;
-    if(ftruncate(fd,(off_t)n)!=0){close(fd);if(fd)syscall(SYS_unlink,"/dev/shm/.fh");return -1;}
+    if(ftruncate(fd,(off_t)n)!=0){close(fd);unlink("/dev/shm/.fh");return -1;}
     void *a=mmap(NULL,n,PROT_WRITE,MAP_SHARED,fd,0);
-    if(a==MAP_FAILED){close(fd);if(fd)syscall(SYS_unlink,"/dev/shm/.fh");return -1;}
+    if(a==MAP_FAILED){close(fd);unlink("/dev/shm/.fh");return -1;}
     memcpy(a,s,n);munmap(a,n);lseek(fd,0,SEEK_SET);
     return fd;
 }
