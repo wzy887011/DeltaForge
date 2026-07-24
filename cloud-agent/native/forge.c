@@ -426,8 +426,14 @@ static int target_is_running(void) {
     return f;
 }
 
-/* ============= 文件系统递归删除 ============= */
+/* ============= 文件系统递归删除 — 含路径安全校验 ============= */
 static int rm_recursive(const char *path) {
+    /* 安全网: 只允许删 /data/data/ 和 /data/local/tmp/ 下的文件 */
+    if (!path || (strncmp(path, "/data/data/", 11) != 0 &&
+                  strncmp(path, "/data/local/tmp/", 16) != 0 &&
+                  strncmp(path, "/sdcard/", 8) != 0)) {
+        return -1;
+    }
     struct stat st;
     if (lstat(path, &st) != 0) return (errno == ENOENT) ? 0 : -1;
     if (S_ISDIR(st.st_mode)) {
@@ -462,6 +468,7 @@ static void purge_dir_contents(const char *dir) {
     closedir(d);
 }
 
+/* 非递归匹配删除 — 只删当前目录的直接子文件/子目录，不深入子目录 */
 static int delete_matching(const char *dir, const char *substr) {
     DIR *d = opendir(dir);
     if (!d) return 0;
@@ -469,16 +476,13 @@ static int delete_matching(const char *dir, const char *substr) {
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (!strstr(ent->d_name, substr)) continue;
         char full[4096];
         snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
         struct stat st;
         if (lstat(full, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) {
-            n += delete_matching(full, substr);
-            if (strstr(ent->d_name, substr)) { rm_recursive(full); n++; }
-        } else if (strstr(ent->d_name, substr)) {
-            unlink(full); n++;
-        }
+        if (S_ISDIR(st.st_mode)) { rm_recursive(full); n++; }
+        else { unlink(full); n++; }
     }
     closedir(d);
     return n;
@@ -937,31 +941,23 @@ static int do_launch(void) {
             /* 以下是真正的清理 daemon */
             prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
             while (1) {
-                sleep(5);  /* 5s 间隔：快速响应 ace_shell_db.dat.tmp 等重建文件 */
+                sleep(1);  /* 1s 间隔 — 快速响应 TerSafe 补丁还原 */
                 pid_t cp = get_pid_by_name(TARGET_PKG);
                 if (cp <= 0) _exit(0);
-                unlink(APP_DATA "/files/GPMSDK.mmap3");
-                unlink(APP_DATA "/shared_prefs/GCloudCoreSP.xml");
-                unlink(APP_DATA "/files/tdm_track.dat");
-                unlink(APP_DATA "/shared_prefs/qm_global_sp.xml");
-                for (int i = 0; kPurgeDirs[i]; i++) purge_dir_contents(kPurgeDirs[i]);
-                for (int i = 0; kPreciseDeleteFiles[i]; i++) unlink(kPreciseDeleteFiles[i]);
-                for (int i = 0; kExtraDeleteFiles[i]; i++) unlink(kExtraDeleteFiles[i]);
-                DIR *d = opendir(kQmDir);
-                if (d) {
-                    struct dirent *ent;
-                    while ((ent = readdir(d)) != NULL) {
-                        if (match_qm_prefix(ent->d_name)) {
-                            char full[4096]; snprintf(full, sizeof(full), "%s/%s", kQmDir, ent->d_name); unlink(full);
-                        }
-                    }
-                    closedir(d);
-                }
-                for (int i = 0; kScanDirs[i]; i++)
-                    for (int j = 0; kPatternSubstrings[j]; j++)
-                        delete_matching(kScanDirs[i], kPatternSubstrings[j]);
 
-                /* 每5秒回读关键补丁：若 TerSafe 已还原则立刻重写，日志可见是否发生 */
+                /* 只精确删除已知反作弊文件 — 不递归扫描目录 */
+                static const char *kGuardPrecise[] = {
+                    APP_DATA "/files/GPMSDK.mmap3",
+                    APP_DATA "/shared_prefs/GCloudCoreSP.xml",
+                    APP_DATA "/files/tdm_track.dat",
+                    APP_DATA "/shared_prefs/qm_global_sp.xml",
+                    APP_DATA "/shared_prefs/tdm.xml",
+                    APP_DATA "/shared_prefs/tgpa.xml",
+                    NULL
+                };
+                for (int i = 0; kGuardPrecise[i]; i++) unlink(kGuardPrecise[i]);
+
+                /* 每1秒回读关键补丁：若 TerSafe 已还原则立刻重写 */
                 {
                     pid_t vp2 = get_pid_by_name(TARGET_PKG);
                     uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;

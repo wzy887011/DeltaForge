@@ -76,6 +76,20 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 #define SECCOMP_RET_ERRNO 0x00050000U
 #endif
 
+/* ---- constructor(48) — 最早调试日志，确认 so 被加载 ---- */
+__attribute__((constructor(48)))
+static void _probe_loaded(void) {
+    const char *msg = "[probe] libforgehook.so loaded\n";
+    int fd = (int)syscall(SYS_openat, AT_FDCWD,
+        "/data/local/tmp/forge_hook.log",
+        O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd >= 0) {
+        size_t len = 0; while (msg[len]) len++;
+        (void)syscall(SYS_write, fd, msg, len);
+        syscall(SYS_close, fd);
+    }
+}
+
 /* ---- maps hide — priority 50: 在 chainload 之前先隐藏自身 ---- */
 __attribute__((constructor(50)))
 static void _hide_self_from_maps(void) {
@@ -791,18 +805,17 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
 }
 
 /* ============================================================
- * P1: seccomp-bpf v2 — 24-instruction linear chain, no dead code
+ * P1: seccomp-bpf v3 — 31-instruction linear chain, kill(129) added
  *
- * v1 bug: tgkill match→check sig→RET ALLOW, then tkill+file checks
- * were unreachable dead code after RET. Kernel verifier rejected
- * the program → Seccomp: 0.
+ * v1 bug: tgkill match→RET ALLOW, tkill+file checks unreachable
+ *         → kernel verifier rejected → Seccomp: 0.
+ * v2 fix: tgkill/tkill allowed paths fall through to next check.
+ * v3 fix: added kill(129) block for SIGKILL(9)/SIGTERM(15) only.
+ *         Android runtime can still kill(129) for SIGCHLD etc.
  *
- * v2 fix: tgkill/tkill "allowed" paths jump to the NEXT check instead
- * of RET ALLOW. BLOCK paths RET ERRNO. Only terminal RET at the end.
- *
- * Flow: arch→tgkill(131)→tkill(130)→file6→ALLOW
- *        ↓block     ↓block          ↓TRAP
- * constructor priority=49 - installed BEFORE any other hooks/patches.
+ * Flow: arch→tgkill(131)→tkill(130)→kill(129)→file6→ALLOW
+ *        ↓block     ↓block     ↓block(9,15)  ↓TRAP
+ * constructor priority=49 - installed BEFORE any other hooks.
  * ============================================================ */
 static struct sock_filter g_bpf_prog[]={
     /* 0-2: architecture check */
@@ -829,15 +842,24 @@ static struct sock_filter g_bpf_prog[]={
     {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [14] BLOCK sig 1-31 */
     {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [15] reload nr */
 
+    /* ---- kill(129): only block SIGKILL(9) and SIGTERM(15) ---- */
+    {BPF_JMP|BPF_JEQ|BPF_K, 0,6, ARM64_NR_KILL},                 /* [16] not kill→skip6 to [23] */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,24},                              /* [17] A=args[1]=sig */
+    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, 9},                             /* [18] sig==9→skip3 to [22] BLOCK */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, 15},                            /* [19] sig==15→skip2 to [22] BLOCK */
+    {BPF_LD|BPF_W|BPF_ABS, 0,0,0},                               /* [20] other sig: reload nr */
+    {BPF_JMP|BPF_JA, 1,0, 0},                                    /* [21] jmp→[23] file check */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ERRNO|1},                   /* [22] BLOCK kill(129) sig 9/15 */
+
     /* ---- file syscalls → TRAP → SIGSYS handler ---- */
-    {BPF_JMP|BPF_JEQ|BPF_K, 6,0, ARM64_NR_OPENAT},               /* [16]→[23] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 5,0, ARM64_NR_READLINKAT},           /* [17]→[23] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 4,0, ARM64_NR_NEWFSTATAT},           /* [18]→[23] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, ARM64_NR_OPENAT2},              /* [19]→[23] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, ARM64_NR_GETDENTS64},           /* [20]→[23] */
-    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_FACCESSAT2},           /* [21]→[23] */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [22] not a file syscall */
-    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_TRAP},                       /* [23] file syscall → SIGSYS */
+    {BPF_JMP|BPF_JEQ|BPF_K, 6,0, ARM64_NR_OPENAT},               /* [23]→[30] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 5,0, ARM64_NR_READLINKAT},           /* [24]→[30] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 4,0, ARM64_NR_NEWFSTATAT},           /* [25]→[30] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 3,0, ARM64_NR_OPENAT2},              /* [26]→[30] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 2,0, ARM64_NR_GETDENTS64},           /* [27]→[30] */
+    {BPF_JMP|BPF_JEQ|BPF_K, 1,0, ARM64_NR_FACCESSAT2},           /* [28]→[30] */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_ALLOW},                      /* [29] not a file syscall */
+    {BPF_RET|BPF_K, 0,0, SECCOMP_RET_TRAP},                       /* [30] file syscall → SIGSYS */
 };
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
