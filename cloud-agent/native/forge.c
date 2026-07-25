@@ -750,7 +750,7 @@ static int inject_hook(pid_t pid) {
     if (child == 0) {
         int log_fd = open(FORGE_LOG, O_WRONLY|O_CREAT|O_APPEND, 0600);
         if (log_fd >= 0) { dup2(log_fd, 1); dup2(log_fd, 2); close(log_fd); }
-        execv(argv[0], argv);
+        execv(argv[0], (char *const *)argv);
         ERR("execv injector failed: %s", strerror(errno));
         _exit(127);
     }
