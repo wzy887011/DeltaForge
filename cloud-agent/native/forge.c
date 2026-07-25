@@ -18,6 +18,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/syscall.h>
+#ifndef __NR_pread64
+#define __NR_pread64  67
+#endif
+#ifndef __NR_pwrite64
+#define __NR_pwrite64 68
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
