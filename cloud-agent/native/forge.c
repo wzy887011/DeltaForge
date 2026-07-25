@@ -952,13 +952,21 @@ static int do_launch(void) {
     }
     if (pid) {
         usleep(500000);
-        if (inject_hook(pid) != 0) {
-            ERR("hook 库加载失败 — patching abort");
-            return -1;
-        }
+        /* [v8.3] 先 patch tersafe (建立安全窗口)，再注入 libforgehook.so
+         * 原顺序: inject → patch — tersafe 在注入期间可 kill 游戏
+         * 新顺序: patch → inject — kKillChain 先封堵，注入期间安全 */
     }
     /* hijack 模式下 libforgehook.so 已随 Qimei 自动加载, ptrace 注入是兜底 */
     int rc = patch_game_process();
+    if (pid) {
+        if (rc == 0) {
+            usleep(100000); /* 100ms 等 patch 稳定 */
+        }
+        if (inject_hook(pid) != 0) {
+            WARN("hook 库加载失败 — 仅靠外部 patch 守护");
+            /* 不 abort — 外部 patch 仍在持续守护 */
+        }
+    }
     if (rc == 0) {
         pid = get_pid_by_name(TARGET_PKG);
         if (pid) hide_injection_from_maps(pid);
