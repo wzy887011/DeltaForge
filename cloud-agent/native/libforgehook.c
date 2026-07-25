@@ -1840,6 +1840,25 @@ static void *_adjust_code_thread(void *unused) {
 __attribute__((constructor(150)))
 static void _adjust_code(void) {
     hook_log("[CTOR] 150 _adjust_code enter\n");
+
+    /* [v8.3] 同步立即尝试 — 如果 libtersafe.so 在注入时已加载，直接在构造函数里 patch
+     * 之前只用背景线程轮询 (200ms间隔)，tersafe 在1秒内 kill 游戏，线程来不及激活
+     * 现在: 先同步patch，再启动背景线程做持续监控 */
+    uintptr_t imm_base = get_module_base(C_tersafe);
+    if (imm_base) {
+        int imm_ok = 0;
+        for (size_t i = 0; i < KILL_CHAIN_N; i++) {
+            uint64_t off = resolve_patch_offset(imm_base, kKillChain[i].off,
+                kKillChain[i].insn,
+                kKillChain[i].sig_bytes, kKillChain[i].sig_len,
+                kKillChain[i].seq_insns, kKillChain[i].seq_masks,
+                kKillChain[i].seq_len, kKillChain[i].seq_delta);
+            if (patch_insn(imm_base + off, kKillChain[i].insn) == 0) imm_ok++;
+        }
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        hook_log("[hooks] v8.3 activated (sync in constructor)\n");
+    }
+
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -1849,11 +1868,7 @@ static void _adjust_code(void) {
         _adjust_code_thread(NULL);
     }
     pthread_attr_destroy(&attr);
-    /* [v7.0 P0-1] 移除 constructor(150) 内的提前激活
-     * g_hooks_ready=1 已移至 _adjust_code_thread patch 完成后设置。
-     * inject 模式: 线程几乎立即找到 tersafe 并 patch，延迟<1s
-     * hijack 模式: 等 tersafe 加载后 patch，消除检测窗口 */
-    hook_log("[CTOR] 150 _adjust_code done (hooks activate after patch)\n");
+    hook_log("[CTOR] 150 _adjust_code done\n");
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
