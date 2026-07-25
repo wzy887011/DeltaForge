@@ -2031,20 +2031,6 @@ int __system_property_get(const char *name, char *value) {
     return real_len;
 }
 
-/* ---- JNI helpers ---- */
-static jstring hooked_get(JNIEnv *e,jclass c,jstring k,jstring d){
-    const char *ck=(*e)->GetStringUTFChars(e,k,NULL);
-    if(!ck)return d;
-    for(const hook_prop_t *p=HOOK_PROPS;p->key;p++){
-        if(!strcmp(ck,p->key)){(*e)->ReleaseStringUTFChars(e,k,ck);return p->value[0]?(*e)->NewStringUTF(e,p->value):d;}
-    }
-    (*e)->ReleaseStringUTFChars(e,k,ck);
-    return d;
-}
-static jint     hooked_get_int(JNIEnv *e,jclass c,jstring k,jint d)     {return d;}
-static jlong    hooked_get_long(JNIEnv *e,jclass c,jstring k,jlong d)   {return d;}
-static jboolean hooked_get_bool(JNIEnv *e,jclass c,jstring k,jboolean d){return d;}
-
 /* ---- JNI_OnLoad ---- */
 static void jni_overwrite_build_fields(JNIEnv *env){
     hook_log("[JNI] Build fields overwrite start\n");

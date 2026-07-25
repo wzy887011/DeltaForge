@@ -69,7 +69,6 @@ termux:
 	clang -Os -Wall touch_injector.c -o touch_injector
 	clang -Os -Wall injector.c -o injector -ldl
 	clang -Os -Wall forge_monitor.c -o forge_monitor
-	file forge libforgehook.so touch_injector injector forge_monitor
 	ls -lh forge libforgehook.so touch_injector injector forge_monitor
 
 clean:
