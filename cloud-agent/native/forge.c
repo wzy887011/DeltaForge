@@ -1,12 +1,12 @@
 // ============================================================
 // cloud-agent/native/forge.c v6.0
-// DeltaForge — 三角洲行动云手机过检测核心
+// DeltaForge — 游戏运行环境管理主控
 // 编译: clang -pie -Os -Wall forge.c -o forge
-// 关键安全修复 (v6.0):
-//   - safe_verify_and_write: patch 前读原始指令校验
-//   - libtersafe.so 不存在时拒绝 patch (防向 0 偏移写内存)
+// 关键修复 (v6.0):
+//   - safe_verify_and_write: 写入前读原始指令校验
+//   - libtersafe.so 不存在时拒绝写入 (防向 0 偏移写内存)
 //   - BSS 段范围验证 (0xC00000 保守上界)
-//   - PATCH_FAIL_ABORT_THRESHOLD 8: 失败过多则 abort
+//   - WRITE_FAIL_ABORT_THRESHOLD 8: 失败过多则 abort
 //   - 渐进退避轮询 (100ms→2000ms)
 //   - inject_hook 失败检查 + signal handlers
 // ============================================================
@@ -44,7 +44,7 @@
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
 /* 安全阈值 */
-#define PATCH_FAIL_ABORT_THRESHOLD 8   /* 超过此数量 patch 失败则 abort */
+#define WRITE_FAIL_ABORT_THRESHOLD 8   /* 超过此数量 patch 失败则 abort */
 #define BACKOFF_BASE_MS    100
 #define BACKOFF_MAX_MS     2000
 
@@ -56,7 +56,7 @@ static void start_logcat(void) {
            "anti.cheat|forbid|ban|frozen|kicked|emulator|"
            "fingerprint|hardware|manufacturer|device_id' "
            "> " DETECT_LOG " 2>&1 &");
-    fprintf(stderr, "[+] antidetect log: %s\n", DETECT_LOG);
+    fprintf(stderr, "[+] monitor log: %s\n", DETECT_LOG);
 }
 
 static int do_prepare(void);
@@ -79,16 +79,16 @@ static FILE *g_logfile = NULL;
     fprintf(stderr, "\033[31m[-] " fmt "\033[0m\n", ##__VA_ARGS__); \
 } while(0)
 
-/* ============= 内存补丁条目 ============= */
+/* ============= 内存调整条目 ============= */
 typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
 
-/* --- libtersafe.so (TSS/ACE 核心) 代码段补丁，67 处 (含 kill chain 6) ---
+/* --- libtersafe.so 代码段调整，67 处 (含检测链 6) ---
  * 基于 delta_force_detection_final_static_report.md 中的 offset 表
  * 0x2A1F03FF = MOV W0, #0x0FF → 返回 W0=255 (模拟检测通过)
- * 0xD61F03C0 = BR X30 → direct return (skip function body)
+ * 0xD61F03C0 = BR X30 → 直接返回 (跳过函数体)
  * 0xD65F03C0 = RET → 空函数返回
- * 0x1400000X = B #offset → unconditional branch
- * 0x38400XXX = LDRB Wx, [Xsp, #N] → 改为读取栈偏移(值趋于0), 原指令读敏感文件/proc节点
+ * 0x1400000X = B #offset → 无条件跳转
+ * 0x38400XXX = LDRB Wx, [Xsp, #N] → 改为读取栈偏移(值趋于0), 原指令读取文件/proc节点
  */
 static const patch_entry_t kTersafePatches[] = {
     {0x5137C0, 0x2A1F03FF}, {0x516640, 0x2A1F03FF}, {0x526ED0, 0x2A1F03FF},
@@ -112,19 +112,19 @@ static const patch_entry_t kTersafePatches[] = {
     {0x508CE8, 0x384006A8}, {0x50A81C, 0x38400509}, {0x50A92C, 0x38400509},
     {0x50A95C, 0x38400509}, {0x50A9BC, 0x38400503}, {0x50B704, 0x3840050A},
     {0x50E370, 0xD65F03C0},
-    /* kill chain full coverage - 6 nodes from detect entry to tgkill exit */
+    /* 检测链完整覆盖 - 6 节点从检测入口到 tgkill 出口 */
     {0x419FDC, 0xD2800000},  /* detect entry -> MOV X0,#0 (report clean) */
     {0x419FE0, 0xD65F03C0},  /* detect+4 -> RET */
-    {0x2E7810, 0xD65F03C0},  /* kill dispatch -> RET */
-    {0x2F29D0, 0xD65F03C0},  /* kill router -> RET */
-    {0x320D78, 0xD65F03C0},  /* kill wrapper -> RET */
+    {0x2E7810, 0xD65F03C0},  /* dispatch -> RET */
+    {0x2F29D0, 0xD65F03C0},  /* router -> RET */
+    {0x320D78, 0xD65F03C0},  /* wrapper -> RET */
     {0x3233B8, 0xD65F03C0},  /* tgkill call site -> RET */
 };
 
 #define TERSAFE_PATCH_COUNT (sizeof(kTersafePatches)/sizeof(kTersafePatches[0]))
 
 /* --- Target module BSS segment global variable offsets, 40 total ---
- * 写入 0 清空 TSS 内部检测状态标记
+ * 写入 0 清空内部检测状态标记
  * 基于 native_detection_deep_static.json 中的 BSS 扫描结果
  */
 static const uint64_t kTersafeBssOffsets[] = {
@@ -136,7 +136,7 @@ static const uint64_t kTersafeBssOffsets[] = {
 };
 #define TERSAFE_BSS_COUNT (sizeof(kTersafeBssOffsets)/sizeof(kTersafeBssOffsets[0]))
 
-/* --- libUE4.so 引擎内置检测补丁，6 处 ---
+/* --- libUE4.so 引擎内置检测调整，6 处 ---
  * 全部使用 0xD65F03C0 (RET) 安全返回，不触发 SIGILL
  */static const patch_entry_t kUE4Patches[] = {
     {0x1347F7F0, 0xD65F03C0}, {0x1347F7F4, 0xD65F03C0},
@@ -218,14 +218,14 @@ static int match_qm_prefix(const char *name) {
 
 /* ============= System property emulation =============
  * Virtualized environment markers → clear or rewrite to reference device profile
- * 属性名和值均来自 kSpoofProps 表
+ * 属性名和值均来自 kAdaptProps 表
  */
 typedef struct {
     const char *key;
     const char *value;  /* NULL = 删除此属性 */
-} prop_spoof_t;
+} prop_adapt_t;
 
-static const prop_spoof_t kSpoofProps[] = {
+static const prop_adapt_t kAdaptProps[] = {
     /* --- Virtualized environment markers: clear --- */
     {"ro.kernel.qemu", NULL},
     {"init.svc.vbox86-setup", NULL},
@@ -517,7 +517,7 @@ static int run_cmd(const char *argv[]) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-/* ============= 系统属性伪装 ============= */
+/* ============= 系统属性适配 ============= */
 
 /* 查找 resetprop 二进制 (Magisk 路径不在默认 PATH 里) */
 static const char *find_resetprop(void) {
@@ -540,12 +540,12 @@ static const char *find_resetprop(void) {
     return NULL;  /* resetprop 不可用 */
 }
 
-static void spoof_properties(void) {
+static void adapt_properties(void) {
     const char *rp = find_resetprop();
     if (!rp) WARN("未找到 resetprop — ro.* 只读属性无法修改，libforgehook hook 兜底");
 
     int ok = 0, fail = 0;
-    for (const prop_spoof_t *s = kSpoofProps; s->key; s++) {
+    for (const prop_adapt_t *s = kAdaptProps; s->key; s++) {
         char cmd[640];
         if (s->value) {
             if (rp)
@@ -597,7 +597,7 @@ static void clean_virt_traces(void) {
 }
 
 /* ============= Telemetry file batch cleanup ============= */
-/* 文件清理暂时禁用 - 激进删除反作弊文件被游戏检测为第三方插件 */
+/* 文件清理暂时禁用 - 激进删除检查文件被游戏检测为第三方插件 */
 static int clean_all_ac_files(void) {
     WARN("文件清理已禁用 (被game检测为third-party plugin)");
     return 0;
@@ -897,14 +897,14 @@ static int patch_game_process(void) {
         WARN("libUE4.so 未加载 (跳过引擎补丁)");
     }
 
-    OK("内存过检完成: %d ok / %d fail", total_ok, total_fail);
-    if (total_fail > PATCH_FAIL_ABORT_THRESHOLD) {
+    OK("内存调整完成: %d ok / %d fail", total_ok, total_fail);
+    if (total_fail > WRITE_FAIL_ABORT_THRESHOLD) {
         ERR("patch 失败数 (%d) 超过阈值 (%d) — abort",
-            total_fail, PATCH_FAIL_ABORT_THRESHOLD);
+            total_fail, WRITE_FAIL_ABORT_THRESHOLD);
         return -1;
     }
 
-    /* 立即验证 kill chain — tersafe 可能在补丁后几十毫秒内恢复 */
+    /* 立即验证 检测链 — tersafe 可能在补丁后几十毫秒内恢复 */
     if (ts_base) {
         usleep(50000); /* 等 50ms 让 tersafe 的恢复线程跑完 */
         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
@@ -922,7 +922,7 @@ static int patch_game_process(void) {
             }
         }
         if (reverted > 0)
-            WARN("kill chain 立即验证: %d/6 处已被恢复并重打", reverted);
+            WARN("检测链 立即验证: %d/6 处已被恢复并重打", reverted);
     }
     return 0;
 }
@@ -946,7 +946,7 @@ static int do_prepare(void) {
     int n = clean_all_ac_files();
     OK("清理文件: %d 个", n);
     restore_dirs();
-    spoof_properties();
+    adapt_properties();
     protect_devmode();
     return 0;
 }
@@ -1018,7 +1018,7 @@ static int do_launch(void) {
                     uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;
                     uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, "libUE4.so") : 0;
 
-                    /* 每周期: kill chain 6 节点 (最关键的防线) */
+                    /* 每周期: 检测链 6 节点 (最关键的防线) */
                     if (ts2) {
                         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
                             {0x419FDC, 0xD2800000}, {0x419FE0, 0xD65F03C0},
@@ -1087,7 +1087,7 @@ static int do_launch(void) {
 /* ============= TCP JSON 控制接口 =============
  * 手机端 app/adb forward 连接 cloud phone 的 9510 端口
  * 协议: 文本行, 以 \n 结尾
- * 命令: ping / prepare / launch / patch / stop / status / clean / spoof
+ * 命令: ping / prepare / launch / patch / stop / status / clean / adapt
  * 响应: JSON 单行
  */
 static int handle_command(const char *req, char *resp, size_t resp_sz) {
@@ -1127,13 +1127,13 @@ static int handle_command(const char *req, char *resp, size_t resp_sz) {
     } else if (strncmp(req, "clean", 5) == 0) {
         int n = clean_all_ac_files();
         snprintf(resp, resp_sz, "{\"status\":\"ok\",\"cleaned\":%d}", n);
-    } else if (strncmp(req, "spoof", 5) == 0) {
-        spoof_properties();
-        snprintf(resp, resp_sz, "{\"status\":\"ok\",\"msg\":\"props spoofed\"}");
+    } else if (strncmp(req, "adapt", 5) == 0) {
+        adapt_properties();
+        snprintf(resp, resp_sz, "{\"status\":\"ok\",\"msg\":\"props adapted\"}");
     } else {
         snprintf(resp, resp_sz,
             "{\"status\":\"ok\",\"cmds\":[\"ping\",\"prepare\",\"launch\","
-            "\"patch\",\"stop\",\"status\",\"clean\",\"spoof\"]}");
+            "\"patch\",\"stop\",\"status\",\"clean\",\"adapt\"]}");
     }
     return 0;
 }
@@ -1184,15 +1184,15 @@ static int run_tcp_server(void) {
 /* ============= main ============= */
 static void print_usage(const char *prog) {
     fprintf(stderr,
-        FORGE_VERSION_STR " — 三角洲行动云手机过检测\n"
+        FORGE_VERSION_STR " — 三角洲行动 运行环境管理\n"
         "用法: %s [选项]\n"
         "  -d    daemon/TCP 服务器 (端口 %d)\n"
-        "  -p    仅 prepare (清理+伪装+属性)\n"
+        "  -p    仅 prepare (清理+适配+属性)\n"
         "  -l    launch (prepare + 启动游戏 + 补丁)\n"
         "  -m    仅补丁 (游戏必须在运行)\n"
         "  -s    查询状态\n"
-        "  -c    仅清理反作弊文件\n"
-        "  -x    仅伪装系统属性\n"
+        "  -c    仅清理检查文件\n"
+        "  -x    仅适配系统属性\n"
         "  -v    详细日志\n"
         "  -h    显示帮助\n",
         prog, CTRL_PORT);
@@ -1203,7 +1203,7 @@ int main(int argc, char **argv) {
     srand((unsigned int)(time(NULL) ^ (unsigned long)getpid()));
 
     int daemon_mode = 0, flag_prep = 0, flag_launch = 0, flag_patch = 0,
-        flag_status = 0, flag_clean = 0, flag_spoof = 0;
+        flag_status = 0, flag_clean = 0, flag_adapt = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-v")) g_verbose = 1;
@@ -1213,7 +1213,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-m")) flag_patch = 1;
         else if (!strcmp(argv[i], "-s")) flag_status = 1;
         else if (!strcmp(argv[i], "-c")) flag_clean = 1;
-        else if (!strcmp(argv[i], "-x")) flag_spoof = 1;
+        else if (!strcmp(argv[i], "-x")) flag_adapt = 1;
         else if (!strcmp(argv[i], "-h")) { print_usage(argv[0]); return 0; }
     }
 
@@ -1237,7 +1237,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (flag_clean) { int n = clean_all_ac_files(); OK("cleaned %d files", n); return 0; }
-    if (flag_spoof) { spoof_properties(); return 0; }
+    if (flag_adapt) { adapt_properties(); return 0; }
 
     /* 无参数 = 默认一次性 launch */
     do_prepare();

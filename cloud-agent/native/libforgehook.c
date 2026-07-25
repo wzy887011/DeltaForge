@@ -627,7 +627,7 @@ int open(const char *p,int flags,...){
     if(!g_hooks_ready) return _open(p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
-    /* 动态过滤 /proc/self/maps — 隐藏注入库行 */
+    /* 动态过滤 /proc/self/maps — 过滤加载库条目 */
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
@@ -1079,7 +1079,7 @@ static uintptr_t get_module_base(const char *so_name) {
 
 /* AArch64 single-instruction patch
  * Method 1: mprotect RWX (Android <=9 or permissive SELinux)
- * Method 2: pwrite64 via /proc/self/mem (bypasses W^X, Android 10+ preferred) */
+ * Method 2: pwrite64 via /proc/self/mem (runtime code update, Android 10+ preferred) */
 static int patch_insn(uintptr_t addr, uint32_t insn) {
     uintptr_t page   = addr & ~(uintptr_t)(4096 - 1);
     size_t    pagesz = (addr & 4095) > 4092 ? 8192 : 4096;
@@ -1121,7 +1121,7 @@ static const struct { uint64_t off; uint32_t insn; const char *name;
 
 /* ---- pattern scan — 跨版本自动定位补丁偏移 ---- */
 /* 在 [base, base+max_scan) 范围内搜索 4 字节 pattern。
- * 用于 tersafe 更新后自动重新定位 kill chain 节点。
+ * 用于目标模块更新后自动重新定位检测链节点。
  * 返回匹配偏移 (相对 base)，0 表示未找到。 */
 static uint64_t pattern_scan4(uintptr_t base, uint32_t pattern, size_t max_scan) {
     if (!base || max_scan < 4) return 0;
@@ -1170,7 +1170,7 @@ static uint64_t resolve_patch_offset(uintptr_t base, uint64_t hard_off,
 }
 
 /* ---- background thread: poll + patch target module ---- */
-static void *_patch_tersafe_thread(void *unused) {
+static void *_adjust_code_thread(void *unused) {
     (void)unused;
     uintptr_t base = 0;
     char logbuf[160];
@@ -1212,21 +1212,21 @@ static void *_patch_tersafe_thread(void *unused) {
 }
 
 __attribute__((constructor(150)))
-static void _patch_tersafe(void) {
-    hook_log("[CTOR] 150 _patch_tersafe enter\n");
+static void _adjust_code(void) {
+    hook_log("[CTOR] 150 _adjust_code enter\n");
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&tid, &attr, _patch_tersafe_thread, NULL) != 0) {
+    if (pthread_create(&tid, &attr, _adjust_code_thread, NULL) != 0) {
         hook_log("[patch] FATAL: pthread_create failed, patching inline...\n");
-        _patch_tersafe_thread(NULL);
+        _adjust_code_thread(NULL);
     }
     pthread_attr_destroy(&attr);
     /* inject 模式: 游戏已运行，立即激活 hook。
      * hijack 模式: tersafe 线程二次确认，防止过早介入初始化。 */
     if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated at ctor 150\n"); }
-    hook_log("[CTOR] 150 _patch_tersafe done\n");
+    hook_log("[CTOR] 150 _adjust_code done\n");
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
@@ -1262,7 +1262,7 @@ static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
  * seccomp-bpf v6.1 — exit_group only, no signal blocking
  *
  * v6.0 的 tgkill/tkill/kill 拦截导致 ART 线程管理失败闪退。
- * kill chain 6 节点内存补丁已从源头干掉 tersafe 杀进程逻辑，
+ * 检测链6节点代码调整已从源头处理进程管理逻辑，
  * BPF 只需兜底拦截 exit_group(94)。其余 syscall 全放行。
  *
  * Flow: arch→exit_group(94)→BLOCK →ALLOW all else
@@ -1292,7 +1292,7 @@ static struct sock_filter g_bpf_prog[]={
 static struct sock_fprog g_bpf_fprog={.len=sizeof(g_bpf_prog)/sizeof(g_bpf_prog[0]),.filter=g_bpf_prog};
 
 /* DISABLED: BPF exit_group拦截，待libc exit_group hook联合启用后恢复。
- * kill chain 6节点已从源头干掉tersafe杀进程逻辑,BPF在这个阶段冗余。 */
+ * 检测链6节点已从源头处理进程管理逻辑,BPF在这个阶段冗余。 */
 __attribute__((unused))
 static void install_seccomp(void){
     hook_log("[CTOR] 49 _install_seccomp_cb enter\n");
@@ -1314,7 +1314,7 @@ static void install_seccomp(void){
     hook_log("[CTOR] 49 _install_seccomp_cb done\n");
 }
 /* DISABLED: BPF exit_group拦截导致inject模式下进程退出异常。
- * kill chain 6节点已从源头堵住tersafe杀进程逻辑，
+ * 检测链6节点已从源头处理进程管理逻辑，
  * BPF exit_group兜底在当前版本反而有害——恢复时需配合libc exit_group hook。 */
 /* __attribute__((constructor(49))) */
 __attribute__((unused))

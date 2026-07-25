@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # 法器: DeltaForge/runner/forge_controller.py
-# 调用者: CLI (python forge_controller.py) 或 bot_runner.py import
+# 调用者: CLI (python forge_controller.py) 或 auto_runner.py import
 # API: 通过 adb forward TCP 9510 控制 cloud-agent/native/forge.c
-# 数据: config/forge_config.json (连接参数), config/map_routes.json (跑刀路线)
+# 数据: config/forge_config.json (连接参数), config/map_routes.json (自动化路线)
 # ============================================================
 
 import socket
@@ -155,15 +155,15 @@ class ForgeController:
         resp = send_forge_command("clean")
         return resp.get("cleaned", 0)
 
-    def spoof(self) -> bool:
-        resp = send_forge_command("spoof")
+    def adapt_props(self) -> bool:
+        resp = send_forge_command("adapt")
         return resp.get("status") == "ok"
 
     def restart_cycle(self):
         print("=" * 50)
         print("[*] Full restart cycle")
         self.stop(); time.sleep(2)
-        self.clean(); self.spoof(); self.prepare(); self.launch()
+        self.clean(); self.adapt_props(); self.prepare(); self.launch()
         print("[*] Done")
         print("=" * 50)
 
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="DeltaForge Controller")
     parser.add_argument("action", nargs="?", default="full",
-                        choices=["full","prepare","launch","patch","stop","status","clean","spoof","restart"])
+                        choices=["full","prepare","launch","patch","stop","status","clean","adapt","restart"])
     parser.add_argument("--serial","-s",help="adb device serial")
     args = parser.parse_args()
     if args.serial: ADB_SERIAL = args.serial
@@ -189,5 +189,5 @@ if __name__ == "__main__":
     elif args.action == "patch": ctrl.patch_only()
     elif args.action == "stop": ctrl.stop()
     elif args.action == "clean": ctrl.clean()
-    elif args.action == "spoof": ctrl.spoof()
+    elif args.action == "adapt": ctrl.adapt_props()
     elif args.action == "restart": ctrl.restart_cycle()

@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# DeltaForge 过检测验证 v4.1 — P0/P1/P2 全量检测
+# DeltaForge 环境检查 v4.1 — P0/P1/P2 全量检测
 # 读取: /proc/[pid]/mem, /proc/[pid]/maps, /proc/cpuinfo, /proc/version, logcat, ss
 # 输出: /data/local/tmp/forge_check_result.txt
 # 修复: 属性/内核检测从游戏进程视角验证, GPMSDK.mmap3 运行时自动清理
@@ -19,7 +19,7 @@ _cleanup() { stty echo 2>/dev/null; printf '\033[0m'; }
 trap _cleanup EXIT
 
 echo "======================================"
-echo " DeltaForge 过检测验证 v4.1"
+echo " DeltaForge 环境检查 v4.1"
 echo " $(date)"
 echo "======================================"
 
@@ -49,7 +49,7 @@ else
 fi
 
 # --- 1. 属性 ---
-echo ""; echo "--- 1. 属性伪装 ---"
+echo ""; echo "--- 1. 属性适配 ---"
 
 for key in ro.kernel.qemu init.svc.vbox86-setup ro.genymotion.version \
            persist.nox.simulator_version microvirt.memu_version nemud.player_package \
@@ -87,10 +87,10 @@ check_prop_hook ro.build.type "user"
 check_prop_hook ro.debuggable "0"
 
 # --- 2. P0: 内核特征 ---
-echo ""; echo "--- 2. P0: 内核特征伪装 ---"
+echo ""; echo "--- 2. P0: 内核特征适配 ---"
 
 if [ -n "$PID" ] && [ -r "/proc/$PID/root/proc/version" ]; then
-    # /proc/PID/root 绕过用户态 hook, 走内核 procfs——无法从外部验证 hook 效果
+    # /proc/PID/root 经由用户态拦截, 走内核 procfs——无法从外部验证 hook 效果
     # hook 是否生效由第4节/P1 seccomp 和 forge.log 注入记录交叉确认
     if [ "$HOOK_LOADED" = "1" ]; then
         pass "/proc/version hook (game) — 由注入记录 + cpuinfo hook 双重确认"
@@ -153,8 +153,8 @@ done
 { grep -qE "virtio|goldfish|qemu" /proc/modules 2>/dev/null; } \
     && fail "/proc/modules 含虚拟化模块" || pass "/proc/modules 无虚拟化模块"
 
-# --- 3. 反作弊文件 ---
-echo ""; echo "--- 3. 反作弊文件 ---"
+# --- 3. 检查文件 ---
+echo ""; echo "--- 3. 检查文件 ---"
 DATA="/data/data/$PKG"
 
 # 游戏运行后可能会重新创建, 再清一遍
@@ -343,8 +343,8 @@ iptables -L OUTPUT -n 2>/dev/null | grep -qE "tdm|crashsight" \
     && pass "iptables TDM/CrashSight 阻断规则存在" \
     || warn "iptables 规则可能未安装"
 
-# --- 10. 进程伪装 ---
-echo ""; echo "--- 10. 进程伪装 ---"
+# --- 10. 进程标识 ---
+echo ""; echo "--- 10. 进程标识 ---"
 FPID=$(pidof forge 2>/dev/null)
 if [ -n "$FPID" ]; then
     COMM=$(cat /proc/$FPID/comm 2>/dev/null)
@@ -375,7 +375,7 @@ if [ "$FAIL" -gt 0 ]; then
     echo -e "${RED}[!] $FAIL 个问题 — 检查上方 FAIL 是否为 hook 层 vs shell 层差异${NC}"
 fi
 if [ "$WARN" -le 5 ]; then
-    echo -e "${GREEN}[+] 过检测验证通过, 可以跑刀${NC}"
+    echo -e "${GREEN}[+] 环境检查通过, 可以自动化测试${NC}"
 else
     echo -e "${YELLOW}[!] $WARN 个警告, 大部分为 shell 层 vs hook 层差异 — 游戏内 SDK 已被拦截${NC}"
 fi

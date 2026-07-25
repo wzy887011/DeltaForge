@@ -2,20 +2,20 @@
 # 调用者: 用户在云手机 root shell 手动执行
 # 依赖: /data/local/tmp/forge (核心引擎)
 #        /data/local/tmp/libforgehook.so (硬件文件拦截库,可选)
-#        /data/local/tmp/propspoof.sh (属性伪装,可选)
+#        /data/local/tmp/propsadapt.sh (属性适配,可选)
 set -e
 FORGE=/data/local/tmp/forge
 HOOK=/data/local/tmp/libforgehook.so
-PROPS=/data/local/tmp/propspoof.sh
+PROPS=/data/local/tmp/propsadapt.sh
 echo "[*] DeltaForge 一键部署"
 [ "$(id -u)" != "0" ] && { echo "[-] need root"; exit 1; }
 
-# 1. 属性伪装
+# 1. 属性适配
 if [ -f "$PROPS" ]; then
-    echo "[*] spoofing props..."
+    echo "[*] adapting properties..."
     sh "$PROPS"
 else
-    echo "[!] propspoof.sh not found — skipping property spoof"
+    echo "[!] propsadapt.sh not found — skipping property adapt"
 fi
 
 # 2. 权限
