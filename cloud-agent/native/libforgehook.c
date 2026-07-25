@@ -511,13 +511,6 @@ static void ensure_proc_status(void) {
         g_proc_status_len = 0;
 }
 
-/* 兼容原有表引用: 提供指针和长度供 OVERRIDE_FILES 使用 */
-static const char *get_proc_status(size_t *out_len) {
-    ensure_proc_status();
-    if (out_len) *out_len = (size_t)g_proc_status_len;
-    return g_proc_status_buf;
-}
-
 /* /proc/self/environ — 清空，隐藏 LD_PRELOAD 等注入痕迹 */
 static const char OVERRIDE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/data\0\0";
 
@@ -2065,22 +2058,6 @@ static void jni_overwrite_build_fields(JNIEnv *env){
         if(s){(*env)->SetStaticObjectField(env,build_cls,fid,s);(*env)->DeleteLocalRef(env,s);}
     }
     (*env)->DeleteLocalRef(env,build_cls);
-}
-
-static void jni_hook_system_properties(JNIEnv *env){
-    jclass sp_cls=(*env)->FindClass(env,"android/os/SystemProperties");
-    if(!sp_cls){(*env)->ExceptionClear(env);return;}
-    jmethodID get_method=(*env)->GetStaticMethodID(env,sp_cls,"get","(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
-    if(!get_method){(*env)->ExceptionClear(env);(*env)->DeleteLocalRef(env,sp_cls);return;}
-    JNINativeMethod methods[]={
-        {"native_get","(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",(void*)hooked_get},
-        {"native_get_int","(Ljava/lang/String;I)I",(void*)hooked_get_int},
-        {"native_get_long","(Ljava/lang/String;J)J",(void*)hooked_get_long},
-        {"native_get_boolean","(Ljava/lang/String;Z)Z",(void*)hooked_get_bool},
-    };
-    jint rc=(*env)->RegisterNatives(env,sp_cls,methods,4);
-    if(rc!=0){FILE *log=fopen("/data/local/tmp/forge.log","a");if(log){fprintf(log,"[!] JNI RegisterNatives fail rc=%d\n",rc);fflush(log);fclose(log);}}
-    (*env)->DeleteLocalRef(env,sp_cls);
 }
 
 /* ---- JNI_OnLoad — 先转发原版 qimei，再做我们的 hook ---- */

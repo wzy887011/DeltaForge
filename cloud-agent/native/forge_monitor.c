@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/inotify.h>
 #include <sys/select.h>
+#include <sys/syscall.h>
 #include <stdint.h>
 
 #define TARGET_PKG   "com.tencent.tmgp.dfm"
