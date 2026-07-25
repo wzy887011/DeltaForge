@@ -1317,23 +1317,93 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     return _connect_orig ? _connect_orig(sockfd, addr, addrlen) : -1;
 }
 
-/* ---- GLES/EGL hook — GPU renderer string normalization ---- */
-/* Use raw type declarations for build independence */
-/* DISABLED (v6.1): GPU hook removed — cloud phone virtual GPU doesn't match
- * fake Adreno 730 strings. Returning mismatched GPU caps to UE4's renderer
- * causes EGL/GLES initialization failure → permanent black screen.
- *
- * Original approach: patch_branch on glGetString/eglQueryString to return
- * "Adreno (TM) 730" / "Qualcomm". But if the actual GPU is Mali or a
- * virtualized GPU with different feature bits, the UE4 RHI layer queries
- * GL_EXTENSIONS/GL_RENDERER, gets capabilities for Adreno 730, tries to
- * use Adreno-specific extensions → fails → renderer stuck at init.
- *
- * Correct fix (TODO): query actual GPU caps at runtime, generate matching
- * fake strings. Or use GPU-specific overrides per cloud phone model. */
+/* ---- GLES/EGL GPU hook — caller-aware renderer string forgery ---- */
+/* v8.2: 非全局伪造。只对 libtersafe.so 发起的 glGetString/eglQueryString
+ * 调用返回假 GPU 信息，UE4/其他调用者拿到真实 GPU 能力 → 不黑屏。
+ * 利用 PLT symbol interposition — libforgehook.so 先加载，符号优先级高于
+ * 系统 libGLESv2/libEGL，但通过 dlsym 取得真实函数指针用于转发。 */
+typedef const unsigned char *(*glGetString_t)(unsigned int name);
+typedef const char *(*eglQueryString_t)(void *dpy, int name);
+
+static glGetString_t    real_glGetString    = NULL;
+static eglQueryString_t real_eglQueryString = NULL;
+
+/* tersafe 代码段范围 (运行时从 maps 解析，未解析时两个均为 0) */
+static uintptr_t g_ts_code_start = 0;
+static uintptr_t g_ts_code_end   = 0;
+
+/* 懒加载 tersafe 范围 — 构造函数阶段未必已加载 */
+static void _gpu_ensure_range(void) {
+    if (g_ts_code_start && g_ts_code_end) return;
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    if (fd < 0) return;
+    char buf[8192];
+    ssize_t n = syscall(SYS_read, fd, buf, sizeof(buf) - 1);
+    syscall(SYS_close, fd);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    char *p = buf;
+    while (*p) {
+        char *eol = p; while (*eol && *eol != '\n') eol++;
+        *eol = '\0';
+        if (strstr(p, "libtersafe.so") && strstr(p, "r-xp")) {
+            sscanf(p, "%lx-%lx", &g_ts_code_start, &g_ts_code_end);
+            break;
+        }
+        p = (*eol == '\n') ? eol + 1 : eol;
+    }
+}
+
+static int _in_tersafe(uintptr_t ra) {
+    _gpu_ensure_range();
+    if (!g_ts_code_start) return 0;
+    return ra >= g_ts_code_start && ra < g_ts_code_end;
+}
+
+/* PLT interposition: libforgehook.so 先加载，此符号覆盖 libGLESv2 的 glGetString */
+const unsigned char *glGetString(unsigned int name) {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    if (_in_tersafe(caller)) {
+        switch (name) {
+            case 0x1F01: /* GL_RENDERER */
+                return (const unsigned char *)"Adreno (TM) 740";
+            case 0x1F00: /* GL_VENDOR   */
+                return (const unsigned char *)"Qualcomm";
+            case 0x1F02: /* GL_VERSION  */
+                return (const unsigned char *)"OpenGL ES 3.2 V@0730.0 (GIT@676873)";
+        }
+    }
+    if (!real_glGetString) return (const unsigned char *)"";
+    return real_glGetString(name);
+}
+
+/* PLT interposition: 覆盖 libEGL 的 eglQueryString */
+const char *eglQueryString(void *dpy, int name) {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    if (_in_tersafe(caller)) {
+        if (name == 0x3053 /* EGL_VENDOR */)  return "Qualcomm";
+        if (name == 0x3054 /* EGL_VERSION */) return "1.5 Qualcomm Adreno (TM) 740";
+    }
+    if (!real_eglQueryString) return "";
+    return real_eglQueryString(dpy, name);
+}
+
 __attribute__((constructor(120)))
 static void _patch_gpu_driver(void) {
-    hook_log("[CTOR] 120 _patch_gpu_driver SKIPPED (disabled — mismatched GPU caps)\n");
+    /* init tersafe range (如果还没加载，hook 函数里会懒加载) */
+    _gpu_ensure_range();
+
+    /* 通过已加载的 libGLESv2/libEGL 获取真实函数指针 */
+    void *h = dlopen("libGLESv2.so", RTLD_NOW | RTLD_NOLOAD);
+    if (h) { real_glGetString = (glGetString_t)dlsym(h, "glGetString"); dlclose(h); }
+    h = dlopen("libEGL.so", RTLD_NOW | RTLD_NOLOAD);
+    if (h) { real_eglQueryString = (eglQueryString_t)dlsym(h, "eglQueryString"); dlclose(h); }
+
+    if (real_glGetString || real_eglQueryString) {
+        hook_log("[CTOR] 120 GPU hook ACTIVE (caller-aware, ts=");
+    } else {
+        hook_log("[CTOR] 120 GPU hook SKIPPED (no GLES/EGL symbols)\n");
+    }
 }
 
 /* ============================================================
@@ -1426,11 +1496,11 @@ static const struct {
     int         seq_delta;     /* 序列首条指令到 patch 点的字节偏移 */
 } kKillChain[] = {
     /* Node 1: detect_entry — MOV X0,#0
-     * 序列: str w0,[sp,#0xc](exact) → bl(mask) → bl→patch ; delta=8 */
+     * 序列: str W0,[SP,any](mask imm12) → bl(mask) → bl→patch ; delta=8 */
     {0x419fdcu, 0xD2800000u, "detect_entry MOV X0,#0",
      {0x97FB3560u}, 1,
-     {0xb9000fe0u, 0x94000000u, 0x94000000u, 0u},
-     {0xFFFFFFFFu, 0xFC000000u, 0xFC000000u, 0u},
+     {0xb90003e0u, 0x94000000u, 0x94000000u, 0u},
+     {0xFFC003FFu, 0xFC000000u, 0xFC000000u, 0u},
      3, 8},
     /* Node 2: detect_entry+4 — RET
      * 序列: bl(mask) → b+1(exact)→patch ; delta=4 */
@@ -1447,11 +1517,11 @@ static const struct {
      {0xFFF8001Fu, 0xFFFFFFFFu, 0xFC000000u, 0u},
      3, 8},
     /* Node 4: kill_router — RET
-     * 序列: strb w8,[sp](exact) → b(mask) → bl(mask) → bl→patch ; delta=12 */
+     * 序列: strb W8,[SP,any](mask imm12) → b(mask) → bl(mask) → bl→patch ; delta=12 */
     {0x2f29d0u, 0xD65F03C0u, "kill_router RET",
      {0x9400B8BAu}, 1,
      {0x390003e8u, 0x14000000u, 0x94000000u, 0x94000000u},
-     {0xFFFFFFFFu, 0xFC000000u, 0xFC000000u, 0xFC000000u},
+     {0xFFC003FFu, 0xFC000000u, 0xFC000000u, 0xFC000000u},
      4, 12},
     /* Node 5: kill_wrapper — RET
      * 序列: b(mask) → adrp x8(mask imm) → ldr w1,[x8,any](mask imm12) → bl→patch ; delta=12 */
