@@ -1055,10 +1055,9 @@ static int do_launch(void) {
 
                 /* Layered patch verification — prevent rollback */
                 {
-                    static int cycle = 0;
-                    cycle++;
-                    /* [v7.0 Patch C] cycle 溢出防护: LCM(2,3,5)=30 周期归零 */
-                    if (cycle >= 30) cycle = 1;
+                    /* [v8.1] unsigned 消除 signed overflow UB，防50天后溢出 */
+                    static unsigned int cycle = 0u;
+                    if (++cycle >= 30u) cycle = 0u;
                     pid_t vp2 = get_pid_by_name(TARGET_PKG);
                     uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, C_tersafe) : 0;
                     uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, C_ue4) : 0;

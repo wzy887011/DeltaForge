@@ -148,20 +148,33 @@ static const char *AC_IP_PREFIXES[] = {
     NULL
 };
 
+/* [v8.1] 直接 syscall 替代 fopen/fgets —
+ * 绕过 tersafe 可能通过 inotify 感知外部进程读取游戏 /proc 文件 */
 static void scan_net(pid_t pid) {
     char nf[64]; snprintf(nf,sizeof(nf),"/proc/%d/net/tcp",pid);
-    FILE *f = fopen(nf,"r"); if (!f) return;
-    char line[512]; fgets(line,sizeof(line),f); /* skip header */
-    while (fgets(line,sizeof(line),f)) {
-        char rem[32],st[4];
-        if (sscanf(line," %*s %*s %31s %3s",rem,st)<2) continue;
-        if (strcmp(st,"01")!=0) continue; /* ESTABLISHED only */
-        for (const char **pre=AC_IP_PREFIXES;*pre;pre++) {
-            if (strncmp(rem,*pre,strlen(*pre))==0)
-                ALRT("AC_REPORT_CONN remote=%s — 疑似上报检测数据",rem);
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, nf, O_RDONLY, 0);
+    if (fd < 0) return;
+
+    char buf[4096], line[512];
+    int line_pos = 0, first_line = 1;
+    ssize_t n;
+    while ((n = syscall(__NR_read, fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            char c = buf[i];
+            if (c == '\n' || line_pos >= (int)sizeof(line)-1) {
+                line[line_pos] = '\0'; line_pos = 0;
+                if (first_line) { first_line = 0; continue; }
+                char rem[32], st[4];
+                if (sscanf(line," %*s %*s %31s %3s",rem,st)<2) continue;
+                if (strcmp(st,"01")!=0) continue;
+                for (const char **pre=AC_IP_PREFIXES;*pre;pre++) {
+                    if (strncmp(rem,*pre,strlen(*pre))==0)
+                        ALRT("AC_REPORT_CONN remote=%s — 疑似上报检测数据",rem);
+                }
+            } else { line[line_pos++] = c; }
         }
     }
-    fclose(f);
+    syscall(__NR_close, fd);
 }
 
 /* ---- status — TracerPid 检测 ---- */

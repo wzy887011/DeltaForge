@@ -1433,22 +1433,62 @@ static int patch_insn(uintptr_t addr, uint32_t insn) {
 }
 
 /* termination chain patch table - ordered from entry to syscall
- * v6.1: 支持特征码扫描回退 — 硬编码偏移失效时用 pattern 自动定位 */
-static const struct { uint64_t off; uint32_t insn; const char *name;
-    /* 特征码 (用于跨版本自动扫描), 基于实机 libtersafe.so ARM64 hex dump */
-    uint32_t sig_bytes[4]; int sig_len; } kKillChain[] = {
+ * v8.1: 多指令序列特征扫描，跨版本鲁棒性提升
+ * 回退链: 硬编码偏移 → seq多指令扫描 → sig单指令扫描 */
+static const struct {
+    uint64_t    off;           /* 硬编码 patch 偏移 */
+    uint32_t    insn;          /* patch 后目标指令 */
+    const char *name;
+    /* [legacy] 单指令特征 (pattern_scan4 最终回退) */
+    uint32_t    sig_bytes[4];  int sig_len;
+    /* [v8.1] 多指令序列特征 (pattern_scan_seq，更鲁棒) */
+    uint32_t    seq_insns[4];  uint32_t seq_masks[4];
+    int         seq_len;       /* 0=未填，跳过序列扫描 */
+    int         seq_delta;     /* 序列首条指令到 patch 点的字节偏移 */
+} kKillChain[] = {
+    /* Node 1: detect_entry — MOV X0,#0
+     * 序列: str w0,[sp,#0xc](exact) → bl(mask) → bl→patch ; delta=8 */
     {0x419fdcu, 0xD2800000u, "detect_entry MOV X0,#0",
-     {0x97FB3560u}, 1},
+     {0x97FB3560u}, 1,
+     {0xb9000fe0u, 0x94000000u, 0x94000000u, 0u},
+     {0xFFFFFFFFu, 0xFC000000u, 0xFC000000u, 0u},
+     3, 8},
+    /* Node 2: detect_entry+4 — RET
+     * 序列: bl(mask) → b+1(exact)→patch ; delta=4 */
     {0x419fe0u, 0xD65F03C0u, "detect_entry+4 RET",
-     {0x14000001u}, 1},
+     {0x14000001u}, 1,
+     {0x94000000u, 0x14000001u, 0u, 0u},
+     {0xFC000000u, 0xFFFFFFFFu, 0u, 0u},
+     2, 4},
+    /* Node 3: kill_dispatch — RET
+     * 序列: tbz w8,#0,+X(mask offset) → b+1(exact) → bl→patch ; delta=8 */
     {0x2e7810u, 0xD65F03C0u, "kill_dispatch RET",
-     {0x9400100Bu}, 1},
+     {0x9400100Bu}, 1,
+     {0x36000000u, 0x14000001u, 0x94000000u, 0u},
+     {0xFFF8001Fu, 0xFFFFFFFFu, 0xFC000000u, 0u},
+     3, 8},
+    /* Node 4: kill_router — RET
+     * 序列: strb w8,[sp](exact) → b(mask) → bl(mask) → bl→patch ; delta=12 */
     {0x2f29d0u, 0xD65F03C0u, "kill_router RET",
-     {0x9400B8BAu}, 1},
+     {0x9400B8BAu}, 1,
+     {0x390003e8u, 0x14000000u, 0x94000000u, 0x94000000u},
+     {0xFFFFFFFFu, 0xFC000000u, 0xFC000000u, 0xFC000000u},
+     4, 12},
+    /* Node 5: kill_wrapper — RET
+     * 序列: b(mask) → adrp x8(mask imm) → ldr w1,[x8,any](mask imm12) → bl→patch ; delta=12 */
     {0x320d78u, 0xD65F03C0u, "kill_wrapper RET",
-     {0x940008BFu}, 1},
+     {0x940008BFu}, 1,
+     {0x14000000u, 0x90000008u, 0xB9400101u, 0x94000000u},
+     {0xFC000000u, 0x9F00001Fu, 0xFFC003FFu, 0xFC000000u},
+     4, 12},
+    /* Node 6: tgkill_call — RET
+     * 序列: stp Wt,?,[sp,any](mask Rt2+imm7) → br x16(exact) → ldrb post-idx(mask reg+imm)→patch
+     * br x16 是最强锚点(ARM64 ABI intra-call scratch)，抗寄存器重分配; delta=8 */
     {0x3233b8u, 0xD65F03C0u, "tgkill_call RET",
-     {0x3840140Fu}, 1},
+     {0x3840140Fu}, 1,
+     {0x29013feeu, 0xd61f0200u, 0x38000401u, 0u},
+     {0xFFC003FFu, 0xFFFFFFFFu, 0xFF200C00u, 0u},
+     3, 8},
 };
 #define KILL_CHAIN_N (sizeof(kKillChain)/sizeof(kKillChain[0]))
 
@@ -1510,30 +1550,44 @@ static uint64_t pattern_scan_seq(uintptr_t base,
     return 0;
 }
 
-/* 回退: 如果硬编码偏移处不是预期指令，用 pattern scan 重新定位 */
+/* [v8.1] 回退链: 硬编码偏移 → 多指令序列扫描 → 单指令扫描 */
 static uint64_t resolve_patch_offset(uintptr_t base, uint64_t hard_off,
-                                      uint32_t expected_insn, const uint32_t *sig, int sig_len) {
-    /* 先验证硬编码偏移 */
+    uint32_t expected_insn,
+    const uint32_t *sig, int sig_len,
+    const uint32_t *seq_insns, const uint32_t *seq_masks,
+    int seq_len, int seq_delta)
+{
+    /* 1. 验证硬编码偏移 */
     uint32_t cur = 0;
     int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
     if (fd >= 0) {
         syscall(__NR_pread64, fd, &cur, 4, (off_t)(base + hard_off));
         syscall(SYS_close, fd);
     }
-    if (cur == expected_insn) return hard_off; /* 硬编码有效 */
+    if (cur == expected_insn) return hard_off;
 
-    /* 特征码扫描回退 (如果有特征码) */
+    /* 2. 多指令序列扫描 (跨版本首选) */
+    if (seq_insns && seq_len > 0) {
+        uint64_t found = pattern_scan_seq(base, seq_insns, seq_masks,
+                                          seq_len, 0x600000, seq_delta);
+        if (found) {
+            hook_log("[scan] seq-match OK\n");
+            return found;
+        }
+    }
+
+    /* 3. 单指令扫描最终回退 */
     if (sig && sig_len > 0) {
         for (int i = 0; i < sig_len; i++) {
-            uint64_t found = pattern_scan4(base, sig[i], 0x400000); /* 4MB 范围 */
+            uint64_t found = pattern_scan4(base, sig[i], 0x400000);
             if (found) {
-                hook_log("[scan] pattern found at off=0x");
+                hook_log("[scan] sig4 fallback OK\n");
                 return found;
             }
         }
     }
-    /* 都没有 → 保留硬编码 (可能失败) */
-    hook_log("[scan] WARNING: offset 0x");
+
+    hook_log("[scan] WARNING: all fallbacks failed, using hard offset\n");
     return hard_off;
 }
 
@@ -1579,7 +1633,10 @@ static void *_adjust_code_thread(void *unused) {
     int ok = 0;
     for (size_t i = 0; i < KILL_CHAIN_N; i++) {
         uint64_t off = resolve_patch_offset(base, kKillChain[i].off,
-            kKillChain[i].insn, kKillChain[i].sig_bytes, kKillChain[i].sig_len);
+            kKillChain[i].insn,
+            kKillChain[i].sig_bytes, kKillChain[i].sig_len,
+            kKillChain[i].seq_insns, kKillChain[i].seq_masks,
+            kKillChain[i].seq_len,   kKillChain[i].seq_delta);
         int r = patch_insn(base + off, kKillChain[i].insn);
         ln = snprintf(logbuf, sizeof(logbuf),
             "[patch] %-28s off=0x%06llx r=%d\n",
@@ -1623,7 +1680,10 @@ static void *_adjust_code_thread(void *unused) {
         int ok2 = 0;
         for (size_t i = 0; i < KILL_CHAIN_N; i++) {
             uint64_t off = resolve_patch_offset(base, kKillChain[i].off,
-                kKillChain[i].insn, kKillChain[i].sig_bytes, kKillChain[i].sig_len);
+                kKillChain[i].insn,
+                kKillChain[i].sig_bytes, kKillChain[i].sig_len,
+                kKillChain[i].seq_insns, kKillChain[i].seq_masks,
+                kKillChain[i].seq_len,   kKillChain[i].seq_delta);
             if (patch_insn(base + off, kKillChain[i].insn) == 0) ok2++;
         }
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
