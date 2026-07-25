@@ -1370,8 +1370,10 @@ static int _in_tersafe(uintptr_t ra) {
     return ra >= g_ts_code_start && ra < g_ts_code_end;
 }
 
-/* PLT interposition: libforgehook.so 先加载，此符号覆盖 libGLESv2 的 glGetString
- * [v8.3] 懒加载 real_glGetString — 构造函数(120)时 libGLESv2 可能尚未加载 */
+/* PLT interposition: inject 模式下 GPU hook 不起作用 (PLT 已固化)
+ * 但全局可见符号会与 libGLESv2/libvulkan 冲突 → dlopen 失败
+ * 改为 hidden: 不导出，不冲突，inject 正常加载 */
+__attribute__((visibility("hidden")))
 const unsigned char *glGetString(unsigned int name) {
     /* 懒初始化: 用 RTLD_NEXT 找后继实现，跳过本库自身 */
     if (!real_glGetString)
@@ -1389,7 +1391,7 @@ const unsigned char *glGetString(unsigned int name) {
     return real_glGetString(name);
 }
 
-/* PLT interposition: 覆盖 libEGL 的 eglQueryString */
+__attribute__((visibility("hidden")))
 const char *eglQueryString(void *dpy, int name) {
     if (!real_eglQueryString)
         real_eglQueryString = (eglQueryString_t)dlsym(RTLD_NEXT, "eglQueryString");
@@ -1427,6 +1429,7 @@ static void _vk_fake_props(VkPhysDevProps *p) {
     if (!p->deviceName[0]) return; /* silence clang */
 }
 
+__attribute__((visibility("hidden")))
 void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
     if (!real_vkGetPDProps)
         real_vkGetPDProps = (vkGetPhysicalDeviceProperties_t)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties");
@@ -1436,6 +1439,7 @@ void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
     if (_in_tersafe(caller)) _vk_fake_props(props);
 }
 
+__attribute__((visibility("hidden")))
 void vkGetPhysicalDeviceProperties2(void *physDev, VkPhysDevProps2 *props2) {
     if (!real_vkGetPDProps2)
         real_vkGetPDProps2 = (vkGetPhysicalDeviceProperties2_t)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties2");
