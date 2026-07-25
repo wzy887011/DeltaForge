@@ -165,66 +165,6 @@ static const char *kPurgeDirs[] = {
     NULL
 };
 
-/* ============= 需精确删除的文件 ============= */
-static const char *kPreciseDeleteFiles[] = {
-    APP_DATA "/files/qm/5093f053c62f9ae1",
-    APP_DATA "/files/qm/cm_ce15c95bcb0c04db3e0b278bc0f80daf",
-    APP_DATA "/files/tdm_track.dat",
-    APP_DATA "/files/GPMSDK.mmap3",
-    APP_DATA "/files/com.tencent.tdm.qimei.sdk.QimeiSDK",
-    APP_DATA "/databases/crashSight_db_",
-    APP_DATA "/shared_prefs/GCloudCoreSP.xml",
-    APP_DATA "/shared_prefs/itop.xml",
-    APP_DATA "/shared_prefs/tdm.xml",
-    APP_DATA "/shared_prefs/tgpa.xml",
-    APP_DATA "/shared_prefs/qm_global_sp.xml",
-    APP_DATA "/shared_prefs/QV1com.tencent.tdm.qimei.sdk.QimeiSDKc2009844da43a85e.xml",
-    APP_DATA "/shared_prefs/lastBufferedMaps.xml",
-    "/sdcard/.imei",
-    NULL
-};
-
-static const char *kExtraDeleteFiles[] = {
-    APP_DATA "/files/ano_tmp/tp_report.dat",
-    APP_DATA "/files/ano_tmp/ano_sc.dat",
-    APP_DATA "/files/ano_tmp/ano_id.dat",
-    APP_DATA "/files/MSDK_GUID",
-    APP_DATA "/files/.beacon_id",
-    APP_DATA "/files/.tbs_guid",
-    APP_DATA "/files/tpns_guid",
-    APP_DATA "/files/bugly_crash",
-    APP_DATA "/files/bugly_anr",
-    NULL
-};
-
-/* 仅在这些指定目录内做模糊匹配，不递归整个 APP_DATA */
-static const char *kScanDirs[] = {
-    APP_DATA "/files/qm",
-    APP_DATA "/files/ano_tmp",
-    APP_DATA "/files/tdm_tmp",
-    /* dg-patch 移除：可能存游戏增量补丁，不扫描 */
-    APP_DATA "/shared_prefs",
-    APP_DATA "/databases",
-    NULL
-};
-static const char *kPatternSubstrings[] = { "tdm", "hawk", "qv1", "lcc", "qc_", "qm_", NULL };
-static const char *kQmDir = APP_DATA "/files/qm";
-/* "q"/"lc"/"qm" 前缀过短/过宽已收紧，避免误删游戏合法文件 */
-static const char *kQmPrefixes[] = { "cm_", "QV1", "lccNo", "qm_", NULL };
-
-/* ============= qm 目录匹配规则 =============
- * 原规则只匹配 cm_* 前缀，但 QimeiSDK 在文件中写入 QV1* / lccNoCN / q* 等前缀
- * 现在用多个前缀匹配，覆盖 cm_ / QV1 / q / lc / qm 开头
- */
-static int match_qm_prefix(const char *name) {
-    for (int i = 0; kQmPrefixes[i]; i++) {
-        size_t pl = strlen(kQmPrefixes[i]);
-        if (pl > 0 && strncmp(name, kQmPrefixes[i], pl) == 0)
-            return 1;
-    }
-    return 0;
-}
-
 /* ============= System property emulation =============
  * Virtualized environment markers → clear or rewrite to reference device profile
  * 属性名和值均来自 kAdaptProps 表
@@ -477,39 +417,6 @@ static int rm_recursive(const char *path) {
     }
     unlink(path);
     return 0;
-}
-
-static void purge_dir_contents(const char *dir) {
-    DIR *d = opendir(dir);
-    if (!d) return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
-        rm_recursive(full);
-    }
-    closedir(d);
-}
-
-/* 非递归匹配删除 — 只删当前目录的直接子文件/子目录，不深入子目录 */
-static int delete_matching(const char *dir, const char *substr) {
-    DIR *d = opendir(dir);
-    if (!d) return 0;
-    int n = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        if (!strstr(ent->d_name, substr)) continue;
-        char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
-        struct stat st;
-        if (lstat(full, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) { rm_recursive(full); n++; }
-        else { unlink(full); n++; }
-    }
-    closedir(d);
-    return n;
 }
 
 /* ============= Shell 命令执行 ============= */

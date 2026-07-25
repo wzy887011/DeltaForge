@@ -62,5 +62,15 @@ host:
 	file forge libforgehook.so touch_injector injector forge_monitor
 	ls -lh forge libforgehook.so touch_injector injector forge_monitor
 
+# Termux 设备原生编译 — 无独立 libpthread/libc，去掉 -static/-lpthread
+termux:
+	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge
+	clang -shared -fPIC -Os -Wall -DFORGEHOOK_VERSION=8 libforgehook.c -o libforgehook.so -ldl
+	clang -Os -Wall touch_injector.c -o touch_injector
+	clang -Os -Wall injector.c -o injector -ldl
+	clang -Os -Wall forge_monitor.c -o forge_monitor
+	file forge libforgehook.so touch_injector injector forge_monitor
+	ls -lh forge libforgehook.so touch_injector injector forge_monitor
+
 clean:
 	rm -f forge libforgehook.so touch_injector injector forge_monitor
