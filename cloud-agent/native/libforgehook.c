@@ -1726,14 +1726,27 @@ static void *_adjust_code_thread(void *unused) {
     /* poll-wait for target module (up to 60 seconds), detached thread */
     for (int retry = 0; retry < 300; retry++) {
         base = get_module_base(C_tersafe);
-        if (base) break;
+        if (base) {
+            hook_log("[patch] tersafe found at retry=");
+            /* 把 retry 数字写入日志 */
+            char rbuf[16]; int ri=0; int rv=retry;
+            if (!rv) { rbuf[ri++]='0'; } else {
+                char tmp[16]; int ti=0;
+                while (rv>0){tmp[ti++]='0'+(rv%10);rv/=10;}
+                while(ti-->0) rbuf[ri++]=tmp[ti+1];
+            }
+            rbuf[ri++]='\n'; rbuf[ri]='\0';
+            hook_log(rbuf);
+            break;
+        }
         if (retry == 0) hook_log("[patch] waiting for target module...\n");
+        /* [v8.3] 加速前10次轮询 (10ms)，之后降为200ms — 应对tersafe快速kill */
+        usleep(retry < 10 ? 10000 : 200000);
         /* [v7.1 Fix 1] 超时看门狗: 30s 未找到 tersafe 也激活 hook */
         if (retry >= 150 && !HOOKS_READY() && time(NULL) - g_watchdog_start > 30) {
             __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
             hook_log("[hooks] v7.1 activated (30s watchdog)\n");
         }
-        usleep(200000);
     }
     if (!base) {
         hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
