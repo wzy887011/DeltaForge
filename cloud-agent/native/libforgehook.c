@@ -33,6 +33,21 @@
 /* [v7.1 P0] 字符串常量加密 — 防 strings/IDA 检索 */
 #include "crypt_strings.h"
 
+/* [v7.1 P2] 垃圾指令注入宏
+ * 防: 静态特征码匹配 — 插入无语义 ARM64 指令改变函数字节模式。
+ * AND x0,x0,x0 = 0x8A000000 (保留 x0 不变，消耗一个时钟)
+ * ORR x1,x1,xzr = 0xAA1F0021 (orr x1,x1,xzr — 保留 x1 不变)
+ * 每次调用会生成不同 ASM 序列，在不同优化级别下编译结果也略有差异。*/
+#define JUNK_INSN() __asm__ __volatile__( \
+    "and x0, x0, x0\n\t" \
+    "orr x1, x1, xzr\n\t" \
+    ::: "memory")
+
+#define JUNK_INSN2() __asm__ __volatile__( \
+    "orr x2, x2, xzr\n\t" \
+    "and x3, x3, x3\n\t" \
+    ::: "memory")
+
 /* forward declarations — 函数定义在后，但前向构造函数中需要引用 */
 static uintptr_t get_module_base(const char *so_name);
 static void hook_log(const char *msg);
@@ -746,6 +761,7 @@ static volatile int g_hooks_ready = 0;
 }while(0)
 
 int open(const char *p,int flags,...){
+    JUNK_INSN();   /* [P2] 破坏静态特征码 */
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(!g_hooks_ready) return _open(p,flags,m);
@@ -771,6 +787,7 @@ int open(const char *p,int flags,...){
 }
 
 int openat(int dir,const char *p,int flags,...){
+    JUNK_INSN2();   /* [P2] */
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(!g_hooks_ready) return _openat(dir,p,flags,m);
@@ -831,6 +848,7 @@ int tgkill(pid_t tgid, pid_t tid, int sig) {
     if (!g_hooks_ready) return _tgkill ? _tgkill(tgid, tid, sig) : 0;
     /* 检查调用方是否在 libtersafe 代码段 */
     if (g_ts_text_start) {
+        JUNK_INSN2();   /* [P2] */
         uintptr_t ra = (uintptr_t)__builtin_return_address(0);
         if (ra >= g_ts_text_start && ra < g_ts_text_end) {
             if (sig != 0 && sig != SIGCHLD && sig != SIGPIPE && sig != SIGUSR1)
@@ -1685,6 +1703,7 @@ typedef int (*hook_prop_get_t)(const char*,char*);
 static hook_prop_get_t real_prop_get=NULL;
 
 int __system_property_get(const char *name,char *value){
+    JUNK_INSN();   /* [P2] */
     if(!real_prop_get)real_prop_get=(hook_prop_get_t)dlsym(RTLD_NEXT,"__system_property_get");
     if(!g_hooks_ready) return real_prop_get(name,value);
     for(const hook_prop_t *e=HOOK_PROPS;e->key;e++){
@@ -1763,6 +1782,8 @@ typedef jint (*JNI_OnLoad_t)(JavaVM*,void*);
 
 __attribute__((visibility("default")))
 jint JNI_OnLoad(JavaVM *vm,void *reserved){
+    JUNK_INSN();   /* [P2] */
+    JUNK_INSN2();   /* [P2] */
     /* 诊断: 确认 JNI_OnLoad 是否被调用 */
     hook_log("[JNI] JNI_OnLoad called, g_real_qimei_handle=");
     hook_log(g_real_qimei_handle ? "set" : "NULL");
