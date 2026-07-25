@@ -4,7 +4,7 @@ NDK ?= $(HOME)/Android/Sdk/ndk/26.3.11579264
 TARGET = aarch64-linux-android21
 CC = $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/$(TARGET)-clang
 CFLAGS_STATIC = -static -Os -Wall -fno-stack-protector -fomit-frame-pointer
-CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector
+CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION=8
 
 all: forge libforgehook.so touch_injector injector forge_monitor
 

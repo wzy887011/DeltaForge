@@ -1,9 +1,13 @@
 // ============================================================
-// libforgehook.c v7.1 — LD_PRELOAD 注入库
+// libforgehook.c v8.0 — LD_PRELOAD 注入库
 // Android syscall 拦截 + 属性模拟 + GPU 适配 + 文件伪造
 // 编译: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl -lpthread
 // v7.1 新增: CRYPT_STR 加密宏 (P0) / 标识符随机化 (P1) / JUNK_INSN (P2)
 //           mremap 匿名重映射 (P3) / 属性流量混淆 (P4)
+// v8.0 新增: FIX-A ACQUIRE原子读 / FIX-B constructor(50)动态扩容
+//           FIX-C maps无上限缓冲 / NEW-1 statx+faccessat2 hook
+//           NEW-2 getdents64 memfd过滤 / NEW-3 smaps_rollup+numa_maps
+//           NEW-4 pattern_scan_seq多指令扫描 / NEW-5 chainload后删磁盘so
 // ============================================================
 
 #define _GNU_SOURCE
@@ -202,9 +206,24 @@ static void _hide_self_from_maps(void) {
     int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
     if (rfd < 0) { hook_log("[CTOR] 50 maps open FAILED\n"); return; }
 
-    char buf[65536]; ssize_t nr = syscall(SYS_read, rfd, buf, sizeof(buf)-1);
+    /* [v8 FIX-B] 动态扩容替代 64KB 栈缓冲 — 大型游戏进程 maps 可超 64KB */
+    size_t cap = 131072; /* 128KB 起步 */
+    char *buf = NULL;
+    ssize_t nr = 0;
+    while (cap <= 4 * 1024 * 1024) {
+        if (buf) munmap(buf, cap / 2 + 1);
+        buf = (char *)mmap(NULL, cap + 1, PROT_READ|PROT_WRITE,
+                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (buf == MAP_FAILED) { buf = NULL; break; }
+        if (lseek(rfd, 0, SEEK_SET) != 0) break;
+        nr = 0; ssize_t n;
+        while ((n = (ssize_t)syscall(SYS_read, rfd, buf + nr,
+                                     cap - (size_t)nr)) > 0) nr += n;
+        if ((size_t)nr < cap) break;
+        cap *= 2;
+    }
     syscall(SYS_close, rfd);
-    if (nr <= 0) return;
+    if (!buf || nr <= 0) { if (buf && buf != MAP_FAILED) munmap(buf, cap+1); return; }
     buf[nr] = '\0';
 
     char *line = buf;
@@ -249,6 +268,7 @@ static void _hide_self_from_maps(void) {
         }
         *eol = '\n'; line = eol + 1;
     }
+    munmap(buf, cap + 1); /* [v8 FIX-B] 释放动态缓冲 */
     hook_log("[CTOR] 50 _hide_self_from_maps done\n");
 }
 
@@ -381,6 +401,12 @@ static void _do_chainload(void) {
     g_real_qimei_handle = h;
     forge_log_raw("chainload: dlopen SUCCESS\n");
     hook_log("[chainload] done\n");
+    /* [v8 NEW-5] dlopen 后立即删除磁盘文件 — so 已映射到内存，删 inode 不影响运行
+     * 防: tersafe 通过 /data/app/ 路径扫描发现 libtdmqimei_real.so 磁盘文件 */
+    if (g_real_qimei_path[0]) {
+        syscall(SYS_unlinkat, AT_FDCWD, g_real_qimei_path, 0);
+        hook_log("[chainload] disk so unlinked\n");
+    }
 }
 
 __attribute__((constructor(47)))
@@ -495,6 +521,19 @@ static const char *get_proc_status(size_t *out_len) {
 /* /proc/self/environ — 清空，隐藏 LD_PRELOAD 等注入痕迹 */
 static const char OVERRIDE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/data\0\0";
 
+/* [v8 NEW-3] /proc/self/numa_maps — 返回空，防 NUMA 拓扑探测 */
+static const char OVERRIDE_NUMA_MAPS[]="";
+/* [v8 NEW-3] /proc/self/smaps_rollup — 极简 rollup 防内存布局分析 */
+static const char OVERRIDE_SMAPS_ROLLUP[]=
+"00400000-7fc0000000 ---p 00000000 00:00 0\n"
+"Rss:           458752 kB\nPss:           224768 kB\n"
+"Shared_Clean:       0 kB\nShared_Dirty:       0 kB\n"
+"Private_Clean:  65536 kB\nPrivate_Dirty: 393216 kB\n"
+"Referenced:    458752 kB\nAnonymous:     393216 kB\n"
+"AnonHugePages:      0 kB\nShmemPmdMapped:     0 kB\n"
+"Shared_Hugetlb:     0 kB\nPrivate_Hugetlb:    0 kB\n"
+"Swap:               0 kB\nSwapPss:            0 kB\nLocked:             0 kB\n";
+
 /* /proc/net/tcp — 空响应，不暴露调试端口 */
 static const char OVERRIDE_NET_TCP[]=
 "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
@@ -601,6 +640,9 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/proc/self/attr/current","u:r:untrusted_app:s0:c180,c256,c512,c768\n",41},
     {"/attr/current",         "u:r:untrusted_app:s0:c180,c256,c512,c768\n",41},
     {"/fdinfo/",           "pos:\t0\nflags:\t0102002\nmnt_id:\t25\nino:\t0\n", 40},
+    /* [v8 NEW-3] smaps_rollup + numa_maps 显式覆盖 */
+    {"/smaps_rollup",     OVERRIDE_SMAPS_ROLLUP, sizeof(OVERRIDE_SMAPS_ROLLUP)-1},
+    {"/numa_maps",        OVERRIDE_NUMA_MAPS,    1},
     {NULL,NULL,0}
 };
 
@@ -716,11 +758,11 @@ static int make_filtered_maps_fd(void) {
     int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
     if (rfd < 0) return -1;
 
-    /* 动态扩容: 从 256KB 开始，不够则翻倍，上限 2MB */
+    /* [v8 FIX-C] 动态扩容无上限 — 移除 2MB 硬限，大型游戏 maps 可达数 MB */
     size_t cap = 262144;
     char *raw = NULL;
     ssize_t total = 0;
-    while (cap <= 2 * 1024 * 1024) {
+    while (1) {
         if (lseek(rfd, 0, SEEK_SET) != 0) break;
         raw = (char *)mmap(NULL, cap + 1, PROT_READ|PROT_WRITE,
                            MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
@@ -730,8 +772,8 @@ static int make_filtered_maps_fd(void) {
         while ((n = (ssize_t)syscall(SYS_read, rfd, raw+total,
                                      cap-(size_t)total)) > 0)
             total += n;
-        if ((size_t)total < cap) break;
-        munmap(raw, cap + 1); raw = NULL; cap *= 2;
+        if ((size_t)total < cap) break; /* 没读满，说明已全部读取 */
+        munmap(raw, cap + 1); raw = NULL; cap *= 2; /* 翻倍继续 */
     }
     syscall(SYS_close, rfd);
     if (!raw || total <= 0) { if (raw) munmap(raw, cap+1); return -1; }
@@ -795,6 +837,11 @@ static int make_filtered_maps_fd(void) {
  * ============================================================ */
 static volatile int g_hooks_ready = 0;
 
+/* [v8 FIX-A] ACQUIRE 原子读 — ARM64 弱内存序下确保 patch 线程的
+ * g_hooks_ready=1 (RELEASE) 写入对所有 hook 线程可见。
+ * volatile 不提供内存屏障，仅保证编译器不优化掉该次读取。 */
+#define HOOKS_READY() __atomic_load_n(&g_hooks_ready, __ATOMIC_ACQUIRE)
+
 #define INIT() do{ \
     if(!_open)_open=(open_t)dlsym(RTLD_NEXT,"open"); \
     if(!_openat)_openat=(openat_t)dlsym(RTLD_NEXT,"openat"); \
@@ -810,7 +857,7 @@ int open(const char *p,int flags,...){
     JUNK_INSN();   /* [P2] 破坏静态特征码 */
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
-    if(!g_hooks_ready) return _open(p,flags,m);
+    if(!HOOKS_READY()) return _open(p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     /* [v7.0 P0-2] smaps 动态过滤 (同 maps 逻辑) */
@@ -836,7 +883,7 @@ int openat(int dir,const char *p,int flags,...){
     JUNK_INSN2();   /* [P2] */
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
-    if(!g_hooks_ready) return _openat(dir,p,flags,m);
+    if(!HOOKS_READY()) return _openat(dir,p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     if(p && strstr(p,"smaps") && strstr(p,"/proc/")){
@@ -857,7 +904,7 @@ int openat(int dir,const char *p,int flags,...){
 
 FILE *fopen(const char *p,const char *m){
     INIT();
-    if(!g_hooks_ready) return _fopen(p,m);
+    if(!HOOKS_READY()) return _fopen(p,m);
     if(hidden(p)){errno=ENOENT;return NULL;}
     if(null_redir(p)){
         /* 写入模式 → /dev/null；读取模式 → 空内存 */
@@ -870,11 +917,62 @@ FILE *fopen(const char *p,const char *m){
     return _fopen(p,m);
 }
 
-int access(const char *p,int m){INIT();if(!g_hooks_ready) return _access(p,m);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("access",p);return _access(p,m);}
-int stat(const char *p,struct stat *b){INIT();if(!g_hooks_ready) return _stat(p,b);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("stat",p);return _stat(p,b);}
-int lstat(const char *p,struct stat *b){INIT();if(!g_hooks_ready) return _lstat(p,b);if(hidden(p)){errno=ENOENT;return -1;}return _lstat(p,b);}
-ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(!g_hooks_ready) return _readlink(p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
-ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(!g_hooks_ready) return _readlinkat(dir,p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
+int access(const char *p,int m){INIT();if(!HOOKS_READY()) return _access(p,m);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("access",p);return _access(p,m);}
+int stat(const char *p,struct stat *b){INIT();if(!HOOKS_READY()) return _stat(p,b);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("stat",p);return _stat(p,b);}
+int lstat(const char *p,struct stat *b){INIT();if(!HOOKS_READY()) return _lstat(p,b);if(hidden(p)){errno=ENOENT;return -1;}return _lstat(p,b);}
+ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(!HOOKS_READY()) return _readlink(p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
+ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(!HOOKS_READY()) return _readlinkat(dir,p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
+
+/* [v8 NEW-1] statx syscall hook
+ * Android 5.10+ 内核优先使用 statx(291) 替代 stat/lstat。
+ * 不 hook 会导致 tersafe 通过 statx 探测到我们隐藏的路径。*/
+#ifndef SYS_statx
+#define SYS_statx 291
+#endif
+long statx(int dirfd, const char *path, int flags,
+           unsigned int mask, void *statxbuf) {
+    if (!HOOKS_READY())
+        return syscall(SYS_statx, dirfd, path, flags, mask, statxbuf);
+    if (path && hidden(path)) { errno = ENOENT; return -1; }
+    return syscall(SYS_statx, dirfd, path, flags, mask, statxbuf);
+}
+
+/* [v8 NEW-1] faccessat2 syscall hook
+ * glibc 2.33+ / Android 12+ 的 access() 内部改用 faccessat2(439)。
+ * 直接 SVC 调用 faccessat2 可绕过 libc access() 的 PLT hook。*/
+long faccessat2(int dirfd, const char *path, int mode, int flags) {
+    if (!HOOKS_READY())
+        return syscall(ARM64_NR_FACCESSAT2, dirfd, path, mode, flags);
+    if (path && hidden(path)) { errno = ENOENT; return -1; }
+    return syscall(ARM64_NR_FACCESSAT2, dirfd, path, mode, flags);
+}
+
+/* [v8 NEW-2] getdents64 syscall hook
+ * 过滤 /proc/<pid>/fd 目录中的 "memfd:" 和 "forgehook" 条目。
+ * 防: tersafe 枚举 /proc/self/fd 发现注入库和匿名内存文件描述符。*/
+typedef struct {
+    uint64_t d_ino; int64_t d_off; uint16_t d_reclen;
+    uint8_t d_type; char d_name[1];
+} lde64_t;
+
+long getdents64(int fd, void *dirp, size_t count) {
+    long nread = syscall(ARM64_NR_GETDENTS64, fd, dirp, count);
+    if (!HOOKS_READY() || nread <= 0) return nread;
+    long pos = 0, out_len = 0;
+    while (pos < nread) {
+        lde64_t *d = (lde64_t *)((char *)dirp + pos);
+        pos += d->d_reclen;
+        const char *n = d->d_name;
+        if (strstr(n, "memfd:") || strstr(n, "forgehook") ||
+            strstr(n, "fh_") || strstr(n, "ac_") || strstr(n, "mp_"))
+            continue;
+        /* 如果出现空洞则压缩，否则原地跳过 */
+        if (out_len != (long)((char *)d - (char *)dirp))
+            memmove((char *)dirp + out_len, d, (size_t)d->d_reclen);
+        out_len += d->d_reclen;
+    }
+    return out_len;
+}
 
 /* tersafe 代码段范围 — 用于 tgkill/exit_group 调用方检测 */
 static uintptr_t   g_ts_text_start = 0;
@@ -891,7 +989,7 @@ static kill_t   _kill_fn = NULL;
  *       来自 tersafe 的任何 sig(除 0/SIGCHLD/SIGPIPE) 都被丢弃。*/
 int tgkill(pid_t tgid, pid_t tid, int sig) {
     if (!_tgkill) _tgkill = (tgkill_t)dlsym(RTLD_NEXT, "tgkill");
-    if (!g_hooks_ready) return _tgkill ? _tgkill(tgid, tid, sig) : 0;
+    if (!HOOKS_READY()) return _tgkill ? _tgkill(tgid, tid, sig) : 0;
     /* 检查调用方是否在 libtersafe 代码段 */
     if (g_ts_text_start) {
         JUNK_INSN2();   /* [P2] */
@@ -907,7 +1005,7 @@ int tgkill(pid_t tgid, pid_t tid, int sig) {
 
 int kill(pid_t pid, int sig) {
     if (!_kill_fn) _kill_fn = (kill_t)dlsym(RTLD_NEXT, "kill");
-    if (!g_hooks_ready) return _kill_fn ? _kill_fn(pid, sig) : 0;
+    if (!HOOKS_READY()) return _kill_fn ? _kill_fn(pid, sig) : 0;
     if (sig == 9 || sig == 15) return 0;
     return _kill_fn ? _kill_fn(pid, sig) : 0;
 }
@@ -928,7 +1026,7 @@ void exit_group(int status) {
             hook_log("[exit_group] blocked (tersafe caller)\n");
             return;
         }
-    } else if (!g_hooks_ready) {
+    } else if (!HOOKS_READY()) {
         /* tersafe 地址范围未知且 hooks 未激活，透传 */
         if (_exit_group) _exit_group(status);
         return;
@@ -983,7 +1081,7 @@ static getenv_t _getenv = NULL;
 
 char *getenv(const char *name) {
     if (!_getenv) _getenv = (getenv_t)dlsym(RTLD_NEXT, "getenv");
-    if (!g_hooks_ready) return _getenv ? _getenv(name) : NULL;
+    if (!HOOKS_READY()) return _getenv ? _getenv(name) : NULL;
     if (name && (strcmp(name, "LD_PRELOAD") == 0 ||
                  strcmp(name, "LD_LIBRARY_PATH") == 0 ||
                  strcmp(name, "ANDROID_ROOT") == 0))
@@ -1010,7 +1108,7 @@ int dl_iterate_phdr(int (*cb)(struct dl_phdr_info *, size_t, void *), void *data
     if (!_dl_iterate_phdr)
         _dl_iterate_phdr = (dl_iterate_phdr_t)dlsym(RTLD_NEXT, "dl_iterate_phdr");
     if (!_dl_iterate_phdr) return 0;
-    if (!g_hooks_ready) return _dl_iterate_phdr(cb, data);
+    if (!HOOKS_READY()) return _dl_iterate_phdr(cb, data);
     struct _phdr_wrap w = {cb, data};
     return _dl_iterate_phdr(_phdr_filter, &w);
 }
@@ -1031,7 +1129,7 @@ void *dlopen(const char *filename, int flags) {
         if (flags & RTLD_NOLOAD) return g_real_qimei_handle;  /* 探测 → 返回原版 */
         return g_real_qimei_handle;  /* 直接返回 chainloaded handle */
     }
-    if (!g_hooks_ready) return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
+    if (!HOOKS_READY()) return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
     if (filename) {
         if (strstr(filename, C_forgehook) ||
             strstr(filename, C_forgehook_real) ||
@@ -1069,7 +1167,7 @@ int dladdr(const void *addr, Dl_info *info) {
     if (!_dladdr_real)
         _dladdr_real = (dladdr_t)dlsym(RTLD_NEXT, "dladdr");
     if (!_dladdr_real) return 0;
-    if (!g_hooks_ready) return _dladdr_real(addr, info);
+    if (!HOOKS_READY()) return _dladdr_real(addr, info);
     int rc = _dladdr_real(addr, info);
     if (rc && info && info->dli_fname) {
         if (strstr(info->dli_fname, C_forgehook) ||
@@ -1105,7 +1203,7 @@ static int dname_filtered(const char *n) {
 
 DIR *opendir(const char *name) {
     if (!_opendir) _opendir = (opendir_t)dlsym(RTLD_NEXT, "opendir");
-    if (!g_hooks_ready) return _opendir ? _opendir(name) : NULL;
+    if (!HOOKS_READY()) return _opendir ? _opendir(name) : NULL;
     if (hidden(name)) { errno = ENOENT; return NULL; }
     return _opendir ? _opendir(name) : NULL;
 }
@@ -1113,7 +1211,7 @@ DIR *opendir(const char *name) {
 struct dirent *readdir(DIR *dirp) {
     if (!_readdir) _readdir = (readdir_t)dlsym(RTLD_NEXT, "readdir");
     if (!_readdir) return NULL;
-    if (!g_hooks_ready) return _readdir(dirp);
+    if (!HOOKS_READY()) return _readdir(dirp);
     struct dirent *ent;
     while ((ent = _readdir(dirp)) != NULL) {
         if (!dname_filtered(ent->d_name)) break;
@@ -1128,7 +1226,7 @@ static readdir64_t _readdir64 = NULL;
 struct dirent64 *readdir64(DIR *dirp) {
     if (!_readdir64) _readdir64 = (readdir64_t)dlsym(RTLD_NEXT, "readdir64");
     if (!_readdir64) return NULL;
-    if (!g_hooks_ready) return _readdir64(dirp);
+    if (!HOOKS_READY()) return _readdir64(dirp);
     struct dirent64 *ent;
     while ((ent = _readdir64(dirp)) != NULL) {
         if (!dname_filtered(ent->d_name)) break;
@@ -1193,7 +1291,7 @@ int getaddrinfo(const char *node, const char *service,
                 const void *hints, void *res) {
     if (!_getaddrinfo)
         _getaddrinfo = (getaddrinfo_t)dlsym(RTLD_NEXT, "getaddrinfo");
-    if (!g_hooks_ready) return _getaddrinfo ? _getaddrinfo(node, service, hints, res) : -2;
+    if (!HOOKS_READY()) return _getaddrinfo ? _getaddrinfo(node, service, hints, res) : -2;
     if (node) {
         for (const char **d = AC_DOMAINS; *d; d++) {
             if (strstr(node, *d)) {
@@ -1231,7 +1329,7 @@ static int is_ac_ip(const struct sockaddr *addr) {
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!_connect_orig)
         _connect_orig = (connect_t)dlsym(RTLD_NEXT, "connect");
-    if (!g_hooks_ready) return _connect_orig ? _connect_orig(sockfd, addr, addrlen) : -1;
+    if (!HOOKS_READY()) return _connect_orig ? _connect_orig(sockfd, addr, addrlen) : -1;
     if (is_ac_ip(addr)) {
         hook_log("[net] blocked connect to AC IP\n");
         errno = ECONNREFUSED;
@@ -1377,6 +1475,41 @@ static uint64_t pattern_scan4(uintptr_t base, uint32_t pattern, size_t max_scan)
     return 0;
 }
 
+/* [v8 NEW-4] pattern_scan_seq — 多指令序列扫描 (带掩码)
+ * 比 pattern_scan4 更鲁棒：支持 n 条指令序列 + 每条独立掩码。
+ * 可以掩掉 BL/B 指令的相对偏移字段，只匹配 opcode 高位。
+ * 返回序列第一条指令的 offset (相对 base)，0 表示未找到。
+ *
+ * insns[i]: 目标指令值; masks[i]: 比较掩码 (0=通配)
+ * sig_delta: 序列匹配位置到 patch 点的字节偏移 */
+static uint64_t pattern_scan_seq(uintptr_t base,
+                                  const uint32_t *insns,
+                                  const uint32_t *masks,
+                                  int n, size_t max_scan,
+                                  int sig_delta) {
+    if (!base || n <= 0 || !insns || max_scan < (size_t)(n * 4)) return 0;
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
+    if (fd < 0) return 0;
+    for (size_t off = 0; off + (size_t)(n * 4) <= max_scan; off += 4) {
+        int match = 1;
+        for (int k = 0; k < n && match; k++) {
+            uint32_t val = 0;
+            if (syscall(__NR_pread64, fd, &val, 4,
+                        (off_t)(base + off + (size_t)(k * 4))) != 4) {
+                match = 0; break;
+            }
+            uint32_t m = masks ? masks[k] : 0xFFFFFFFFu;
+            if ((val & m) != (insns[k] & m)) match = 0;
+        }
+        if (match) {
+            syscall(SYS_close, fd);
+            return (uint64_t)((int64_t)off + sig_delta);
+        }
+    }
+    syscall(SYS_close, fd);
+    return 0;
+}
+
 /* 回退: 如果硬编码偏移处不是预期指令，用 pattern scan 重新定位 */
 static uint64_t resolve_patch_offset(uintptr_t base, uint64_t hard_off,
                                       uint32_t expected_insn, const uint32_t *sig, int sig_len) {
@@ -1423,7 +1556,7 @@ static void *_adjust_code_thread(void *unused) {
         if (base) break;
         if (retry == 0) hook_log("[patch] waiting for target module...\n");
         /* [v7.1 Fix 1] 超时看门狗: 30s 未找到 tersafe 也激活 hook */
-        if (retry >= 150 && !g_hooks_ready && time(NULL) - g_watchdog_start > 30) {
+        if (retry >= 150 && !HOOKS_READY() && time(NULL) - g_watchdog_start > 30) {
             __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
             hook_log("[hooks] v7.1 activated (30s watchdog)\n");
         }
@@ -1804,7 +1937,7 @@ static void prop_jitter(char *val, int vlen) {
 int __system_property_get(const char *name, char *value) {
     JUNK_INSN();   /* [P2] */
     if (!real_prop_get) real_prop_get = (hook_prop_get_t)dlsym(RTLD_NEXT, "__system_property_get");
-    if (!g_hooks_ready) return real_prop_get(name, value);
+    if (!HOOKS_READY()) return real_prop_get(name, value);
     /* 白名单属性: 固定返回伪造值 */
     for (const hook_prop_t *e = HOOK_PROPS; e->key; e++) {
         if (__builtin_strcmp(name, e->key) == 0) {
