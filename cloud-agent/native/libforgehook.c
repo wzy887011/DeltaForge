@@ -148,13 +148,14 @@ static void _probe_loaded(void) {
     _gen_rand_suffix();
 
     const char *log_paths[] = {
-        C_forgehook_log,            /* 主: /data/local/tmp/ */
-        "/sdcard/forge_hook.log"   /* fallback: sdcard 权限宽松 */
+        "/data/data/com.tencent.tmgp.dfm/files/forge_hook.log", /* 第一优先: app 自身目录，永远可写 */
+        C_forgehook_log,                                          /* 第二: /data/local/tmp/ */
+        "/sdcard/forge_hook.log"                                  /* fallback: sdcard */
     };
     const char *msg = "[CTOR] 48 probe v7.1 enter\n";
     size_t mlen = 0; while (msg[mlen]) mlen++;
 
-    for (int lp = 0; lp < 2; lp++) {
+    for (int lp = 0; lp < 3; lp++) {
         int fd = (int)syscall(SYS_openat, AT_FDCWD, log_paths[lp],
             O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd >= 0) {
@@ -164,7 +165,7 @@ static void _probe_loaded(void) {
     }
     msg = "[CTOR] 48 probe v7.1 done\n";
     mlen = 0; while (msg[mlen]) mlen++;
-    for (int lp = 0; lp < 2; lp++) {
+    for (int lp = 0; lp < 3; lp++) {
         int fd = (int)syscall(SYS_openat, AT_FDCWD, log_paths[lp],
             O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd >= 0) {
@@ -1471,13 +1472,18 @@ static void _patch_gpu_driver(void) {
  * the module is loaded when using library hijack injection).
  * ============================================================ */
 
-/* [v7.1] hook_log — 使用加密路径 + 0666 权限确保 app 进程可写 */
+/* [v8.3] hook_log — 三路径优先级: app自身目录(最可靠) → /data/local/tmp → /sdcard */
 static void hook_log(const char *msg) {
+    /* 第一优先: app 自身 files 目录，游戏进程永远有写权限 */
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
-        C_forgehook_log,
+        "/data/data/com.tencent.tmgp.dfm/files/forge_hook.log",
         O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd < 0) {
-        /* fallback: /sdcard 权限宽松 */
+        fd = (int)syscall(SYS_openat, AT_FDCWD,
+            C_forgehook_log,
+            O_WRONLY | O_CREAT | O_APPEND, 0666);
+    }
+    if (fd < 0) {
         fd = (int)syscall(SYS_openat, AT_FDCWD,
             "/sdcard/forge_hook.log",
             O_WRONLY | O_CREAT | O_APPEND, 0666);
