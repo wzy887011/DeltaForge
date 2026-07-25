@@ -184,25 +184,71 @@ static void _probe_loaded(void) {
     }
 }
 
-/* ---- maps filter — priority 50: hide instrumentation before chainload ---- */
+/* [v7.1 P3] constructor(50) — mremap 匿名重映射
+ * 防: /proc/self/maps 扫描 — madvise(DONTDUMP) 不改变 maps 路径条目，
+ *     任何读 maps 的检测仍能看到 "libforgehook" 字样(在我们的过滤器之外的地方)。
+ * 方案: 对每个包含 libforgehook 的 RW/RX 段:
+ *   1. mmap 一块等大的匿名内存
+ *   2. memcpy 原内容 → 匿名页
+ *   3. mremap(MREMAP_FIXED|MREMAP_MAYMOVE) 将匿名页移到原地址
+ *   → maps 中该条目变为 "[anon]"，再加上 make_filtered_maps_fd() 作双重防护
+ * 注: 仅在 inject 模式下安全(游戏已初始化)；对 .text 段只做 MADV_DONTDUMP
+ *     不做 mremap(重映射可执行段可能触发 SIGBUS)。 */
 __attribute__((constructor(50)))
 static void _hide_self_from_maps(void) {
     hook_log("[CTOR] 50 _hide_self_from_maps enter\n");
     srand(time(NULL)^getpid()^(long)pthread_self());
-    FILE *maps=fopen(C_maps_path,"r");
-    if(!maps){hook_log("[CTOR] 50 fopen maps FAILED\n");return;}
-    char line[512];
-    while(fgets(line,sizeof(line),maps)){
-        if(strstr(line,C_forgehook)||strstr(line,"libqimei_")){
-            long addr=strtol(line,NULL,16);
-            char *dash=strchr(line,'-');
-            long end=dash?strtol(dash+1,NULL,16):addr;
-            size_t len=(size_t)(end-addr);
-            if(len>0&&len<64*1024*1024)madvise((void*)addr,len,MADV_DONTDUMP);
-            break;
+
+    int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    if (rfd < 0) { hook_log("[CTOR] 50 maps open FAILED\n"); return; }
+
+    char buf[65536]; ssize_t nr = syscall(SYS_read, rfd, buf, sizeof(buf)-1);
+    syscall(SYS_close, rfd);
+    if (nr <= 0) return;
+    buf[nr] = '\0';
+
+    char *line = buf;
+    while (line && *line) {
+        char *eol = __builtin_strchr(line, '\n');
+        if (!eol) break; *eol = '\0';
+
+        if (strstr(line, C_forgehook) || strstr(line, C_qimei_underscore)) {
+            uintptr_t start = (uintptr_t)strtoul(line, NULL, 16);
+            char *dash = __builtin_strchr(line, '-');
+            uintptr_t end = dash ? (uintptr_t)strtoul(dash+1, NULL, 16) : start;
+            size_t len = end - start;
+            char *perm = dash ? __builtin_strchr(dash, ' ') : NULL;
+            int is_exec = perm && perm[1]=='r' && perm[3]=='x'; /* r-xp */
+
+            if (len > 0 && len < 32*1024*1024) {
+                if (is_exec) {
+                    /* 可执行段: 只做 MADV_DONTDUMP，不 mremap */
+                    madvise((void*)start, len, MADV_DONTDUMP);
+                } else {
+                    /* 数据段: mremap → 匿名页，maps 条目变为 [anon] */
+                    void *anon = mmap(NULL, len, PROT_READ|PROT_WRITE,
+                                      MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+                    if (anon != MAP_FAILED) {
+                        memcpy(anon, (void*)start, len);
+                        /* mprotect 原段为 RW 以允许 mremap 覆盖 */
+                        mprotect((void*)start, len, PROT_READ|PROT_WRITE);
+                        void *res = mremap(anon, len, len,
+                                           MREMAP_FIXED|MREMAP_MAYMOVE,
+                                           (void*)start);
+                        if (res == MAP_FAILED) {
+                            /* mremap 失败 fallback DONTDUMP */
+                            munmap(anon, len);
+                            madvise((void*)start, len, MADV_DONTDUMP);
+                            hook_log("[P3] mremap FAILED, fallback DONTDUMP\n");
+                        } else {
+                            hook_log("[P3] mremap anon ok\n");
+                        }
+                    }
+                }
+            }
         }
+        *eol = '\n'; line = eol + 1;
     }
-    fclose(maps);
     hook_log("[CTOR] 50 _hide_self_from_maps done\n");
 }
 
