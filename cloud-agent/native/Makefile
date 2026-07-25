@@ -66,6 +66,13 @@ host:
 termux:
 	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge
 	clang -shared -fPIC -Os -Wall -DFORGEHOOK_VERSION=8 libforgehook.c -o libforgehook.so -ldl
+	@if command -v patchelf >/dev/null 2>&1; then \
+		patchelf --remove-rpath libforgehook.so; \
+		echo "[termux] RUNPATH stripped from libforgehook.so"; \
+	else \
+		echo "[termux] WARNING: patchelf not found — run: pkg install patchelf"; \
+		echo "[termux] RUNPATH may cause dlopen failure in Android app namespace"; \
+	fi
 	clang -Os -Wall touch_injector.c -o touch_injector
 	clang -Os -Wall injector.c -o injector -ldl
 	clang -Os -Wall forge_monitor.c -o forge_monitor
