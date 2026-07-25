@@ -1748,31 +1748,101 @@ static const build_field_t BUILD_FIELDS[]={
 typedef int (*hook_prop_get_t)(const char*,char*);
 static hook_prop_get_t real_prop_get=NULL;
 
-int __system_property_get(const char *name,char *value){
+/* [v7.1 P4] 属性查询流量混淆
+ * 防: 游戏通过查询频率/顺序指纹识别注入（正常游戏不会每秒查同一属性3次以上）。
+ * 方案:
+ *   1. 对非白名单属性: 缓存第一次真实值，后续直接返回缓存（延迟取一次）
+ *   2. 同一属性在 1s 内查询 >3 次: 返回抖动值（尾字符 ±1 或大小写变化）
+ *      注: HOOK_PROPS 已覆盖的白名单属性不受抖动影响（固定返回伪造值）
+ *   3. forge_audit 改为只记录从未出现过的属性（减少 I/O） */
+#define PROP_CACHE_CAP 32
+typedef struct {
+    char key[96];
+    char val[92];
+    int  vlen;
+    int  count;    /* 查询次数（本秒内）*/
+    time_t ts;     /* 最近查询时间 */
+} prop_cache_t;
+static prop_cache_t g_prop_cache[PROP_CACHE_CAP];
+static int g_prop_cache_n = 0;
+
+/* 查找缓存项 */
+static prop_cache_t *prop_cache_find(const char *name) {
+    for (int i = 0; i < g_prop_cache_n; i++)
+        if (!__builtin_strcmp(g_prop_cache[i].key, name)) return &g_prop_cache[i];
+    return NULL;
+}
+
+/* 添加缓存 */
+static prop_cache_t *prop_cache_add(const char *name, const char *val, int vlen) {
+    if (g_prop_cache_n >= PROP_CACHE_CAP) return NULL;
+    prop_cache_t *e = &g_prop_cache[g_prop_cache_n++];
+    int kl = (int)__builtin_strlen(name);
+    if (kl >= 96) kl = 95;
+    __builtin_memcpy(e->key, name, (size_t)kl); e->key[kl] = '\0';
+    int vl = vlen < 92 ? vlen : 91;
+    __builtin_memcpy(e->val, val, (size_t)vl); e->val[vl] = '\0';
+    e->vlen = vl; e->count = 1; e->ts = time(NULL);
+    return e;
+}
+
+/* 对值末尾字符做微小抖动（不影响可用性）*/
+static void prop_jitter(char *val, int vlen) {
+    if (vlen <= 0) return;
+    int last = vlen - 1;
+    /* 大写末位字母: 转小写 */
+    if (val[last] >= 'A' && val[last] <= 'Z') { val[last] |= 0x20; return; }
+    /* 小写末位字母: 转大写 */
+    if (val[last] >= 'a' && val[last] <= 'z') { val[last] &= ~0x20; return; }
+    /* 数字末位 0-8: +1; 9 → 0 */
+    if (val[last] >= '0' && val[last] <= '9') {
+        val[last] = val[last] == '9' ? '0' : val[last]+1; return;
+    }
+    /* 其他: 不动 */
+}
+
+int __system_property_get(const char *name, char *value) {
     JUNK_INSN();   /* [P2] */
-    if(!real_prop_get)real_prop_get=(hook_prop_get_t)dlsym(RTLD_NEXT,"__system_property_get");
-    if(!g_hooks_ready) return real_prop_get(name,value);
-    for(const hook_prop_t *e=HOOK_PROPS;e->key;e++){
-        if(strcmp(name,e->key)==0){
-            if(e->value[0]){
-                size_t l=strlen(e->value);
-                if(value){memcpy(value,e->value,l);value[l]='\0';}
+    if (!real_prop_get) real_prop_get = (hook_prop_get_t)dlsym(RTLD_NEXT, "__system_property_get");
+    if (!g_hooks_ready) return real_prop_get(name, value);
+    /* 白名单属性: 固定返回伪造值 */
+    for (const hook_prop_t *e = HOOK_PROPS; e->key; e++) {
+        if (__builtin_strcmp(name, e->key) == 0) {
+            if (e->value[0]) {
+                size_t l = __builtin_strlen(e->value);
+                if (value) { __builtin_memcpy(value, e->value, l); value[l] = '\0'; }
                 return (int)l;
             }
-            if(value) value[0]='\0';
+            if (value) value[0] = '\0';
             return 0;
         }
     }
-    /* Fallback: any ro.build.* / ro.product.* not in HOOK_PROPS → blank.
-     * Prevents accidental leak of real device identity through unlisted props. */
-    if(name && (strncmp(name,"ro.build.",9)==0 ||
-                strncmp(name,"ro.product.",11)==0)){
-        if(value) value[0]='\0';
-        return 0;
+    /* ro.build.* / ro.product.* 未在白名单 → 返回空 */
+    if (name && (strncmp(name,"ro.build.",9)==0 || strncmp(name,"ro.product.",11)==0)) {
+        if (value) value[0] = '\0'; return 0;
     }
-    /* Audit unlisted properties for discovery */
-    forge_audit("prop_get",name);
-    return real_prop_get(name,value);
+    /* [P4] 非白名单属性: 缓存 + 频率抖动 */
+    prop_cache_t *ce = prop_cache_find(name);
+    if (ce) {
+        time_t now = time(NULL);
+        if (now == ce->ts) ce->count++;
+        else { ce->count = 1; ce->ts = now; }
+        if (value) {
+            __builtin_memcpy(value, ce->val, (size_t)ce->vlen);
+            value[ce->vlen] = '\0';
+            if (ce->count > 3) prop_jitter(value, ce->vlen); /* 高频抖动 */
+        }
+        return ce->vlen;
+    }
+    /* 第一次查询: 获取真实值并缓存 */
+    char tmp[92] = {0};
+    int real_len = real_prop_get(name, tmp);
+    if (real_len > 0 && real_len < 92) {
+        prop_cache_add(name, tmp, real_len);
+        forge_audit("prop_get", name); /* [P4] 只在首次查询时审计 */
+    }
+    if (value) { __builtin_memcpy(value, tmp, (size_t)real_len); value[real_len] = '\0'; }
+    return real_len;
 }
 
 /* ---- JNI helpers ---- */
