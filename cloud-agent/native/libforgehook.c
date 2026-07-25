@@ -139,20 +139,6 @@ static void _gen_rand_suffix(void) {
 }
 
 /* 辅助: 将后缀拼到 base 后，写入 out_buf */
-static void make_sfx_name(const char *base, char *out_buf, size_t out_sz) {
-    size_t bl = 0; while (base[bl]) bl++;
-    size_t sl = 6; /* g_rand_sfx 长度固定 6 */
-    if (bl + sl + 1 > out_sz) { /* 截断保护 */
-        size_t room = (out_sz > 1) ? out_sz - 1 : 0;
-        for (size_t i = 0; i < room && i < bl; i++) out_buf[i] = base[i];
-        out_buf[room] = '\0';
-        return;
-    }
-    for (size_t i = 0; i < bl; i++) out_buf[i] = base[i];
-    for (size_t i = 0; i < sl; i++) out_buf[bl + i] = g_rand_sfx[i];
-    out_buf[bl + sl] = '\0';
-}
-
 /* [v7.1 Fix 2] constructor(48) — 双路径日志 + P1 随机后缀生成
  * v7.0 问题: 仅写 /data/local/tmp/forge_hook.log (权限 0600)。
  * 修复: 双路径 (主+fallback)，权限 0666; 同时初始化随机后缀。 */
@@ -1679,6 +1665,7 @@ static void *_adjust_code_thread(void *unused) {
                 kKillChain[i].seq_len,   kKillChain[i].seq_delta);
             if (patch_insn(base + off, kKillChain[i].insn) == 0) ok2++;
         }
+        (void)ok2;
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
         hook_log("[hooks] v7.1 activated (retry) ok2=");
     }

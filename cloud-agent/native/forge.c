@@ -744,7 +744,7 @@ static int inject_hook(pid_t pid) {
     }
     char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
-    char *const argv[] = { C_injector_path, pid_str, hook_path, NULL };
+    const char *const argv[] = { C_injector_path, pid_str, hook_path, NULL };
     pid_t child = fork();
     if (child < 0) { ERR("fork failed: %s", strerror(errno)); return -1; }
     if (child == 0) {
