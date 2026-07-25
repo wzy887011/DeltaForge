@@ -1504,27 +1504,29 @@ static void hook_log(const char *msg) {
 }
 
 static uintptr_t get_module_base(const char *so_name) {
+    /* [v8.3 fix] 用分块读取替代固定 32KB 缓冲 — UE4 游戏 maps 文件通常 200-500KB */
     int fd = (int)syscall(SYS_openat, AT_FDCWD, C_maps_path, O_RDONLY, 0);
     if (fd < 0) return 0;
-    char buf[32768];
-    ssize_t n = (ssize_t)syscall(SYS_read, fd, buf, sizeof(buf) - 1);
-    syscall(SYS_close, fd);
-    if (n <= 0) return 0;
-    buf[n] = '\0';
-    char *line = buf;
-    while (line && *line) {
-        char *eol = strchr(line, '\n');
-        if (eol) *eol = '\0';
-        if (strstr(line, so_name)) {
-            uintptr_t base = (uintptr_t)strtoul(line, NULL, 16);
-            if (eol) *eol = '\n';
-            return base;
+
+    char chunk[4096];
+    char line[512];
+    int  lp = 0;
+    uintptr_t result = 0;
+    ssize_t n;
+
+    while (!result && (n = (ssize_t)syscall(SYS_read, fd, chunk, sizeof(chunk))) > 0) {
+        for (ssize_t i = 0; i < n && !result; i++) {
+            char c = chunk[i];
+            if (c == '\n' || lp >= (int)sizeof(line) - 1) {
+                line[lp] = '\0'; lp = 0;
+                if (strstr(line, so_name)) {
+                    result = (uintptr_t)strtoul(line, NULL, 16);
+                }
+            } else { line[lp++] = c; }
         }
-        if (!eol) break;
-        *eol = '\n';
-        line = eol + 1;
     }
-    return 0;
+    syscall(SYS_close, fd);
+    return result;
 }
 
 /* AArch64 single-instruction patch
