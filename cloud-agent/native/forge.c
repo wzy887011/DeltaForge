@@ -1185,7 +1185,7 @@ static const char *verify_auth(char *buf) {
     return cmd;
 }
 
-/* ============= TCP JSON 控制接口 ============= */
+/* ============= TCP JSON 控制接口 =============
  * 手机端 app/adb forward 连接 cloud phone 的 9510 端口
  * 协议: 文本行, 以 \n 结尾
  * 命令: ping / prepare / launch / patch / stop / status / clean / adapt
