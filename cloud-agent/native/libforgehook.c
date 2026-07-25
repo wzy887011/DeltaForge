@@ -242,42 +242,42 @@ static int find_self_from_maps(char *out, size_t out_sz) {
  * symbols resolved from OUR so (since we replaced the original).
  * RTLD_GLOBAL chainload of libtdmqimei_real.so in constructor(47)
  * ensures qimei symbols are available for all subsequent loads. */
-__attribute__((constructor(47)))
-static void _chainload_real_qimei(void) {
-    hook_log("[CTOR] 100 _chainload_real_qimei enter\n");
-    char real_path[1024];
-    char self_path[1024];
-    Dl_info info;
-    real_path[0] = '\0';
-    self_path[0] = '\0';
-    if (dladdr((void *)&_chainload_real_qimei, &info) &&
-        info.dli_fname &&
-        dirname_join_real(info.dli_fname, real_path, sizeof(real_path))) {
-        forge_log_raw("chainload: dladdr OK\n");
-    } else if (find_self_from_maps(self_path, sizeof(self_path)) &&
-               dirname_join_real(self_path, real_path, sizeof(real_path))) {
-        forge_log_raw("chainload: /proc/self/maps OK\n");
-    } else {
-        forge_log_raw("chainload: FAILED to resolve own path\n");
-        hook_log("[CTOR] 100 chainload FAILED (no path)\n");
-        return;
-    }
+/* [v7.0 P1-1] constructor(47) 只解析路径，不调 dlopen
+ * 修复: 原版在 constructor 内直接 dlopen，Android 10+ linker 的
+ * g_dl_mutex 不可重入，constructor 持锁期间再 dlopen → 死锁。
+ * dlopen 推迟到后台线程 (_do_chainload)，通过 pthread_once 单次执行。*/
+static char g_real_qimei_path[1024] = {0};
+static pthread_once_t g_chainload_once = PTHREAD_ONCE_INIT;
+
+static void _do_chainload(void) {
+    if (!g_real_qimei_path[0]) { forge_log_raw("chainload: no path\n"); return; }
     dlerror();
-    hook_log("[CTOR] 100 calling dlopen...\n");
-    void *h = dlopen(real_path, RTLD_NOW | RTLD_GLOBAL);
+    void *h = dlopen(g_real_qimei_path, RTLD_NOW | RTLD_GLOBAL);
     if (!h) {
         const char *err = dlerror();
-        hook_log("[CTOR] 100 chainload dlopen FAILED: ");
-        hook_log(err ? err : "(null)");
-        hook_log("\n");
-        hook_log("[CTOR] 100 path tried: ");
-        hook_log(real_path);
-        hook_log("\n");
+        hook_log("[chainload] FAILED: "); hook_log(err ? err : "(null)"); hook_log("\n");
         return;
     }
-    g_real_qimei_handle = h; /* 保存 handle 供 JNI_OnLoad 转发 */
+    g_real_qimei_handle = h;
     forge_log_raw("chainload: dlopen SUCCESS\n");
-    hook_log("[CTOR] 100 _chainload_real_qimei done\n");
+    hook_log("[chainload] done\n");
+}
+
+__attribute__((constructor(47)))
+static void _resolve_qimei_path(void) {
+    hook_log("[CTOR] 47 enter\n");
+    char self_path[1024] = {0};
+    Dl_info info;
+    if (dladdr((void *)&_resolve_qimei_path, &info) && info.dli_fname &&
+        dirname_join_real(info.dli_fname, g_real_qimei_path, sizeof(g_real_qimei_path))) {
+        forge_log_raw("chainload: path via dladdr\n");
+    } else if (find_self_from_maps(self_path, sizeof(self_path)) &&
+               dirname_join_real(self_path, g_real_qimei_path, sizeof(g_real_qimei_path))) {
+        forge_log_raw("chainload: path via maps\n");
+    } else {
+        forge_log_raw("chainload: path unresolved\n");
+    }
+    hook_log("[CTOR] 47 done\n");
 }
 
 /* ---- override data tables ---- */
@@ -342,15 +342,35 @@ static const char OVERRIDE_GPU_MAX[]="680000000\n";
 static const char OVERRIDE_HARDWARE[]="Qualcomm Technologies, Inc Kailua\n";
 static const char OVERRIDE_MACHINE[]="Snapdragon 8+ Gen1\n";
 
-/* /proc/self/status — TracerPid: 0。使用 strstr 匹配以覆盖 /proc/<tid>/status 等变体 */
-static const char OVERRIDE_PROC_STATUS[]=
-"Name:\tGameActivity\nUmask:\t0077\nState:\tS (sleeping)\n"
-"Tgid:\t12345\nNgid:\t0\nPid:\t12345\nPPid:\t1199\nTracerPid:\t0\n"
-"Uid:\t10600\t10600\t10600\t10600\nGid:\t10600\t10600\t10600\t10600\n"
-"FDSize:\t256\nGroups:\t3003 9997 20000\nNStgid:\t12345\nNSpid:\t12345\n"
-"NSpgid:\t12345\nNSsid:\t12345\nVmPeak:\t10485760 kB\nVmSize:\t9437184 kB\n"
-"VmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t524288 kB\nVmRSS:\t458752 kB\n"
-"Threads:\t48\n";
+/* [v7.0 P2-1] /proc/self/status — 动态 PID，消除硬编码 12345 被识别风险 */
+#define PROC_STATUS_FMT \
+"Name:\tGameActivity\nUmask:\t0077\nState:\tS (sleeping)\n" \
+"Tgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t1199\nTracerPid:\t0\n" \
+"Uid:\t10600\t10600\t10600\t10600\nGid:\t10600\t10600\t10600\t10600\n" \
+"FDSize:\t256\nGroups:\t3003 9997 20000\nNStgid:\t%d\nNSpid:\t%d\n" \
+"NSpgid:\t%d\nNSsid:\t%d\nVmPeak:\t10485760 kB\nVmSize:\t9437184 kB\n" \
+"VmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t524288 kB\nVmRSS:\t458752 kB\n" \
+"Threads:\t48\n"
+
+static char g_proc_status_buf[512];
+static int  g_proc_status_len = 0;
+
+static void ensure_proc_status(void) {
+    if (g_proc_status_len > 0) return;
+    pid_t tgid = getpid();
+    pid_t tid  = (pid_t)syscall(SYS_gettid);
+    g_proc_status_len = snprintf(g_proc_status_buf, sizeof(g_proc_status_buf),
+        PROC_STATUS_FMT, tgid, tid, tgid, tid, tgid, tgid);
+    if (g_proc_status_len < 0 || g_proc_status_len >= (int)sizeof(g_proc_status_buf))
+        g_proc_status_len = 0;
+}
+
+/* 兼容原有表引用: 提供指针和长度供 OVERRIDE_FILES 使用 */
+static const char *get_proc_status(size_t *out_len) {
+    ensure_proc_status();
+    if (out_len) *out_len = (size_t)g_proc_status_len;
+    return g_proc_status_buf;
+}
 
 /* /proc/self/environ — 清空，隐藏 LD_PRELOAD 等注入痕迹 */
 static const char OVERRIDE_ENVIRON[]="PATH=/system/bin:/system/xbin\0ANDROID_DATA=/data\0\0";
@@ -439,13 +459,21 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/sys/devices/soc0/machine",OVERRIDE_MACHINE,sizeof(OVERRIDE_MACHINE)-1},
     {"/sys/devices/soc0/family","Snapdragon\n",11},
     {"/sys/class/sensors/","\n",1},
-    {"/proc/self/status",OVERRIDE_PROC_STATUS,sizeof(OVERRIDE_PROC_STATUS)-1},
+    /* /proc/*/status 由 open hook 动态生成（包含真实 PID），此处占位符 */
     {"/proc/net/tcp",OVERRIDE_NET_TCP,sizeof(OVERRIDE_NET_TCP)-1},
     {"/proc/net/tcp6",OVERRIDE_NET_TCP6,sizeof(OVERRIDE_NET_TCP6)-1},
     {"/proc/net/udp",OVERRIDE_NET_UDP,sizeof(OVERRIDE_NET_UDP)-1},
     {"/proc/net/udp6",OVERRIDE_NET_UDP6,sizeof(OVERRIDE_NET_UDP6)-1},
     {"/proc/self/environ",OVERRIDE_ENVIRON,sizeof(OVERRIDE_ENVIRON)-1},
-    {"/status",OVERRIDE_PROC_STATUS,sizeof(OVERRIDE_PROC_STATUS)-1},  /* broad: /proc/PID/status */
+    /* /status 由 open hook 动态处理，确保 Tgid/Pid 为真实值 */
+    /* [v7.0 New] 补全遗漏的 /proc 检测路径 */
+    {"/proc/self/wchan",   "do_epoll_wait\n", 14},
+    {"/wchan",             "do_epoll_wait\n", 14},
+    {"/proc/self/syscall", "7 0x0 0x0 0x0 0x0 0x0 0x0 0x7fff00000000\n", 42},
+    {"/syscall",           "7 0x0 0x0 0x0 0x0 0x0 0x0 0x7fff00000000\n", 42},
+    {"/proc/self/attr/current","u:r:untrusted_app:s0:c180,c256,c512,c768\n",41},
+    {"/attr/current",         "u:r:untrusted_app:s0:c180,c256,c512,c768\n",41},
+    {"/fdinfo/",           "pos:\t0\nflags:\t0102002\nmnt_id:\t25\nino:\t0\n", 40},
     {NULL,NULL,0}
 };
 
@@ -546,47 +574,70 @@ static stat_t _lstat=NULL;
 static readlink_t _readlink=NULL;
 static readlinkat_t _readlinkat=NULL;
 
-/* ---- /proc/self/maps dynamic filter — filter instrumentation at runtime ---- */
+/* [v7.0 P0-2] /proc/self/maps 动态过滤
+ * 修复: 原 char buf[65536] 静态缓冲，大型游戏进程 maps 超 64KB 时被截断，
+ * 导致注入痕迹残留在超出部分。新版本动态扩容，最多读取 2MB。
+ * [v7.0 P3-1] 扩展过滤名单：新增 libgadget/libzygisk/libsubstrate */
 static int make_filtered_maps_fd(void) {
     int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
     if (rfd < 0) return -1;
-    char buf[65536];
-    ssize_t nr = (ssize_t)syscall(SYS_read, rfd, buf, sizeof(buf) - 1);
+
+    /* 动态扩容: 从 256KB 开始，不够则翻倍，上限 2MB */
+    size_t cap = 262144;
+    char *raw = NULL;
+    ssize_t total = 0;
+    while (cap <= 2 * 1024 * 1024) {
+        if (lseek(rfd, 0, SEEK_SET) != 0) break;
+        raw = (char *)mmap(NULL, cap + 1, PROT_READ|PROT_WRITE,
+                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (raw == MAP_FAILED) { raw = NULL; break; }
+        total = 0;
+        ssize_t n;
+        while ((n = (ssize_t)syscall(SYS_read, rfd, raw+total,
+                                     cap-(size_t)total)) > 0)
+            total += n;
+        if ((size_t)total < cap) break;
+        munmap(raw, cap + 1); raw = NULL; cap *= 2;
+    }
     syscall(SYS_close, rfd);
-    if (nr <= 0) return -1;
-    buf[nr] = '\0';
+    if (!raw || total <= 0) { if (raw) munmap(raw, cap+1); return -1; }
+    raw[total] = '\0';
 
-    int mfd = syscall(__NR_memfd_create, "maps", 0);
-    if (mfd < 0) return -1;
+    static const char *FILTER_SONAMES[] = {
+        "libforgehook", "libtdmqimei_real", "libqimei_",
+        "libinject",    "libfrida",         "libsubstrate",
+        "libxposed",    "libgadget",        "libzygisk",
+        NULL
+    };
 
-    char *line = buf, *out = buf; /* 原地过滤（向后移） */
+    int mfd = (int)syscall(__NR_memfd_create, "maps_v7", 0);
+    if (mfd < 0) { munmap(raw, cap+1); return -1; }
+
+    char *line = raw, *out = raw;
     size_t out_len = 0;
     while (line && *line) {
-        char *eol = strchr(line, '\n');
-        if (!eol) break;
+        char *eol = strchr(line, '\n'); if (!eol) break;
         *eol = '\0';
         int keep = 1;
-        if (strstr(line, "libforgehook") || strstr(line, "libtdmqimei_real") ||
-            strstr(line, "libqimei_") || strstr(line, "libinject") ||
-            strstr(line, "libfrida") || strstr(line, "libsubstrate") ||
-            strstr(line, "libxposed"))
-            keep = 0;
+        for (const char **s = FILTER_SONAMES; *s; s++)
+            if (strstr(line, *s)) { keep = 0; break; }
         if (keep) {
             size_t ll = (size_t)(eol - line) + 1;
             memmove(out + out_len, line, ll);
             out_len += ll;
         }
-        *eol = '\n';
-        line = eol + 1;
+        *eol = '\n'; line = eol + 1;
     }
     if (out_len > 0) {
-        if (ftruncate(mfd, (off_t)out_len) != 0) { syscall(SYS_close, mfd); return -1; }
+        if (ftruncate(mfd, (off_t)out_len) != 0) {
+            syscall(SYS_close, mfd); munmap(raw, cap+1); return -1; }
         void *a = mmap(NULL, out_len, PROT_WRITE, MAP_SHARED, mfd, 0);
-        if (a == MAP_FAILED) { syscall(SYS_close, mfd); return -1; }
-        memcpy(a, out, out_len);
-        munmap(a, out_len);
+        if (a == MAP_FAILED) {
+            syscall(SYS_close, mfd); munmap(raw, cap+1); return -1; }
+        memcpy(a, out, out_len); munmap(a, out_len);
         lseek(mfd, 0, SEEK_SET);
     }
+    munmap(raw, cap+1);
     return mfd;
 }
 
@@ -627,9 +678,18 @@ int open(const char *p,int flags,...){
     if(!g_hooks_ready) return _open(p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
-    /* 动态过滤 /proc/self/maps — 过滤加载库条目 */
+    /* [v7.0 P0-2] smaps 动态过滤 (同 maps 逻辑) */
+    if(p && strstr(p,"smaps") && strstr(p,"/proc/")){
+        int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
+    /* maps 动态过滤 */
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
+    /* [v7.0 P2-1] /proc/*/status 动态生成（包含真实 PID）*/
+    if(p && strstr(p,"/status") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        ensure_proc_status();
+        if(g_proc_status_len>0){int fd=override_fd(g_proc_status_buf,(size_t)g_proc_status_len);if(fd>=0)return fd;}
     }
     const override_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=override_fd(f->data,f->len);if(fd>=0)return fd;}
@@ -643,8 +703,15 @@ int openat(int dir,const char *p,int flags,...){
     if(!g_hooks_ready) return _openat(dir,p,flags,m);
     if(hidden(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
+    if(p && strstr(p,"smaps") && strstr(p,"/proc/")){
+        int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
+    if(p && strstr(p,"/status") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        ensure_proc_status();
+        if(g_proc_status_len>0){int fd=override_fd(g_proc_status_buf,(size_t)g_proc_status_len);if(fd>=0)return fd;}
     }
     const override_file_t *f=match(p);
     if(f&&!(flags&O_WRONLY)){int fd=override_fd(f->data,f->len);if(fd>=0)return fd;}
@@ -681,10 +748,22 @@ typedef int (*kill_t)(pid_t, int);
 static tgkill_t _tgkill = NULL;
 static kill_t   _kill_fn = NULL;
 
+/* [v7.0 Patch A] tgkill — 拦截来自 libtersafe 代码段的所有终止信号
+ * 原版只拦截 sig==9/15，tersafe 可能发 SIGABRT(6) 等信号自杀绕过拦截。
+ * 修复: 检查 return address 是否在 libtersafe 代码段内；
+ *       来自 tersafe 的任何 sig(除 0/SIGCHLD/SIGPIPE) 都被丢弃。*/
 int tgkill(pid_t tgid, pid_t tid, int sig) {
     if (!_tgkill) _tgkill = (tgkill_t)dlsym(RTLD_NEXT, "tgkill");
     if (!g_hooks_ready) return _tgkill ? _tgkill(tgid, tid, sig) : 0;
-    if (sig == 9 || sig == 15) return 0;
+    /* 检查调用方是否在 libtersafe 代码段 */
+    if (g_ts_text_start) {
+        uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+        if (ra >= g_ts_text_start && ra < g_ts_text_end) {
+            if (sig != 0 && sig != SIGCHLD && sig != SIGPIPE && sig != SIGUSR1)
+                return 0;  /* 来自 tersafe 的终止信号，静默丢弃 */
+        }
+    }
+    if (sig == 9 || sig == 15) return 0;  /* 兜底：任何来源的 SIGKILL/SIGTERM */
     return _tgkill ? _tgkill(tgid, tid, sig) : 0;
 }
 
@@ -703,7 +782,20 @@ static uintptr_t   g_ts_text_end   = 0;
 
 void exit_group(int status) {
     if (!_exit_group) _exit_group = (exit_group_t)dlsym(RTLD_NEXT, "exit_group");
-    if (!g_hooks_ready) { _exit_group(status); return; }
+    /* [v7.0 Patch B] exit_group — 无论 g_hooks_ready 状态都检查 return address
+     * 原版: g_hooks_ready=0 时直接透传，hijack 模式下 tersafe 在 hooks 激活前
+     * 就能通过 exit_group 杀死进程。修复：始终检查调用方地址范围。*/
+    if (g_ts_text_start) {
+        uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+        if (ra >= g_ts_text_start && ra < g_ts_text_end) {
+            hook_log("[exit_group] blocked (tersafe caller)\n");
+            return;
+        }
+    } else if (!g_hooks_ready) {
+        /* tersafe 地址范围未知且 hooks 未激活，透传 */
+        if (_exit_group) _exit_group(status);
+        return;
+    }
     /* Cache target module code segment range */
     if (!g_ts_text_start) {
         g_ts_text_start = get_module_base("libtersafe.so");
@@ -1175,6 +1267,9 @@ static void *_adjust_code_thread(void *unused) {
     uintptr_t base = 0;
     char logbuf[160];
 
+    /* [v7.0 P1-1] 后台线程中先执行 chainload，linker 锁已释放 */
+    pthread_once(&g_chainload_once, _do_chainload);
+
     /* poll-wait for target module (up to 60 seconds), detached thread */
     for (int retry = 0; retry < 300; retry++) {
         base = get_module_base("libtersafe.so");
@@ -1184,12 +1279,14 @@ static void *_adjust_code_thread(void *unused) {
     }
     if (!base) {
         hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
-        /* 60s 超时也激活—游戏已完全初始化 */
-        if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (60s timeout)\n"); }
+        /* 超时兜底激活 */
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        hook_log("[hooks] v7 activated (60s timeout)\n");
         return NULL;
     }
-    /* tersafe 已加载，游戏完成初始化—安全激活全部 hook */
-    if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated (tersafe found)\n"); }
+    /* [v7.0 P0-1] 先缓存 tersafe 代码段范围供 tgkill/exit_group 使用 */
+    g_ts_text_start = base;
+    g_ts_text_end   = base + 0x600000; /* 6MB 保守估计，后续由 exit_group 精确化 */
     int ln = snprintf(logbuf, sizeof(logbuf),
         "[patch] base=0x%lx\n", (unsigned long)base);
     if (ln > 0) hook_log(logbuf);
@@ -1208,6 +1305,20 @@ static void *_adjust_code_thread(void *unused) {
     ln = snprintf(logbuf, sizeof(logbuf),
         "[patch] done: %d/%zu ok\n", ok, KILL_CHAIN_N);
     if (ln > 0) hook_log(logbuf);
+
+    /* [v7.0 P0-1] g_hooks_ready 只在 patch 完成后激活
+     * 原版在 constructor(150) 末尾立即激活，此时 patch 尚未完成。
+     * hijack 模式下存在窗口: hooks 激活了但检测链仍存活 → tersafe 可检测并 kill。
+     * 修复: 等 patch 完成(ok>=4)后才激活，消除窗口期。*/
+    if (ok >= (int)KILL_CHAIN_N - 2) {
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        hook_log("[hooks] v7 activated after patch success\n");
+    } else {
+        /* patch 大部分失败，延迟 2s 后强制激活（保护不完整但总比不激活强）*/
+        usleep(2000000);
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        hook_log("[hooks] v7 force-activated (partial patch)\n");
+    }
     return NULL;
 }
 
@@ -1223,10 +1334,11 @@ static void _adjust_code(void) {
         _adjust_code_thread(NULL);
     }
     pthread_attr_destroy(&attr);
-    /* inject 模式: 游戏已运行，立即激活 hook。
-     * hijack 模式: tersafe 线程二次确认，防止过早介入初始化。 */
-    if (!g_hooks_ready) { g_hooks_ready = 1; hook_log("[hooks] activated at ctor 150\n"); }
-    hook_log("[CTOR] 150 _adjust_code done\n");
+    /* [v7.0 P0-1] 移除 constructor(150) 内的提前激活
+     * g_hooks_ready=1 已移至 _adjust_code_thread patch 完成后设置。
+     * inject 模式: 线程几乎立即找到 tersafe 并 patch，延迟<1s
+     * hijack 模式: 等 tersafe 加载后 patch，消除检测窗口 */
+    hook_log("[CTOR] 150 _adjust_code done (hooks activate after patch)\n");
 }
 
 /* ---- seccomp-bpf SIGSYS handler ---- */

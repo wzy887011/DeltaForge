@@ -38,8 +38,8 @@
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "6.0"
-#define FORGE_VERSION_STR  "DeltaForge forge v6.0"
+#define FORGE_VERSION       "7.0"
+#define FORGE_VERSION_STR  "DeltaForge forge v7.0"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
@@ -811,14 +811,43 @@ static void stage_hook_so(pid_t pid, char *out_path, size_t out_sz) {
     }
 }
 
+/* [v7.0 Fix] inject_hook — 用 fork+execv 替代 system() 字符串拼接
+ * 原版: system("/data/local/tmp/injector %d '%s'", pid, hook_path)
+ * 风险: hook_path 含特殊字符时 shell 解析错误或注入。
+ * 修复: execv 直接传参数数组，路径白名单验证。*/
 static int inject_hook(pid_t pid) {
     char hook_path[768];
     stage_hook_so(pid, hook_path, sizeof(hook_path));
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd),
-        "/data/local/tmp/injector %d '%s'", pid, hook_path);
-    int rc = system(cmd);
-    return (rc == 0) ? 0 : -1;
+    /* 路径白名单：只允许 /data/app/ 和 /data/local/tmp/ */
+    if (strncmp(hook_path, "/data/app/", 10) != 0 &&
+        strncmp(hook_path, "/data/local/tmp/", 16) != 0) {
+        ERR("inject_hook: 拒绝不可信路径: %.80s", hook_path);
+        return -1;
+    }
+    char pid_str[16];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    char *const argv[] = { "/data/local/tmp/injector", pid_str, hook_path, NULL };
+    pid_t child = fork();
+    if (child < 0) { ERR("fork failed: %s", strerror(errno)); return -1; }
+    if (child == 0) {
+        int log_fd = open(FORGE_LOG, O_WRONLY|O_CREAT|O_APPEND, 0600);
+        if (log_fd >= 0) { dup2(log_fd, 1); dup2(log_fd, 2); close(log_fd); }
+        execv(argv[0], argv);
+        ERR("execv injector failed: %s", strerror(errno));
+        _exit(127);
+    }
+    /* 带 10s 超时等待子进程 */
+    int status = 0;
+    time_t deadline = time(NULL) + 10;
+    while (1) {
+        pid_t w = waitpid(child, &status, WNOHANG);
+        if (w == child) break;
+        if (w < 0 && errno != EINTR) { kill(child, SIGKILL); waitpid(child, NULL, 0); return -1; }
+        if (time(NULL) > deadline) { kill(child, SIGKILL); waitpid(child, NULL, 0);
+            ERR("injector timed out"); return -1; }
+        usleep(50000);
+    }
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
 /* ============= 核心: 内存补丁执行 ============= */
@@ -1013,7 +1042,10 @@ static int do_launch(void) {
 
                 /* Layered patch verification — prevent rollback */
                 {
-                    static int cycle = 0; cycle++;
+                    static int cycle = 0;
+                    cycle++;
+                    /* [v7.0 Patch C] cycle 溢出防护: LCM(2,3,5)=30 周期归零 */
+                    if (cycle >= 30) cycle = 1;
                     pid_t vp2 = get_pid_by_name(TARGET_PKG);
                     uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;
                     uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, "libUE4.so") : 0;
@@ -1084,7 +1116,76 @@ static int do_launch(void) {
     return rc;
 }
 
-/* ============= TCP JSON 控制接口 =============
+/* ============= [v7.0 P2-2] TCP SipHash-2-4 认证 =============
+ * 防止同机其他进程伪造控制命令（stop/patch 等）
+ * 协议: AUTH:<16hex_nonce>:<16hex_mac>\n<cmd>\n
+ * key:  /data/local/tmp/.forge_key (16字节随机数，chmod 600) */
+#define SESSION_KEY_FILE "/data/local/tmp/.forge_key"
+#define SESSION_KEY_LEN  16
+
+static uint8_t g_session_key[SESSION_KEY_LEN] = {0};
+static int     g_auth_enabled = 0;
+
+/* SipHash-2-4: 轻量 MAC，无外部依赖 */
+static uint64_t siphash24(const uint8_t *k16, const uint8_t *data, size_t len) {
+    uint64_t k0, k1;
+    memcpy(&k0, k16, 8); memcpy(&k1, k16+8, 8);
+#define ROT64(v,n) (((v)<<(n))|((v)>>(64-(n))))
+#define SR() do{ \
+    v0+=v1;v1=ROT64(v1,13);v1^=v0;v0=ROT64(v0,32); \
+    v2+=v3;v3=ROT64(v3,16);v3^=v2; \
+    v0+=v3;v3=ROT64(v3,21);v3^=v0; \
+    v2+=v1;v1=ROT64(v1,17);v1^=v2;v2=ROT64(v2,32); \
+}while(0)
+    uint64_t v0=0x736f6d6570736575ULL^k0, v1=0x646f72616e646f6dULL^k1;
+    uint64_t v2=0x6c7967656e657261ULL^k0, v3=0x7465646279746573ULL^k1;
+    const uint8_t *e = data + len - (len%8);
+    for (; data<e; data+=8) { uint64_t m; memcpy(&m,data,8); v3^=m;SR();SR();v0^=m; }
+    uint64_t last = (uint64_t)len<<56;
+    int r=(int)(len%8); for(int i=r-1;i>=0;i--) last|=((uint64_t)data[i])<<(i*8);
+    v3^=last;SR();SR();v0^=last; v2^=0xFF;
+    for(int i=0;i<4;i++) SR();
+    return v0^v1^v2^v3;
+#undef ROT64
+#undef SR
+}
+
+static void init_session_key(void) {
+    int fd = open(SESSION_KEY_FILE, O_RDONLY);
+    if (fd >= 0) { ssize_t n=read(fd,g_session_key,SESSION_KEY_LEN); close(fd);
+        if (n==SESSION_KEY_LEN) { g_auth_enabled=1; return; } }
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) { WARN("无法读 /dev/urandom，认证禁用"); return; }
+    ssize_t n = read(fd, g_session_key, SESSION_KEY_LEN); close(fd);
+    if (n != SESSION_KEY_LEN) return;
+    fd = open(SESSION_KEY_FILE, O_WRONLY|O_CREAT|O_TRUNC, 0600);
+    if (fd >= 0) { write(fd, g_session_key, SESSION_KEY_LEN); close(fd); }
+    g_auth_enabled = 1;
+    OK("session key 生成: %s", SESSION_KEY_FILE);
+}
+
+/* 验证并剥离 AUTH 前缀，返回实际命令指针；NULL=认证失败 */
+static const char *verify_auth(char *buf) {
+    if (!g_auth_enabled) return buf;
+    if (strncmp(buf, "AUTH:", 5) != 0) { WARN("auth required"); return NULL; }
+    char *colon1 = strchr(buf+5, ':');
+    if (!colon1) return NULL;
+    char *nl = strchr(colon1+1, '\n');
+    if (!nl) return NULL;
+    if ((size_t)(colon1-(buf+5)) != 16 || (size_t)(nl-(colon1+1)) != 16) return NULL;
+    uint8_t nonce[8];
+    for (int i=0;i<8;i++) { char h[3]={buf[5+i*2],buf[5+i*2+1],0}; nonce[i]=(uint8_t)strtoul(h,NULL,16); }
+    const char *cmd = nl+1;
+    size_t clen = strlen(cmd); if (clen>256) clen=256;
+    uint8_t combined[8+256]; memcpy(combined,nonce,8); memcpy(combined+8,cmd,clen);
+    uint64_t exp = siphash24(g_session_key, combined, 8+clen);
+    char mh[17]={0}; memcpy(mh, colon1+1, 16);
+    uint64_t got = (uint64_t)strtoull(mh, NULL, 16);
+    if ((exp^got) != 0) { WARN("auth MAC mismatch"); return NULL; }
+    return cmd;
+}
+
+/* ============= TCP JSON 控制接口 ============= */
  * 手机端 app/adb forward 连接 cloud phone 的 9510 端口
  * 协议: 文本行, 以 \n 结尾
  * 命令: ping / prepare / launch / patch / stop / status / clean / adapt
@@ -1168,11 +1269,21 @@ static int run_tcp_server(void) {
         ssize_t n = recv(cfd, buf, sizeof(buf)-1, 0);
         if (n > 0) {
             buf[n] = 0;
-            char *nl = strchr(buf, '\n'); if (nl) *nl = 0;
-            nl = strchr(buf, '\r'); if (nl) *nl = 0;
+            /* [v7.0 P2-2] 认证验证：剥离 AUTH 前缀，无效则拒绝 */
+            const char *cmd_ptr = verify_auth(buf);
+            if (!cmd_ptr) {
+                const char *deny = "{\"status\":\"err\",\"msg\":\"auth failed\"}\n";
+                send(cfd, deny, strlen(deny), 0);
+                close(cfd); continue;
+            }
+            /* 复制命令到可写缓冲 */
+            char cmd_buf[4096] = {0};
+            strncpy(cmd_buf, cmd_ptr, sizeof(cmd_buf)-1);
+            char *nl = strchr(cmd_buf, '\n'); if (nl) *nl = 0;
+            nl = strchr(cmd_buf, '\r'); if (nl) *nl = 0;
 
             char resp[4096];
-            handle_command(buf, resp, sizeof(resp));
+            handle_command(cmd_buf, resp, sizeof(resp));
             send(cfd, resp, strlen(resp), 0);
         }
         close(cfd);
@@ -1201,6 +1312,8 @@ static void print_usage(const char *prog) {
 int main(int argc, char **argv) {
     disguise_self();
     srand((unsigned int)(time(NULL) ^ (unsigned long)getpid()));
+    /* [v7.0 P2-2] 初始化 session key（daemon 模式前执行）*/
+    init_session_key();
 
     int daemon_mode = 0, flag_prep = 0, flag_launch = 0, flag_patch = 0,
         flag_status = 0, flag_clean = 0, flag_adapt = 0;

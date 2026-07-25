@@ -39,10 +39,11 @@ else
     echo "[!] No compiler found"; exit 1
 fi
 
-echo "[Build] Compiling v6 (CC=$CC)..."
+echo "[Build] Compiling v7 (CC=$CC)..."
 cd "$NATIVE"
 $CC -pie -Os -Wall forge.c -o forge
-$CC -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
+# [v7.0] -lpthread: pthread_once / pthread_create used in constructor chain
+$CC -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl -lpthread
 $CC -pie -Os -Wall forge_monitor.c -o forge_monitor
 $CC -pie -Os -Wall injector.c -o injector -ldl
 $CC -pie -Os -Wall touch_injector.c -o touch_injector

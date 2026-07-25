@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 法器: DeltaForge/runner/auto_runner.py (v3 — 全链路行为随机化)
-# 改进: 坐标高斯抖动 + 指数延迟 + 路线轮换 + 随机休息 + 8% 概率跳轮
-#       ± uinput 触摸注入 (TouchInjector)
+# 法器: DeltaForge/runner/bot_runner.py (v7 — 崩溃恢复 + forge 重打 patch)
+# 改进: [v7.0] 崩溃后自动调用 ForgeController.launch() 重新 patch
+#       [v7.0] 区分 tersafe_kill / native_crash / oom_kill / normal_exit
+#       [v7.0] 连续崩溃≥3次采集 tombstone+forge log
+#       [v7.0] 崩溃间隔指数退避 (30s→300s)
 # ============================================================
 
 import subprocess, time, json, os, sys, random, math
@@ -83,9 +85,17 @@ class BotRunner:
         self.cfg = cfg or self._load_cfg()
         self.runs = 0
         self.profit = 0
+        self.crashes = 0
+        self.consecutive_crashes = 0
+        self._crash_backoff = 30        # 首次崩溃等待 30s
         self._running = False
         self._touch = TouchInjector()
         self._rng = Randomizer()
+        self._forge_ctrl = None         # 由外部注入，崩溃后调 launch()
+
+    def set_forge_controller(self, ctrl):
+        """注入 ForgeController，崩溃后自动重打 patch"""
+        self._forge_ctrl = ctrl
 
     def _load_cfg(self):
         c = dict(DEFAULT_CFG)
@@ -116,19 +126,49 @@ class BotRunner:
     def _ensure_game(self):
         out = self._adb(f"pidof {self.cfg['game_package']}")
         if out:
+            # [v7.0] 游戏在运行，检查 patch 状态
+            patch_ok = self._adb(
+                "grep -c 'hooks.*activated' /data/local/tmp/forge_hook.log 2>/dev/null"
+            )
+            if patch_ok.isdigit() and int(patch_ok) > 0:
+                return True
+            if self._forge_ctrl:
+                print("  [v7] 游戏已运行但 patch 未确认，重新 patch...")
+                self._forge_ctrl.patch_only(); time.sleep(2)
             return True
-        self._adb(
-            f"setprop wrap.{self.cfg['game_package']} "
-            f"'LD_PRELOAD=/data/local/tmp/libforgehook.so'"
-        )
-        self._adb(
-            f"am start -n {self.cfg['game_package']}/com.epicgames.ue4.SplashActivity"
-        )
+        # [v7.0] 通过 forge 完整启动（含 patch），否则退化为旧方式
+        if self._forge_ctrl:
+            return self._forge_ctrl.launch()
+        self._adb(f"am start -n {self.cfg['game_package']}/com.epicgames.ue4.SplashActivity")
         for _ in range(40):
             time.sleep(2)
-            if self._adb(f"pidof {self.cfg['game_package']}"):
-                return True
+            if self._adb(f"pidof {self.cfg['game_package']}"): return True
         return False
+
+    def _diagnose_crash(self) -> str:
+        """推断崩溃原因: tersafe_kill / native_crash / oom_kill / unknown"""
+        log = self._adb("tail -20 /data/local/tmp/forge_hook.log 2>/dev/null")
+        if "exit_group" in log or "tgkill" in log: return "tersafe_kill"
+        tomb = self._adb(
+            "su -c 'ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v .pb | head -1'"
+        )
+        if tomb:
+            mtime = self._adb(f"su -c 'stat -c %Y {tomb.strip()} 2>/dev/null'")
+            if mtime.isdigit() and time.time()-int(mtime) < 60: return "native_crash"
+        kmsg = self._adb("su -c 'dmesg 2>/dev/null | grep -i oom | tail -3'")
+        if self.cfg['game_package'] in kmsg: return "oom_kill"
+        return "unknown"
+
+    def _collect_crash_logs(self):
+        """连续崩溃≥3次采集诊断日志"""
+        if self.consecutive_crashes < 3: return
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        dst = f"/tmp/forge_crash_{ts}"
+        os.makedirs(dst, exist_ok=True)
+        for f in ["forge.log","forge_hook.log","forge_repair.log","forge_bss_map.json"]:
+            subprocess.run(f"adb pull /data/local/tmp/{f} {dst}/",
+                           shell=True, capture_output=True)
+        print(f"  [v7] 崩溃日志已采集 → {dst}/")
 
     def _back_to_lobby(self):
         for _ in range(random.randint(2, 5)):
@@ -234,11 +274,16 @@ class BotRunner:
             print(f"--- Run {self.runs}/{self.cfg['max_runs']} [{route['name']}] ---")
             if not self._ensure_game():
                 fails += 1
+                self.crashes += 1; self.consecutive_crashes += 1
+                cause = self._diagnose_crash()
+                print(f"  [v7] 启动失败 #{self.crashes} cause={cause}")
+                self._collect_crash_logs()
                 if fails > self.cfg["retry_limit"]:
-                    print("[-] 游戏启动失败次数过多")
-                    break
-                time.sleep(30)
-                continue
+                    print("[-] 游戏启动失败次数过多"); break
+                wait = min(self._crash_backoff * (2**(self.consecutive_crashes-1)),
+                           self.cfg.get("crash_backoff_max", 300))
+                print(f"  [v7] 等待 {wait:.0f}s 后重试...")
+                time.sleep(wait); continue
             lobby_wait = self._rng.gauss(5.0, 3.0)
             time.sleep(max(1, lobby_wait))
             self._back_to_lobby()
@@ -256,11 +301,28 @@ class BotRunner:
             self._run_route(route)
             rr = self._wait_raid_end()
             print(f"  撤离结果: {rr}")
+            # [v7.0] 崩溃处理: 推断原因 + 指数退避 + forge 重打 patch
+            if rr == "crashed":
+                self.crashes += 1; self.consecutive_crashes += 1; fails += 1
+                cause = self._diagnose_crash()
+                print(f"  [v7] 游戏崩溃 #{self.crashes} cause={cause}")
+                self._collect_crash_logs()
+                if cause == "tersafe_kill" and self._forge_ctrl:
+                    print("  [v7] tersafe kill，完整重启...")
+                    self._forge_ctrl.stop(); time.sleep(2)
+                    self._forge_ctrl.adapt_props(); time.sleep(1)
+                wait = min(self._crash_backoff * (2**(self.consecutive_crashes-1)),
+                           self.cfg.get("crash_backoff_max", 300))
+                print(f"  [v7] 等待 {wait:.0f}s")
+                time.sleep(wait); continue
             self._post_raid()
             rest = max(5, min(self._rng.exponential(self.cfg["rest_max"]), 120))
             print(f"  休息 {rest:.0f}s, 累计收益 ~{self.profit:,}")
             time.sleep(rest)
+            # [v7.0] 正常完成一轮，重置崩溃计数和退避
             fails = 0
+            self.consecutive_crashes = 0
+            self._crash_backoff = 30
         print(f"Done: {self.runs} runs, ~{self.profit:,}")
         self._running = False
 
