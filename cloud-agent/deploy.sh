@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# DeltaForge v6.1 deploy script — compile + deploy
+# DeltaForge v7.1 deploy script — compile + deploy
 # Usage: sh cloud-agent/deploy.sh [--dry-run] [--no-hijack]
 #   --dry-run   编译但不部署，输出 MD5
 #   --no-hijack 跳过 hijack so 更新 (推荐，默认行为将 deprecated)
@@ -55,7 +55,7 @@ FORGE_MD5=$(md5sum forge | awk '{print $1}')
 HOOK_MD5=$(md5sum libforgehook.so | awk '{print $1}')
 
 # ---- version stamp ----
-echo "v6 $TIMESTAMP $FORGE_MD5 $HOOK_MD5" > "$TMP/forge.version"
+echo "v7.1 $TIMESTAMP $FORGE_MD5 $HOOK_MD5" > "$TMP/forge.version"
 
 # ---- backup existing binaries ----
 if [ "$DRY_RUN" = "0" ]; then
@@ -141,7 +141,7 @@ echo "[+] Running post-deploy diagnostics..."
 su -c "sh $TMP/check.sh" 2>/dev/null || echo "[!] Diagnostics failed — run manually: su -c 'sh $TMP/check.sh'"
 
 echo ""
-echo "[+] v6 deploy complete. Rollback: cp $BACKUP_DIR/*.$TIMESTAMP $TMP/"
+echo "[+] v7.1 deploy complete. Rollback: cp $BACKUP_DIR/*.$TIMESTAMP $TMP/"
 echo "    Launch (inject mode, recommended): su -c '$TMP/forge -l'"
 echo "    Launch (hijack mode, deprecated): su -c 'am start -n com.tencent.tmgp.dfm/.SplashActivity'"
 if [ "$AUTO_LAUNCH" = "1" ]; then

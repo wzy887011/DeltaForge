@@ -30,6 +30,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "crypt_strings.h"
 
 /* ============= 配置项 ============= */
 #define TARGET_PKG          "com.tencent.tmgp.dfm"
@@ -38,8 +39,8 @@
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "7.0"
-#define FORGE_VERSION_STR  "DeltaForge forge v7.0"
+#define FORGE_VERSION       "7.1"
+#define FORGE_VERSION_STR  "DeltaForge forge v7.1"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
@@ -686,7 +687,7 @@ static void hide_injection_from_maps(pid_t pid) {
     if (fd_mem < 0) { fclose(maps); return; }
 
     while (fgets(line, sizeof(line), maps)) {
-        if (strstr(line, "libforgehook") || strstr(line, "libforge")) {
+        if (strstr(line, C_forgehook) || strstr(line, "libforge")) {
             /* 解析起始地址 */
             uint64_t addr = strtoull(line, NULL, 16);
             uint64_t end = 0;
@@ -771,7 +772,7 @@ static void start_game(void) {
  *   dlopen("/data/app/.../lib/arm64/...") → 成功（已在 app namespace）
  */
 static void stage_hook_so(pid_t pid, char *out_path, size_t out_sz) {
-    strncpy(out_path, "/data/local/tmp/libforgehook.so", out_sz - 1);
+    strncpy(out_path, C_hook_so, out_sz - 1);
     out_path[out_sz - 1] = '\0';
 
     char maps_path[64];
@@ -826,7 +827,7 @@ static int inject_hook(pid_t pid) {
     }
     char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
-    char *const argv[] = { "/data/local/tmp/injector", pid_str, hook_path, NULL };
+    char *const argv[] = { C_injector_path, pid_str, hook_path, NULL };
     pid_t child = fork();
     if (child < 0) { ERR("fork failed: %s", strerror(errno)); return -1; }
     if (child == 0) {
@@ -867,7 +868,7 @@ static int patch_game_process(void) {
     int ue4_ok = 0;
 
     /* 1. libtersafe.so — 带退避等待加载 */
-    uint64_t ts_base = wait_for_module(pid, "libtersafe.so", 30000);
+    uint64_t ts_base = wait_for_module(pid, C_tersafe, 30000);
     if (ts_base == 0) {
         ERR("libtersafe.so 未加载 — ABORT，拒绝在不存在模块上写内存");
         return -1;
@@ -913,7 +914,7 @@ static int patch_game_process(void) {
     }
 
     /* 4. libUE4.so 引擎检测 6 处 */
-    uint64_t ue4_base = wait_for_module(pid, "libUE4.so", 20000);
+    uint64_t ue4_base = wait_for_module(pid, C_ue4, 20000);
     if (ue4_base) {
         usleep(500000);
         for (size_t i = 0; i < UE4_PATCH_COUNT; i++) {
@@ -1024,7 +1025,7 @@ static int do_launch(void) {
             /* 以下是真正的清理 daemon */
             prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
             while (1) {
-                usleep(200000);  /* 200ms 间隔 — 快速响应 TerSafe 补丁还原 */
+                usleep(100000);  /* [v7.1 Fix 3] 100ms 间隔 — 更快响应 TerSafe 补丁还原 */
                 pid_t cp = get_pid_by_name(TARGET_PKG);
                 if (cp <= 0) _exit(0);
 
@@ -1047,8 +1048,8 @@ static int do_launch(void) {
                     /* [v7.0 Patch C] cycle 溢出防护: LCM(2,3,5)=30 周期归零 */
                     if (cycle >= 30) cycle = 1;
                     pid_t vp2 = get_pid_by_name(TARGET_PKG);
-                    uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, "libtersafe.so") : 0;
-                    uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, "libUE4.so") : 0;
+                    uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, C_tersafe) : 0;
+                    uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, C_ue4) : 0;
 
                     /* 每周期: 检测链 6 节点 (最关键的防线) */
                     if (ts2) {
@@ -1120,7 +1121,7 @@ static int do_launch(void) {
  * 防止同机其他进程伪造控制命令（stop/patch 等）
  * 协议: AUTH:<16hex_nonce>:<16hex_mac>\n<cmd>\n
  * key:  /data/local/tmp/.forge_key (16字节随机数，chmod 600) */
-#define SESSION_KEY_FILE "/data/local/tmp/.forge_key"
+#define SESSION_KEY_FILE C_session_key
 #define SESSION_KEY_LEN  16
 
 static uint8_t g_session_key[SESSION_KEY_LEN] = {0};

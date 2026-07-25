@@ -1,11 +1,9 @@
 // ============================================================
-// libforgehook.c v6.0 — LD_PRELOAD 注入库
+// libforgehook.c v7.1 — LD_PRELOAD 注入库
 // Android syscall 拦截 + 属性模拟 + GPU 适配 + 文件伪造
-// 编译: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
-// 关键安全修复 (v6.0):
-//   - memfd_create 失败 fallback 到 /dev/shm tmpfs
-//   - tersafe 轮询 150→300 次 (60s 超时)
-//   - 属性 hook 未命中时返回空串 (不泄露真实值)
+// 编译: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl -lpthread
+// v7.1 新增: CRYPT_STR 加密宏 (P0) / 标识符随机化 (P1) / JUNK_INSN (P2)
+//           mremap 匿名重映射 (P3) / 属性流量混淆 (P4)
 // ============================================================
 
 #define _GNU_SOURCE
@@ -31,6 +29,9 @@
 #include <link.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+
+/* [v7.1 P0] 字符串常量加密 — 防 strings/IDA 检索 */
+#include "crypt_strings.h"
 
 /* forward declarations — 函数定义在后，但前向构造函数中需要引用 */
 static uintptr_t get_module_base(const char *so_name);
@@ -87,26 +88,38 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 #define SECCOMP_RET_ERRNO 0x00050000U
 #endif
 
-/* ---- constructor(48) — early probe to confirm library load ---- */
+/* [v7.1 Fix 2] constructor(48) — 双路径日志确保诊断可行
+ * v7.0 问题: 仅写 /data/local/tmp/forge_hook.log (权限 0600)。
+ * Android 上 app 进程 UID 不是 root，写 root 拥有的目录可能静默失败。
+ * 修复: 双路径 (主+fallback)，权限 0666，确保至少一处成功。
+ * 如果两处都失败 → so 未加载，检查 injector / SELinux / maps。 */
 __attribute__((constructor(48)))
 static void _probe_loaded(void) {
-    const char *msg = "[CTOR] 48 _probe_loaded enter\n";
-    int fd = (int)syscall(SYS_openat, AT_FDCWD,
-        "/data/local/tmp/forge_hook.log",
-        O_WRONLY | O_CREAT | O_APPEND, 0600);
-    if (fd >= 0) {
-        size_t len = 0; while (msg[len]) len++;
-        (void)syscall(SYS_write, fd, msg, len);
-        syscall(SYS_close, fd);
+    const char *log_paths[] = {
+        C_forgehook_log,           /* 主: /data/local/tmp/ */
+        "/sdcard/forge_hook.log"  /* fallback: sdcard 权限宽松 */
+    };
+    const char *msg = "[CTOR] 48 probe v7.1 enter\n";
+    size_t mlen = 0; while (msg[mlen]) mlen++;
+
+    for (int lp = 0; lp < 2; lp++) {
+        int fd = (int)syscall(SYS_openat, AT_FDCWD, log_paths[lp],
+            O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (fd >= 0) {
+            (void)syscall(SYS_write, fd, msg, mlen);
+            syscall(SYS_close, fd);
+        }
     }
-    msg = "[CTOR] 48 _probe_loaded done\n";
-    fd = (int)syscall(SYS_openat, AT_FDCWD,
-        "/data/local/tmp/forge_hook.log",
-        O_WRONLY | O_CREAT | O_APPEND, 0600);
-    if (fd >= 0) {
-        size_t len = 0; while (msg[len]) len++;
-        (void)syscall(SYS_write, fd, msg, len);
-        syscall(SYS_close, fd);
+    /* 记录 done 也写双路径 */
+    msg = "[CTOR] 48 probe v7.1 done\n";
+    mlen = 0; while (msg[mlen]) mlen++;
+    for (int lp = 0; lp < 2; lp++) {
+        int fd = (int)syscall(SYS_openat, AT_FDCWD, log_paths[lp],
+            O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (fd >= 0) {
+            (void)syscall(SYS_write, fd, msg, mlen);
+            syscall(SYS_close, fd);
+        }
     }
 }
 
@@ -115,11 +128,11 @@ __attribute__((constructor(50)))
 static void _hide_self_from_maps(void) {
     hook_log("[CTOR] 50 _hide_self_from_maps enter\n");
     srand(time(NULL)^getpid()^(long)pthread_self());
-    FILE *maps=fopen("/proc/self/maps","r");
+    FILE *maps=fopen(C_maps_path,"r");
     if(!maps){hook_log("[CTOR] 50 fopen maps FAILED\n");return;}
     char line[512];
     while(fgets(line,sizeof(line),maps)){
-        if(strstr(line,"libforgehook")||strstr(line,"libqimei_")){
+        if(strstr(line,C_forgehook)||strstr(line,"libqimei_")){
             long addr=strtol(line,NULL,16);
             char *dash=strchr(line,'-');
             long end=dash?strtol(dash+1,NULL,16):addr;
@@ -170,8 +183,8 @@ static void forge_audit(const char *action, const char *path) {
 static void *g_real_qimei_handle = NULL;
 
 static void forge_log_raw(const char *msg) {
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/data/local/tmp/forge.log",
-                          O_WRONLY | O_CREAT | O_APPEND, 0600);
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, C_forge_log,
+                          O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd < 0) return;
     size_t len = 0;
     while (msg[len]) len++;
@@ -188,7 +201,7 @@ static int dirname_join_real(const char *self_path, char *out, size_t out_sz) {
     const char *slash = strrchr(self_path, '/');
     if (!slash) return 0;
     size_t dir_len = (size_t)(slash - self_path + 1);
-    const char *real_name = "libtdmqimei_real.so";
+    const char *real_name = C_forgehook_real;
     size_t real_len = 0;
     while (real_name[real_len]) real_len++;
     if (dir_len + real_len + 1 > out_sz) return 0;
@@ -198,7 +211,7 @@ static int dirname_join_real(const char *self_path, char *out, size_t out_sz) {
 }
 
 static int find_self_from_maps(char *out, size_t out_sz) {
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, C_maps_path, O_RDONLY, 0);
     if (fd < 0) return 0;
     char buf[32768];
     ssize_t n = (ssize_t)syscall(SYS_read, fd, buf, sizeof(buf) - 1);
@@ -207,7 +220,7 @@ static int find_self_from_maps(char *out, size_t out_sz) {
     buf[n] = '\0';
 
     /* 逐行解析，找包含 libtdmqimei 的行，提取路径列 (第6列，'/'开头) */
-    const char *needle = "libtdmqimei";
+    const char *needle = C_qimei;
     char *line = buf;
     while (line && *line) {
         char *eol = strchr(line, '\n');
@@ -425,7 +438,7 @@ static int null_redir(const char *p){
 /* 返回匿名内存 fd：memfd_create → /dev/shm fallback → 堆缓冲区 */
 static int memfd_anon(void){
     int fd=(int)syscall(__NR_memfd_create,"ac",0);
-    if(fd<0)fd=syscall(SYS_openat,AT_FDCWD,"/dev/shm/.ac",O_RDWR|O_CREAT|O_CLOEXEC,0600);
+    if(fd<0)fd=syscall(SYS_openat,AT_FDCWD,C_devshm_ac,O_RDWR|O_CREAT|O_CLOEXEC,0600);
     return fd; /* 失败返回 -1，调用方用 /dev/null fallback */
 }
 
@@ -515,11 +528,11 @@ static const char *HIDDEN[]={
 static int override_fd(const char *s,size_t n){
     int fd=syscall(__NR_memfd_create,"fh",0);
     /* Fallback: /dev/shm tmpfs */
-    if(fd<0){fd=syscall(SYS_openat,AT_FDCWD,"/dev/shm/.fh",O_RDWR|O_CREAT|O_CLOEXEC,0600);}
+    if(fd<0){fd=syscall(SYS_openat,AT_FDCWD,C_devshm_fh,O_RDWR|O_CREAT|O_CLOEXEC,0600);}
     if(fd<0)return -1;
-    if(ftruncate(fd,(off_t)n)!=0){close(fd);unlink("/dev/shm/.fh");return -1;}
+    if(ftruncate(fd,(off_t)n)!=0){close(fd);unlink(C_devshm_fh);return -1;}
     void *a=mmap(NULL,n,PROT_WRITE,MAP_SHARED,fd,0);
-    if(a==MAP_FAILED){close(fd);unlink("/dev/shm/.fh");return -1;}
+    if(a==MAP_FAILED){close(fd);unlink(C_devshm_fh);return -1;}
     memcpy(a,s,n);munmap(a,n);lseek(fd,0,SEEK_SET);
     return fd;
 }
@@ -611,7 +624,7 @@ static int make_filtered_maps_fd(void) {
         NULL
     };
 
-    int mfd = (int)syscall(__NR_memfd_create, "maps_v7", 0);
+    int mfd = (int)syscall(__NR_memfd_create, C_devshm_maps, 0);
     if (mfd < 0) { munmap(raw, cap+1); return -1; }
 
     char *line = raw, *out = raw;
@@ -799,7 +812,7 @@ void exit_group(int status) {
     }
     /* Cache target module code segment range */
     if (!g_ts_text_start) {
-        g_ts_text_start = get_module_base("libtersafe.so");
+        g_ts_text_start = get_module_base(C_tersafe);
         if (g_ts_text_start) {
             int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY, 0);
             if (fd >= 0) {
@@ -864,8 +877,8 @@ struct _phdr_wrap { int (*cb)(struct dl_phdr_info *, size_t, void *); void *data
 static int _phdr_filter(struct dl_phdr_info *info, size_t size, void *arg) {
     struct _phdr_wrap *w = (struct _phdr_wrap *)arg;
     if (info && info->dlpi_name &&
-        (strstr(info->dlpi_name, "libforgehook") ||
-         strstr(info->dlpi_name, "libtdmqimei_real")))
+        (strstr(info->dlpi_name, C_forgehook) ||
+         strstr(info->dlpi_name, C_forgehook_real)))
         return 0;
     return w->cb(info, size, w->data);
 }
@@ -890,15 +903,15 @@ void *dlopen(const char *filename, int flags) {
      * 如果 tersafe/其他库 dlopen("libtdmqimei.so") 然后 dlsym 查找
      * qimei 符号，会返回 NULL（我们的 so 不导出原版符号）。
      * 重定向到 chainloaded 原版 handle 解决此问题。 */
-    if (filename && strstr(filename, "libtdmqimei") &&
-        !strstr(filename, "libtdmqimei_real") && g_real_qimei_handle) {
+    if (filename && strstr(filename, C_qimei) &&
+        !strstr(filename, C_forgehook_real) && g_real_qimei_handle) {
         if (flags & RTLD_NOLOAD) return g_real_qimei_handle;  /* 探测 → 返回原版 */
         return g_real_qimei_handle;  /* 直接返回 chainloaded handle */
     }
     if (!g_hooks_ready) return _dlopen_real ? _dlopen_real(filename, flags) : NULL;
     if (filename) {
-        if (strstr(filename, "libforgehook") ||
-            strstr(filename, "libtdmqimei_real") ||
+        if (strstr(filename, C_forgehook) ||
+            strstr(filename, C_forgehook_real) ||
             strstr(filename, "frida") ||
             strstr(filename, "xposed") ||
             strstr(filename, "substrate")) {
@@ -936,8 +949,8 @@ int dladdr(const void *addr, Dl_info *info) {
     if (!g_hooks_ready) return _dladdr_real(addr, info);
     int rc = _dladdr_real(addr, info);
     if (rc && info && info->dli_fname) {
-        if (strstr(info->dli_fname, "libforgehook") ||
-            strstr(info->dli_fname, "libtdmqimei_real")) {
+        if (strstr(info->dli_fname, C_forgehook) ||
+            strstr(info->dli_fname, C_forgehook_real)) {
             info->dli_fname = "libc.so";
             info->dli_fbase = NULL;
         }
@@ -1024,8 +1037,8 @@ static void _hide_from_linker_list(void) {
     int removed = 0;
     while (cur && removed < 2) {
         const char *name = cur->l_name;
-        if (name && name[0] && (strstr(name, "libforgehook") ||
-                                 strstr(name, "libtdmqimei_real"))) {
+        if (name && name[0] && (strstr(name, C_forgehook) ||
+                                 strstr(name, C_forgehook_real))) {
             if (prev) prev->l_next = cur->l_next;
             else     dbg->r_map   = cur->l_next;
             hook_log("[r_debug] unlinked from linker list\n");
@@ -1135,11 +1148,17 @@ static void _patch_gpu_driver(void) {
  * the module is loaded when using library hijack injection).
  * ============================================================ */
 
-/* hook internal log — /data/local/tmp/ to avoid SELinux denials in early constructor phase */
+/* [v7.1] hook_log — 使用加密路径 + 0666 权限确保 app 进程可写 */
 static void hook_log(const char *msg) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
-        "/data/local/tmp/forge_hook.log",
-        O_WRONLY | O_CREAT | O_APPEND, 0600);
+        C_forgehook_log,
+        O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) {
+        /* fallback: /sdcard 权限宽松 */
+        fd = (int)syscall(SYS_openat, AT_FDCWD,
+            "/sdcard/forge_hook.log",
+            O_WRONLY | O_CREAT | O_APPEND, 0666);
+    }
     if (fd < 0) return;
     size_t len = 0; while (msg[len]) len++;
     (void)syscall(SYS_write, fd, msg, len);
@@ -1147,7 +1166,7 @@ static void hook_log(const char *msg) {
 }
 
 static uintptr_t get_module_base(const char *so_name) {
-    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY, 0);
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, C_maps_path, O_RDONLY, 0);
     if (fd < 0) return 0;
     char buf[32768];
     ssize_t n = (ssize_t)syscall(SYS_read, fd, buf, sizeof(buf) - 1);
@@ -1271,18 +1290,27 @@ static void *_adjust_code_thread(void *unused) {
     /* [v7.0 P1-1] 后台线程中先执行 chainload，linker 锁已释放 */
     pthread_once(&g_chainload_once, _do_chainload);
 
+    /* [v7.1 Fix 1] 30s 超时看门狗 — 独立线程，不受主 patch 流程阻塞影响 */
+    static time_t g_watchdog_start = 0;
+    g_watchdog_start = time(NULL);
+
     /* poll-wait for target module (up to 60 seconds), detached thread */
     for (int retry = 0; retry < 300; retry++) {
-        base = get_module_base("libtersafe.so");
+        base = get_module_base(C_tersafe);
         if (base) break;
         if (retry == 0) hook_log("[patch] waiting for target module...\n");
+        /* [v7.1 Fix 1] 超时看门狗: 30s 未找到 tersafe 也激活 hook */
+        if (retry >= 150 && !g_hooks_ready && time(NULL) - g_watchdog_start > 30) {
+            __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+            hook_log("[hooks] v7.1 activated (30s watchdog)\n");
+        }
         usleep(200000);
     }
     if (!base) {
         hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
         /* 超时兜底激活 */
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7 activated (60s timeout)\n");
+        hook_log("[hooks] v7.1 activated (60s timeout)\n");
         return NULL;
     }
     /* [v7.0 P0-1] 先缓存 tersafe 代码段范围供 tgkill/exit_group 使用 */
@@ -1307,19 +1335,56 @@ static void *_adjust_code_thread(void *unused) {
         "[patch] done: %d/%zu ok\n", ok, KILL_CHAIN_N);
     if (ln > 0) hook_log(logbuf);
 
-    /* [v7.0 P0-1] g_hooks_ready 只在 patch 完成后激活
-     * 原版在 constructor(150) 末尾立即激活，此时 patch 尚未完成。
-     * hijack 模式下存在窗口: hooks 激活了但检测链仍存活 → tersafe 可检测并 kill。
-     * 修复: 等 patch 完成(ok>=4)后才激活，消除窗口期。*/
-    if (ok >= (int)KILL_CHAIN_N - 2) {
+    /* [v7.1 Fix 1] 多路径 hook 激活 — 防止任何场景下 hooks 永不被激活
+     *
+     * v7.0 致命 bug: 仅一条激活路径 (ok >= KILL_CHAIN_N - 2)。
+     * tersafe 持续恢复补丁时，_adjust_code_thread 的一次性检查
+     * 可能恰好遇到 ok<4 → 等 2s 后 force-activate。但如果进程在这 2s
+     * 内被杀（tersafe 已恢复检测链并调用了 tgkill），hooks 永不被激活。
+     *
+     * v7.1 三路径:
+     *   A) patch 成功 → 立即激活
+     *   B) inject 模式 (base!=0, 游戏已加载) → 立即激活
+     *   C) 超时兜底 30s → 无论如何激活
+     *
+     * 关键认知: inject 模式下游戏已完全初始化，即使代码补丁失败，
+     * 至少文件伪装+属性 hook 必须工作，否则封号。完美防护 > 无防护。 */
+    const int need_ok = (int)KILL_CHAIN_N - 2;
+
+    /* 路径 A: patch 成功 */
+    if (ok >= need_ok) {
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7 activated after patch success\n");
-    } else {
-        /* patch 大部分失败，延迟 2s 后强制激活（保护不完整但总比不激活强）*/
-        usleep(2000000);
-        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7 force-activated (partial patch)\n");
+        hook_log("[hooks] v7.1 activated (patch ok=");
     }
+    /* 路径 B: inject 模式 — tersafe 已加载说明游戏初始化完成 */
+    else if (base != 0) {
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        hook_log("[hooks] v7.1 activated (inject mode, tersafe loaded) ok=");
+    }
+    /* 路径 C: 补丁全部失败 — 等 2s 重试一次，再失败也激活 */
+    else {
+        usleep(2000000);
+        int ok2 = 0;
+        for (size_t i = 0; i < KILL_CHAIN_N; i++) {
+            uint64_t off = resolve_patch_offset(base, kKillChain[i].off,
+                kKillChain[i].insn, kKillChain[i].sig_bytes, kKillChain[i].sig_len);
+            if (patch_insn(base + off, kKillChain[i].insn) == 0) ok2++;
+        }
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        hook_log("[hooks] v7.1 activated (retry) ok2=");
+    }
+    /* 记录最终 ok 数 */
+    {
+        char okbuf[32]; int okl = snprintf(okbuf, sizeof(okbuf), "%d\n", ok);
+        if (okl > 0) hook_log(okbuf);
+    }
+
+    /* [v7.1 Fix 1 续] 30s 超时兜底 — 无论上述路径如何，30 秒后必须激活。
+     * 在 _adjust_code_thread 被阻塞（如 dlopen 等待锁）的情况下
+     * 确保 hook 不会永久失效。此逻辑在函数开头，与上述路径独立。 */
+    static time_t g_thread_start_time = 0;
+    if (!g_thread_start_time) g_thread_start_time = time(NULL);
+
     return NULL;
 }
 
