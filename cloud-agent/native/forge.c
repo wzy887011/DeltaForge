@@ -1186,56 +1186,89 @@ static const char *verify_auth(char *buf) {
     return cmd;
 }
 
-/* ============= TCP JSON 控制接口 =============
- * 手机端 app/adb forward 连接 cloud phone 的 9510 端口
- * 协议: 文本行, 以 \n 结尾
- * 命令: ping / prepare / launch / patch / stop / status / clean / adapt
- * 响应: JSON 单行
- */
+/* ============= [v7.1 P5] TCP opcode 无痕通信 ===================
+ * 防: TCP 流量分析 — 原来的命令名 "ping"/"launch" 明文可见。
+ * 协议 v2 (opcode-based):
+ *   客户端: [AUTH_HEADER\n] <1-byte opcode> \n
+ *   服务端: {"s":"ok","v":"7.1"} (缩短字段名)
+ *
+ * Opcode 表:
+ *   0x01 ping    0x02 prepare  0x03 launch  0x04 patch
+ *   0x05 stop    0x06 status   0x07 clean   0x08 adapt
+ *   0xFF 查看支持的命令列表 (兼容旧 text-mode)
+ *
+ * 响应 JSON 缩短字段:
+ *   status → s  |  version → v  |  msg → m
+ *   game_running → g  |  pid → p  |  uid → u
+ * ============================================================= */
+#define OP_PING    0x01
+#define OP_PREPARE 0x02
+#define OP_LAUNCH  0x03
+#define OP_PATCH   0x04
+#define OP_STOP    0x05
+#define OP_STATUS  0x06
+#define OP_CLEAN   0x07
+#define OP_ADAPT   0x08
+
 static int handle_command(const char *req, char *resp, size_t resp_sz) {
-    if (strncmp(req, "ping", 4) == 0) {
-        snprintf(resp, resp_sz,
-            "{\"status\":\"ok\",\"version\":\"" FORGE_VERSION "\"}");
-    } else if (strncmp(req, "prepare", 7) == 0) {
-        if (getuid() != 0) {
-            snprintf(resp, resp_sz, "{\"status\":\"err\",\"msg\":\"need root\"}");
-        } else {
-            do_prepare();
-            snprintf(resp, resp_sz, "{\"status\":\"ok\",\"msg\":\"prepare done\"}");
-        }
-    } else if (strncmp(req, "launch", 6) == 0) {
-        if (getuid() != 0) {
-            snprintf(resp, resp_sz, "{\"status\":\"err\",\"msg\":\"need root\"}");
-        } else {
-            int rc = do_launch();
-            snprintf(resp, resp_sz, "{\"status\":\"%s\",\"msg\":\"launch %s\"}",
-                rc == 0 ? "ok" : "partial",
-                rc == 0 ? "done" : "some patches failed");
-        }
-    } else if (strncmp(req, "patch", 5) == 0) {
-        int rc = patch_game_process();
-        snprintf(resp, resp_sz, "{\"status\":\"%s\",\"msg\":\"patch %s\"}",
-            rc == 0 ? "ok" : "partial",
-            rc == 0 ? "done" : "some patches failed");
-    } else if (strncmp(req, "stop", 4) == 0) {
+    /* 检测 opcode 还是 text: 单字节且在 0x01-0x08/0xFF 范围 */
+    unsigned char op = (unsigned char)req[0];
+    int is_opcode = (op >= 0x01 && op <= 0x08) || op == 0xFF;
+
+    /* text-mode 兼容: 将 text 命令映射到 opcode */
+    if (!is_opcode) {
+        if (strncmp(req,"ping",4)==0)    op=OP_PING;
+        else if (strncmp(req,"prepare",7)==0) op=OP_PREPARE;
+        else if (strncmp(req,"launch",6)==0)  op=OP_LAUNCH;
+        else if (strncmp(req,"patch",5)==0)   op=OP_PATCH;
+        else if (strncmp(req,"stop",4)==0)    op=OP_STOP;
+        else if (strncmp(req,"status",6)==0)  op=OP_STATUS;
+        else if (strncmp(req,"clean",5)==0)   op=OP_CLEAN;
+        else if (strncmp(req,"adapt",5)==0)   op=OP_ADAPT;
+        else op=0xFF;
+    }
+
+    switch (op) {
+    case OP_PING:
+        snprintf(resp, resp_sz, "{\"s\":\"ok\",\"v\":\"" FORGE_VERSION "\"}");
+        break;
+    case OP_PREPARE:
+        if (getuid() != 0) { snprintf(resp, resp_sz, "{\"s\":\"err\",\"m\":\"root\"}"); break; }
+        do_prepare();
+        snprintf(resp, resp_sz, "{\"s\":\"ok\",\"m\":\"prep\"}");
+        break;
+    case OP_LAUNCH:
+        if (getuid() != 0) { snprintf(resp, resp_sz, "{\"s\":\"err\",\"m\":\"root\"}"); break; }
+        { int rc = do_launch();
+          snprintf(resp, resp_sz, "{\"s\":\"%s\",\"m\":\"%s\"}",
+              rc==0?"ok":"partial", rc==0?"ok":"partial"); }
+        break;
+    case OP_PATCH:
+        { int rc = patch_game_process();
+          snprintf(resp, resp_sz, "{\"s\":\"%s\"}", rc==0?"ok":"partial"); }
+        break;
+    case OP_STOP:
         stop_game();
-        snprintf(resp, resp_sz, "{\"status\":\"ok\",\"msg\":\"game stopped\"}");
-    } else if (strncmp(req, "status", 6) == 0) {
-        int running = target_is_running();
-        pid_t pid = running ? get_pid_by_name(TARGET_PKG) : 0;
-        snprintf(resp, resp_sz,
-            "{\"status\":\"ok\",\"game_running\":%s,\"pid\":%d,\"uid\":%d}",
-            running ? "true" : "false", pid, getuid());
-    } else if (strncmp(req, "clean", 5) == 0) {
-        int n = clean_all_ac_files();
-        snprintf(resp, resp_sz, "{\"status\":\"ok\",\"cleaned\":%d}", n);
-    } else if (strncmp(req, "adapt", 5) == 0) {
+        snprintf(resp, resp_sz, "{\"s\":\"ok\"}");
+        break;
+    case OP_STATUS:
+        { int run = target_is_running();
+          pid_t pid = run ? get_pid_by_name(TARGET_PKG) : 0;
+          snprintf(resp, resp_sz, "{\"s\":\"ok\",\"g\":%s,\"p\":%d,\"u\":%d}",
+              run?"true":"false", pid, getuid()); }
+        break;
+    case OP_CLEAN:
+        { int n = clean_all_ac_files();
+          snprintf(resp, resp_sz, "{\"s\":\"ok\",\"c\":%d}", n); }
+        break;
+    case OP_ADAPT:
         adapt_properties();
-        snprintf(resp, resp_sz, "{\"status\":\"ok\",\"msg\":\"props adapted\"}");
-    } else {
+        snprintf(resp, resp_sz, "{\"s\":\"ok\"}");
+        break;
+    default:
         snprintf(resp, resp_sz,
-            "{\"status\":\"ok\",\"cmds\":[\"ping\",\"prepare\",\"launch\","
-            "\"patch\",\"stop\",\"status\",\"clean\",\"adapt\"]}");
+            "{\"s\":\"ok\",\"ops\":[1,2,3,4,5,6,7,8]}");
+        break;
     }
     return 0;
 }

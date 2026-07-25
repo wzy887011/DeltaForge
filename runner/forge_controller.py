@@ -77,9 +77,30 @@ def build_auth_header(cmd: str) -> str:
     return f"AUTH:{nonce.hex()}:{mac:016x}\n"
 
 
+# [v7.1 P5] opcode 映射 — 减少 TCP 流量中的明文命令字符串
+_OPCODE = {
+    "ping": b"\x01", "prepare": b"\x02", "launch": b"\x03",
+    "patch": b"\x04", "stop":    b"\x05", "status": b"\x06",
+    "clean": b"\x07", "adapt":   b"\x08",
+}
+# 响应字段扩展 (forge.c v7.1 缩短了字段名)
+_EXPAND = {
+    "s":"status","v":"version","m":"msg","g":"game_running",
+    "p":"pid","u":"uid","c":"cleaned","ops":"cmds",
+}
+
+def _expand_resp(d: dict) -> dict:
+    return {_EXPAND.get(k, k): v for k, v in d.items()}
+
+
 def send_forge_command(cmd: str, timeout: float = 30.0) -> dict:
     load_session_key()
-    payload = (build_auth_header(cmd) + cmd + "\n").encode()
+    op = _OPCODE.get(cmd)
+    # AUTH header 使用 text 命令（保持 MAC 可验证性）
+    auth = build_auth_header(cmd).encode()
+    # 命令体: opcode 优先，fallback text
+    body = op + b"\n" if op else (cmd + "\n").encode()
+    payload = auth + body
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout); s.connect((FORGE_HOST, FORGE_PORT))
@@ -93,7 +114,8 @@ def send_forge_command(cmd: str, timeout: float = 30.0) -> dict:
                 if b"\n" in resp: break
             except socket.timeout: break
         s.close()
-        return json.loads(resp.decode().strip())
+        raw = json.loads(resp.decode().strip())
+        return _expand_resp(raw)
     except json.JSONDecodeError:
         return {"status": "err", "msg": f"invalid json: {resp[:100]}"}
     except Exception as e:
