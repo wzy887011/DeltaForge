@@ -31,7 +31,6 @@
 #define APP_DATA     "/data/data/" TARGET_PKG
 #define MON_LOG      "/data/local/tmp/forge_monitor.log"
 #define AUDIT_LOG    "/sdcard/Android/obb/com.tencent.tmgp.dfm/fa.log"
-#define AUDIT_LOG_FB "/sdcard/.dfm_fa"  /* fallback */
 #define POLL_MS      500
 
 static const char *WATCH_DIRS[] = {
@@ -122,23 +121,39 @@ static void scan_fds(pid_t pid) {
     closedir(d);
 }
 
-/* ---- maps scan — 检测可疑注入库 ---- */
+/* ---- maps scan — 检测可疑注入库 (syscall 替代 fopen) ---- */
 static char g_last_suspicious[512]="";
 static void scan_maps(pid_t pid) {
     char mf[64]; snprintf(mf,sizeof(mf),"/proc/%d/maps",pid);
-    FILE *f = fopen(mf,"r"); if (!f) return;
-    char line[1024];
-    while (fgets(line,sizeof(line),f)) {
-        if (strstr(line,"libdetect")||strstr(line,"libemulator")||strstr(line,"libsandbox")) {
-            char *p=strchr(line,'/'); if (!p) continue;
-            char *nl=strchr(p,'\n'); if(nl)*nl='\0';
-            if (strcmp(p,g_last_suspicious)!=0) {
-                ALRT("SUSPICIOUS_LIB_IN_MAPS: %s",p);
-                strncpy(g_last_suspicious,p,sizeof(g_last_suspicious)-1);
-            }
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, mf, O_RDONLY, 0);
+    if (fd < 0) return;
+    /* 可疑库名: 原有3个 + Frida/Xposed/Substrate/SandHook */
+    static const char *kSuspect[] = {
+        "libdetect","libemulator","libsandbox",
+        "frida","xposed","substrate","sandhook","edxposed",
+        NULL
+    };
+    char buf[4096], line[512];
+    int lp = 0;
+    ssize_t n;
+    while ((n = syscall(__NR_read, fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            char c = buf[i];
+            if (c == '\n' || lp >= (int)sizeof(line)-1) {
+                line[lp] = '\0'; lp = 0;
+                char *p = strchr(line,'/'); if (!p) continue;
+                char *nl = strchr(p,'\n'); if (nl) *nl='\0';
+                for (int k=0; kSuspect[k]; k++) {
+                    if (strstr(p, kSuspect[k]) && strcmp(p,g_last_suspicious)!=0) {
+                        ALRT("SUSPICIOUS_LIB: %s",p);
+                        strncpy(g_last_suspicious,p,sizeof(g_last_suspicious)-1);
+                        break;
+                    }
+                }
+            } else { line[lp++] = c; }
         }
     }
-    fclose(f);
+    syscall(__NR_close, fd);
 }
 
 /* ---- net/tcp scan — 检测上报连接 ---- */
@@ -179,18 +194,30 @@ static void scan_net(pid_t pid) {
     syscall(__NR_close, fd);
 }
 
-/* ---- status — TracerPid 检测 ---- */
+/* ---- status — TracerPid 检测 (syscall 替代 fopen) ---- */
 static void check_tracer(pid_t pid) {
     char sf[64]; snprintf(sf,sizeof(sf),"/proc/%d/status",pid);
-    FILE *f = fopen(sf,"r"); if (!f) return;
-    char line[256];
-    while (fgets(line,sizeof(line),f)) {
-        if (strncmp(line,"TracerPid:",10)==0) {
-            if (atoi(line+10)!=0) ALRT("GAME_IS_TRACED pid=%d tracer=%d",pid,atoi(line+10));
-            break;
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, sf, O_RDONLY, 0);
+    if (fd < 0) return;
+    char buf[2048], line[256];
+    int lp = 0;
+    ssize_t n;
+    while ((n = syscall(__NR_read, fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            char c = buf[i];
+            if (c == '\n' || lp >= (int)sizeof(line)-1) {
+                line[lp] = '\0'; lp = 0;
+                if (strncmp(line,"TracerPid:",10)==0) {
+                    int tracer = atoi(line+10);
+                    if (tracer != 0)
+                        ALRT("GAME_IS_TRACED pid=%d tracer=%d",pid,tracer);
+                    goto done;
+                }
+            } else { line[lp++] = c; }
         }
     }
-    fclose(f);
+done:
+    syscall(__NR_close, fd);
 }
 
 /* ---- audit log 尾读 (libforgehook 写入) ---- */
