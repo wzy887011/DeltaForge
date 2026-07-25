@@ -1855,8 +1855,9 @@ static void _adjust_code(void) {
                 kKillChain[i].seq_len, kKillChain[i].seq_delta);
             if (patch_insn(imm_base + off, kKillChain[i].insn) == 0) imm_ok++;
         }
-        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
         hook_log("[hooks] v8.3 activated (sync in constructor)\n");
+        __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+        (void)imm_ok;
     }
 
     pthread_t tid;
