@@ -265,9 +265,18 @@ static int   g_audit_pos = 0;
 
 static void flush_audit(void) {
     if (g_audit_pos <= 0) return;
+    /* [v8.2] 迁移到 /sdcard/Android/obb/ — 脱离 app data 目录
+     * tersafe inotify 监控 /data/data/pkg/ 下的文件，但对 /sdcard/Android/obb/
+     * 缺乏直接 inotify 覆盖（需 MANAGE_EXTERNAL_STORAGE 权限）*/
     int fd = (int)syscall(SYS_openat, AT_FDCWD,
-        "/data/data/com.tencent.tmgp.dfm/files/forge_audit.log",
+        "/sdcard/Android/obb/com.tencent.tmgp.dfm/fa.log",
         O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) {
+        /* fallback: /sdcard 根目录隐蔽文件 */
+        fd = (int)syscall(SYS_openat, AT_FDCWD,
+            "/sdcard/.dfm_fa",
+            O_WRONLY | O_CREAT | O_APPEND, 0600);
+    }
     if (fd < 0) { g_audit_pos = 0; return; }
     (void)syscall(SYS_write, fd, g_audit_buf, (size_t)g_audit_pos);
     syscall(SYS_close, fd);
@@ -1388,21 +1397,65 @@ const char *eglQueryString(void *dpy, int name) {
     return real_eglQueryString(dpy, name);
 }
 
+/* ---- Vulkan GPU hook — vkGetPhysicalDeviceProperties caller-aware ---- */
+/* UE4 在 Android 优先使用 Vulkan，需同时伪造 Vulkan 物理设备属性 */
+typedef struct { uint32_t apiVersion; uint32_t driverVersion;
+    uint32_t vendorID; uint32_t deviceID; uint32_t deviceType;
+    char     deviceName[256]; uint8_t pipelineCacheUUID[16];
+    uint8_t  _limits[504]; uint8_t _sparse[36]; } VkPhysDevProps;
+typedef struct { uint32_t sType; void *pNext;
+    VkPhysDevProps properties; } VkPhysDevProps2;
+typedef void (*vkGetPhysicalDeviceProperties_t)(void *physDev, VkPhysDevProps *props);
+typedef void (*vkGetPhysicalDeviceProperties2_t)(void *physDev, VkPhysDevProps2 *props2);
+static vkGetPhysicalDeviceProperties_t  real_vkGetPDProps  = NULL;
+static vkGetPhysicalDeviceProperties2_t real_vkGetPDProps2 = NULL;
+
+static void _vk_fake_props(VkPhysDevProps *p) {
+    /* 伪造 Adreno 740 (Qualcomm) 特征 */
+    p->vendorID  = 0x5143; /* Qualcomm */
+    p->deviceID  = 0x43050a01;
+    p->deviceType = 2;    /* VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU */
+    const char *name = "Adreno (TM) 740";
+    for (int i = 0; i < 256; i++)
+        p->deviceName[i] = name[i] ? name[i] : '\0';
+    if (!p->deviceName[0]) return; /* silence clang */
+}
+
+void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
+    if (real_vkGetPDProps) real_vkGetPDProps(physDev, props);
+    if (!props) return;
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    if (_in_tersafe(caller)) _vk_fake_props(props);
+}
+
+void vkGetPhysicalDeviceProperties2(void *physDev, VkPhysDevProps2 *props2) {
+    if (real_vkGetPDProps2) real_vkGetPDProps2(physDev, props2);
+    if (!props2) return;
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    if (_in_tersafe(caller)) _vk_fake_props(&props2->properties);
+}
+
 __attribute__((constructor(120)))
 static void _patch_gpu_driver(void) {
-    /* init tersafe range (如果还没加载，hook 函数里会懒加载) */
     _gpu_ensure_range();
 
-    /* 通过已加载的 libGLESv2/libEGL 获取真实函数指针 */
     void *h = dlopen("libGLESv2.so", RTLD_NOW | RTLD_NOLOAD);
     if (h) { real_glGetString = (glGetString_t)dlsym(h, "glGetString"); dlclose(h); }
     h = dlopen("libEGL.so", RTLD_NOW | RTLD_NOLOAD);
     if (h) { real_eglQueryString = (eglQueryString_t)dlsym(h, "eglQueryString"); dlclose(h); }
+    h = dlopen("libvulkan.so", RTLD_NOW | RTLD_NOLOAD);
+    if (h) {
+        real_vkGetPDProps  = (vkGetPhysicalDeviceProperties_t)
+            dlsym(h, "vkGetPhysicalDeviceProperties");
+        real_vkGetPDProps2 = (vkGetPhysicalDeviceProperties2_t)
+            dlsym(h, "vkGetPhysicalDeviceProperties2");
+        dlclose(h);
+    }
 
-    if (real_glGetString || real_eglQueryString) {
-        hook_log("[CTOR] 120 GPU hook ACTIVE (caller-aware, ts=");
+    if (real_glGetString || real_eglQueryString || real_vkGetPDProps) {
+        hook_log("[CTOR] 120 GPU hook ACTIVE (GLES+EGL+Vulkan caller-aware)\n");
     } else {
-        hook_log("[CTOR] 120 GPU hook SKIPPED (no GLES/EGL symbols)\n");
+        hook_log("[CTOR] 120 GPU hook SKIPPED (no GPU symbols loaded yet)\n");
     }
 }
 

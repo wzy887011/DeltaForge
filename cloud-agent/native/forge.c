@@ -813,18 +813,49 @@ static int patch_game_process(void) {
     OK("tersafe code: %d ok / %d fail", tersafe_ok, tersafe_fail);
     total_ok += tersafe_ok; total_fail += tersafe_fail;
 
-    /* 3. tersafe BSS 段清零 (范围验证) */
+    /* 3. tersafe BSS 段清零 */
     uint64_t bss_base = get_module_base(pid, "libtersafe.so:bss");
     if (bss_base > 0) {
-        uint64_t bss_limit = ts_base + 0xC00000;  /* 保守上界 12MB */
+        uint64_t bss_limit = ts_base + 0xC00000;
+
+        /* 3a. 精确偏移清零 (硬编码，当前版本有效) */
         for (size_t i = 0; i < TERSAFE_BSS_COUNT; i++) {
             uint64_t addr = bss_base + kTersafeBssOffsets[i];
             if (kTersafeBssOffsets[i] > 0xC00000 || addr >= bss_limit) {
-                bss_fail++; continue;  /* 越界跳过，不写入 */
+                bss_fail++; continue;
             }
             if (safe_write32(pid, addr, 0, 3) == 0) bss_ok++;
             else bss_fail++;
         }
+
+        /* 3b. [v8.2] 动态补扫: 扫描 BSS 段首 0x10000 字节，
+         * 对值为 1~0xFF 的 dword 清零（检测计数器特征，非指针/非零初始值）
+         * 用于硬编码偏移版本失效时的兜底保障 */
+        int fd_mem = open("/proc/self/mem", O_RDONLY);
+        if (fd_mem < 0) {
+            /* 从守护进程访问游戏进程 mem */
+            char mempath[32];
+            snprintf(mempath, sizeof(mempath), "/proc/%d/mem", pid);
+            fd_mem = open(mempath, O_RDWR);
+        }
+        if (fd_mem >= 0) {
+            uint32_t val = 0;
+            int sweep_ok = 0;
+            for (uint64_t off = 0; off < 0x10000; off += 4) {
+                uint64_t addr = bss_base + off;
+                if (addr >= bss_limit) break;
+                if (pread(fd_mem, &val, 4, (off_t)addr) != 4) continue;
+                /* 小整数 (1~255): 计数器特征; 排除 0 (已清零) 和大值 (指针/数据) */
+                if (val >= 1 && val <= 0xFF) {
+                    uint32_t zero = 0;
+                    if (pwrite(fd_mem, &zero, 4, (off_t)addr) == 4) sweep_ok++;
+                }
+            }
+            close(fd_mem);
+            if (sweep_ok > 0)
+                OK("bss sweep zeroed %d suspicious counters", sweep_ok);
+        }
+
         OK("tersafe bss: %d ok / %d fail", bss_ok, bss_fail);
         total_ok += bss_ok; total_fail += bss_fail;
     } else {
