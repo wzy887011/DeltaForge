@@ -1,5 +1,6 @@
 # DeltaForge v5.8.1 — 游戏运行环境适配工具
 
+> **CTF 挑战: [CloudRunner v6.1](./CHALLENGE.md)** — Reverse Engineering / Binary Instrumentation / Mobile | 500 pts
 > 仓库: github.com/wzy887011/DeltaForge | 分支: master | 最新: `35a27c5`
 > 最后更新: 2026-07-24
 
