@@ -32,6 +32,14 @@
 #include <arpa/inet.h>
 #include "crypt_strings.h"
 
+#include "crypt_strings.h"
+
+/* [v7.1 P2] 垃圾指令注入 — 防静态特征码匹配 */
+#define JUNK_INSN() __asm__ __volatile__( \
+    "and x0, x0, x0\n\t" \
+    "orr x1, x1, xzr\n\t" \
+    ::: "memory")
+
 /* ============= 配置项 ============= */
 #define TARGET_PKG          "com.tencent.tmgp.dfm"
 #define APP_DATA            "/data/data/" TARGET_PKG
@@ -349,6 +357,7 @@ static int safe_write32(pid_t pid, uint64_t addr, uint32_t val, int max_retries)
 
 /* 写时校验: patch 前先读原始指令，避免写到错误偏移 */
 static int safe_verify_and_write(pid_t pid, uint64_t addr, uint32_t patch_val) {
+    JUNK_INSN();
     uint32_t before = 0;
     if (mem_read32(pid, addr, &before) != 0) return -1;
     if (before == patch_val) return 0;  /* 已在目标值，跳过 */
@@ -817,6 +826,7 @@ static void stage_hook_so(pid_t pid, char *out_path, size_t out_sz) {
  * 风险: hook_path 含特殊字符时 shell 解析错误或注入。
  * 修复: execv 直接传参数数组，路径白名单验证。*/
 static int inject_hook(pid_t pid) {
+    JUNK_INSN();
     char hook_path[768];
     stage_hook_so(pid, hook_path, sizeof(hook_path));
     /* 路径白名单：只允许 /data/app/ 和 /data/local/tmp/ */
@@ -853,6 +863,7 @@ static int inject_hook(pid_t pid) {
 
 /* ============= 核心: 内存补丁执行 ============= */
 static int patch_game_process(void) {
+    JUNK_INSN();
     pid_t pid = 0;
     for (int i = 0; i < 600; i++) {
         pid = get_pid_by_name(TARGET_PKG);
@@ -982,6 +993,7 @@ static int do_prepare(void) {
 }
 
 static int do_launch(void) {
+    JUNK_INSN();
     do_prepare();
     start_logcat();
     /* Start background behavior monitor (append-only log) */
