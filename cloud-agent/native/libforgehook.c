@@ -741,9 +741,10 @@ int lstat(const char *p,struct stat *b){INIT();if(!g_hooks_ready) return _lstat(
 ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(!g_hooks_ready) return _readlink(p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(!g_hooks_ready) return _readlinkat(dir,p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
-/* ---- tgkill / kill hook — intercept fatal termination signals
- * Only block SIGKILL(9)/SIGTERM(15).
- * Allow sig==0 (liveness check) and harmless signals (SIGCHLD, etc.). ---- */
+/* tersafe 代码段范围 — 用于 tgkill/exit_group 调用方检测 */
+static uintptr_t   g_ts_text_start = 0;
+static uintptr_t   g_ts_text_end   = 0;
+
 typedef int (*tgkill_t)(pid_t, pid_t, int);
 typedef int (*kill_t)(pid_t, int);
 static tgkill_t _tgkill = NULL;
@@ -778,8 +779,7 @@ int kill(pid_t pid, int sig) {
 /* ---- exit_group hook — block only if caller is in target module ---- */
 typedef void (*exit_group_t)(int);
 static exit_group_t _exit_group = NULL;
-static uintptr_t   g_ts_text_start = 0;
-static uintptr_t   g_ts_text_end   = 0;
+/* g_ts_text_start/end declared at line 744 */
 
 void exit_group(int status) {
     if (!_exit_group) _exit_group = (exit_group_t)dlsym(RTLD_NEXT, "exit_group");
