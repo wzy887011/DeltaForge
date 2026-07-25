@@ -88,16 +88,63 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 #define SECCOMP_RET_ERRNO 0x00050000U
 #endif
 
-/* [v7.1 Fix 2] constructor(48) — 双路径日志确保诊断可行
+/* ============================================================
+ * [v7.1 P1] 每次启动随机化标识符
+ * 防: 多次运行的二进制被 memfd 名/日志文件名指纹识别。
+ * 方案: constructor(48) 生成 6 位 hex 随机后缀，所有 memfd/shm 名
+ * 均附加后缀; /data/local/tmp 固定路径保持不变 (deploy.sh 依赖)。
+ * ============================================================ */
+static char g_rand_sfx[8] = {0};   /* "XXXXXX\0" — 6 hex chars */
+
+static void _gen_rand_suffix(void) {
+    /* 来源: /dev/urandom 优先，失败则 getpid()^time()^stack_addr 异或 */
+    uint32_t seed = 0;
+    int ufd = (int)syscall(SYS_openat, AT_FDCWD, "/dev/urandom", O_RDONLY, 0);
+    if (ufd >= 0) {
+        (void)syscall(SYS_read, ufd, &seed, 4);
+        syscall(SYS_close, ufd);
+    }
+    if (!seed) {
+        seed = (uint32_t)((uintptr_t)g_rand_sfx ^ (uint32_t)getpid()
+                         ^ (uint32_t)time(NULL));
+    }
+    /* snprintf 不可用（libc 可能未初始化），手写 hex 编码 */
+    static const char hex[] = "0123456789abcdef";
+    g_rand_sfx[0] = hex[(seed >> 28) & 0xF];
+    g_rand_sfx[1] = hex[(seed >> 24) & 0xF];
+    g_rand_sfx[2] = hex[(seed >> 20) & 0xF];
+    g_rand_sfx[3] = hex[(seed >> 16) & 0xF];
+    g_rand_sfx[4] = hex[(seed >> 12) & 0xF];
+    g_rand_sfx[5] = hex[(seed >>  8) & 0xF];
+    g_rand_sfx[6] = '\0';
+}
+
+/* 辅助: 将后缀拼到 base 后，写入 out_buf */
+static void make_sfx_name(const char *base, char *out_buf, size_t out_sz) {
+    size_t bl = 0; while (base[bl]) bl++;
+    size_t sl = 6; /* g_rand_sfx 长度固定 6 */
+    if (bl + sl + 1 > out_sz) { /* 截断保护 */
+        size_t room = (out_sz > 1) ? out_sz - 1 : 0;
+        for (size_t i = 0; i < room && i < bl; i++) out_buf[i] = base[i];
+        out_buf[room] = '\0';
+        return;
+    }
+    for (size_t i = 0; i < bl; i++) out_buf[i] = base[i];
+    for (size_t i = 0; i < sl; i++) out_buf[bl + i] = g_rand_sfx[i];
+    out_buf[bl + sl] = '\0';
+}
+
+/* [v7.1 Fix 2] constructor(48) — 双路径日志 + P1 随机后缀生成
  * v7.0 问题: 仅写 /data/local/tmp/forge_hook.log (权限 0600)。
- * Android 上 app 进程 UID 不是 root，写 root 拥有的目录可能静默失败。
- * 修复: 双路径 (主+fallback)，权限 0666，确保至少一处成功。
- * 如果两处都失败 → so 未加载，检查 injector / SELinux / maps。 */
+ * 修复: 双路径 (主+fallback)，权限 0666; 同时初始化随机后缀。 */
 __attribute__((constructor(48)))
 static void _probe_loaded(void) {
+    /* P1: 首先生成随机后缀（其他所有构造函数依赖此值）*/
+    _gen_rand_suffix();
+
     const char *log_paths[] = {
-        C_forgehook_log,           /* 主: /data/local/tmp/ */
-        "/sdcard/forge_hook.log"  /* fallback: sdcard 权限宽松 */
+        C_forgehook_log,            /* 主: /data/local/tmp/ */
+        "/sdcard/forge_hook.log"   /* fallback: sdcard 权限宽松 */
     };
     const char *msg = "[CTOR] 48 probe v7.1 enter\n";
     size_t mlen = 0; while (msg[mlen]) mlen++;
@@ -110,7 +157,6 @@ static void _probe_loaded(void) {
             syscall(SYS_close, fd);
         }
     }
-    /* 记录 done 也写双路径 */
     msg = "[CTOR] 48 probe v7.1 done\n";
     mlen = 0; while (msg[mlen]) mlen++;
     for (int lp = 0; lp < 2; lp++) {
@@ -435,11 +481,17 @@ static int null_redir(const char *p){
     return 0;
 }
 
-/* 返回匿名内存 fd：memfd_create → /dev/shm fallback → 堆缓冲区 */
+/* [v7.1 P1] memfd_anon — 随机化 memfd 名称防指纹识别 */
 static int memfd_anon(void){
-    int fd=(int)syscall(__NR_memfd_create,"ac",0);
-    if(fd<0)fd=syscall(SYS_openat,AT_FDCWD,C_devshm_ac,O_RDWR|O_CREAT|O_CLOEXEC,0600);
-    return fd; /* 失败返回 -1，调用方用 /dev/null fallback */
+    char nm[16] = "ac_";
+    nm[3] = g_rand_sfx[0]; nm[4] = g_rand_sfx[1]; nm[5] = '\0';
+    int fd=(int)syscall(__NR_memfd_create, nm, 0);
+    if(fd<0){
+        char sh[32] = "/dev/shm/.ac_";
+        sh[13]=g_rand_sfx[0];sh[14]=g_rand_sfx[1];sh[15]=g_rand_sfx[2];sh[16]='\0';
+        fd=syscall(SYS_openat,AT_FDCWD,sh,O_RDWR|O_CREAT|O_CLOEXEC,0600);
+    }
+    return fd;
 }
 
 /* ---- file routing table ---- */
@@ -524,15 +576,22 @@ static const char *HIDDEN[]={
     NULL
 };
 
-/* ---- memfd fake file — memfd_create + /dev/shm fallback ---- */
-static int override_fd(const char *s,size_t n){
-    int fd=syscall(__NR_memfd_create,"fh",0);
-    /* Fallback: /dev/shm tmpfs */
-    if(fd<0){fd=syscall(SYS_openat,AT_FDCWD,C_devshm_fh,O_RDWR|O_CREAT|O_CLOEXEC,0600);}
-    if(fd<0)return -1;
-    if(ftruncate(fd,(off_t)n)!=0){close(fd);unlink(C_devshm_fh);return -1;}
+/* [v7.1 P1] override_fd — 随机化 memfd/shm 名防指纹 */
+static int override_fd(const char *s, size_t n) {
+    char nm[16] = "fh_";
+    nm[3]=g_rand_sfx[0]; nm[4]=g_rand_sfx[1]; nm[5]='\0';
+    int fd = syscall(__NR_memfd_create, nm, 0);
+    if (fd < 0) {
+        char sh[32] = "/dev/shm/.fh_";
+        sh[13]=g_rand_sfx[0];sh[14]=g_rand_sfx[1];sh[15]=g_rand_sfx[2];sh[16]='\0';
+        fd = syscall(SYS_openat, AT_FDCWD, sh, O_RDWR|O_CREAT|O_CLOEXEC, 0600);
+        if (fd < 0) return -1;
+        if (ftruncate(fd,(off_t)n) != 0) { close(fd); return -1; }
+    } else {
+        if (ftruncate(fd,(off_t)n) != 0) { close(fd); return -1; }
+    }
     void *a=mmap(NULL,n,PROT_WRITE,MAP_SHARED,fd,0);
-    if(a==MAP_FAILED){close(fd);unlink(C_devshm_fh);return -1;}
+    if(a==MAP_FAILED){close(fd);return -1;}  /* P1: 不再 unlink 固定路径 */
     memcpy(a,s,n);munmap(a,n);lseek(fd,0,SEEK_SET);
     return fd;
 }
@@ -624,7 +683,7 @@ static int make_filtered_maps_fd(void) {
         NULL
     };
 
-    int mfd = (int)syscall(__NR_memfd_create, C_devshm_maps, 0);
+    int mfd = (int)syscall(__NR_memfd_create, "mp_" , 0);
     if (mfd < 0) { munmap(raw, cap+1); return -1; }
 
     char *line = raw, *out = raw;
