@@ -952,19 +952,13 @@ static int do_launch(void) {
     }
     if (pid) {
         usleep(500000);
-        /* [v8.3] 先 patch tersafe (建立安全窗口)，再注入 libforgehook.so
-         * 原顺序: inject → patch — tersafe 在注入期间可 kill 游戏
-         * 新顺序: patch → inject — kKillChain 先封堵，注入期间安全 */
     }
-    /* hijack 模式下 libforgehook.so 已随 Qimei 自动加载, ptrace 注入是兜底 */
+    /* [v8.3] 顺序: patch tersafe → inject libforgehook.so
+     * injector 会在 ptrace 暂停期间再 patch 一次 kKillChain（双重保障）*/
     int rc = patch_game_process();
     if (pid) {
-        if (rc == 0) {
-            usleep(100000); /* 100ms 等 patch 稳定 */
-        }
         if (inject_hook(pid) != 0) {
             WARN("hook 库加载失败 — 仅靠外部 patch 守护");
-            /* 不 abort — 外部 patch 仍在持续守护 */
         }
     }
     if (rc == 0) {

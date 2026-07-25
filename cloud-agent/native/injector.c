@@ -46,10 +46,39 @@ static int ptrace_getregs(pid_t pid, struct user_pt_regs *regs) {
     return ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
 }
 
-static int ptrace_setregs(pid_t pid, struct user_pt_regs *regs) {
-    struct iovec iov = {(void *)regs, sizeof(*regs)};
-    return ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
+#include <fcntl.h>
+
+/* kKillChain patch table — patched while target is ptrace-paused (tersafe threads also paused) */
+static const struct { uint64_t off; uint32_t val; } kKillPatches[] = {
+    {0x419fdcu, 0xD2800000u}, /* detect_entry MOV X0,#0 */
+    {0x419fe0u, 0xD65F03C0u}, /* detect_entry+4 RET     */
+    {0x2e7810u, 0xD65F03C0u}, /* kill_dispatch  RET     */
+    {0x2f29d0u, 0xD65F03C0u}, /* kill_router    RET     */
+    {0x320d78u, 0xD65F03C0u}, /* kill_wrapper   RET     */
+    {0x3233b8u, 0xD65F03C0u}, /* tgkill_call    RET     */
+};
+#define N_KILL_PATCHES (int)(sizeof(kKillPatches)/sizeof(kKillPatches[0]))
+
+static void patch_kill_chain_while_paused(pid_t pid) {
+    uint64_t ts_base = find_lib_base(pid, "libtersafe.so");
+    if (!ts_base) { printf("[*] libtersafe not in maps yet — skipping pre-patch\n"); return; }
+
+    char mem_path[64];
+    snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+    int mfd = open(mem_path, O_RDWR);
+    if (mfd < 0) { perror("[!] open /proc/pid/mem"); return; }
+
+    int ok = 0;
+    for (int i = 0; i < N_KILL_PATCHES; i++) {
+        off_t addr = (off_t)(ts_base + kKillPatches[i].off);
+        if (pwrite(mfd, &kKillPatches[i].val, 4, addr) == 4) ok++;
+    }
+    close(mfd);
+    printf("[+] kKillChain pre-patch: %d/6 OK (ts_base=0x%llx, game paused)\n",
+           ok, (unsigned long long)ts_base);
 }
+
+
 
 /* ── 在 maps 文件中找包含 addr 的 entry ──
    返回: entry 的 start (base); 出参 name_buf 填文件名 (basename only) ── */
@@ -176,6 +205,9 @@ int main(int argc, char **argv) {
     }
     int s; waitpid(pid, &s, 0);
     printf("[+] attached\n");
+
+    /* [v8.3] Patch kKillChain WHILE game is ptrace-paused — no window for tersafe to kill */
+    patch_kill_chain_while_paused(pid);
 
     /* 保存寄存器 */
     struct user_pt_regs saved;
