@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
@@ -133,6 +134,23 @@ static uint64_t find_lib_base(pid_t pid, const char *lib_name) {
     return best;
 }
 
+/* ── 获取进程所有线程 TID ── */
+static int get_all_tids(pid_t pid, pid_t *out, int max) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task", pid);
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < max) {
+        if (e->d_name[0] == '.') continue;
+        pid_t tid = (pid_t)atoi(e->d_name);
+        if (tid > 0) out[n++] = tid;
+    }
+    closedir(d);
+    return n;
+}
+
 /* kKillChain — patched while target is ptrace-paused, tersafe threads also paused */
 static const struct { uint64_t off; uint32_t val; } kKillPatches[] = {
     {0x419fdcu, 0xD2800000u}, {0x419fe0u, 0xD65F03C0u},
@@ -192,14 +210,29 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* ── ATTACH ── */
+    /* ── ATTACH main thread ── */
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) != 0) {
         perror("ATTACH"); return 1;
     }
     int s; waitpid(pid, &s, 0);
-    printf("[+] attached\n");
+    printf("[+] attached (main thread)\n");
 
-    /* [v8.3] Patch kKillChain WHILE game is ptrace-paused — no window for tersafe to kill */
+    /* [v8.3] Attach ALL other threads to keep tersafe's integrity thread paused during dlopen.
+     * PTRACE_ATTACH only stops one thread; other threads (including tersafe's integrity check)
+     * keep running and will restore kKillChain + send SIGKILL during our dlopen → EINTR.
+     * Fix: attach all threads, run dlopen with only main thread active. */
+    pid_t tids[512]; int ntids = get_all_tids(pid, tids, 512);
+    int nother = 0;
+    for (int i = 0; i < ntids; i++) {
+        if (tids[i] == pid) continue;
+        if (ptrace(PTRACE_ATTACH, tids[i], NULL, NULL) == 0) {
+            waitpid(tids[i], NULL, __WALL);
+            nother++;
+        }
+    }
+    printf("[+] frozen %d additional threads\n", nother);
+
+    /* Patch kKillChain now that ALL threads are paused */
     patch_kill_chain_while_paused(pid);
 
     /* 保存寄存器 */
@@ -335,9 +368,13 @@ int main(int argc, char **argv) {
         printf("[-] unexpected status: 0x%x\n", status);
     }
 
-    /* ── 恢复寄存器并 detach ── */
+    /* ── 恢复寄存器，detach 主线程，再 detach 所有冻结线程 ── */
     ptrace_setregs(pid, &saved);
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    for (int i = 0; i < ntids; i++) {
+        if (tids[i] == pid) continue;
+        ptrace(PTRACE_DETACH, tids[i], NULL, (void*)0);
+    }
 
     /* 检查 handle: NULL 或 error range (> 0xfffffffffffff000) 均失败 */
     if (!handle || (int64_t)handle < 0) {
