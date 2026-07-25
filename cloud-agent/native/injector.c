@@ -46,6 +46,11 @@ static int ptrace_getregs(pid_t pid, struct user_pt_regs *regs) {
     return ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
 }
 
+static int ptrace_setregs(pid_t pid, struct user_pt_regs *regs) {
+    struct iovec iov = {(void *)regs, sizeof(*regs)};
+    return ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
+}
+
 #include <fcntl.h>
 
 
