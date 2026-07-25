@@ -1337,20 +1337,20 @@ static int patch_insn(uintptr_t addr, uint32_t insn) {
 /* termination chain patch table - ordered from entry to syscall
  * v6.1: 支持特征码扫描回退 — 硬编码偏移失效时用 pattern 自动定位 */
 static const struct { uint64_t off; uint32_t insn; const char *name;
-    /* 特征码 (用于跨版本自动扫描), bytes = 0 表示无特征码 */
+    /* 特征码 (用于跨版本自动扫描), 基于实机 libtersafe.so ARM64 hex dump */
     uint32_t sig_bytes[4]; int sig_len; } kKillChain[] = {
     {0x419fdcu, 0xD2800000u, "detect_entry MOV X0,#0",
-     {0}, 0},
+     {0x97FB3560u}, 1},
     {0x419fe0u, 0xD65F03C0u, "detect_entry+4 RET",
-     {0}, 0},
+     {0x14000001u}, 1},
     {0x2e7810u, 0xD65F03C0u, "kill_dispatch RET",
-     {0}, 0},
+     {0x9400100Bu}, 1},
     {0x2f29d0u, 0xD65F03C0u, "kill_router RET",
-     {0}, 0},
+     {0x9400B8BAu}, 1},
     {0x320d78u, 0xD65F03C0u, "kill_wrapper RET",
-     {0}, 0},
+     {0x940008BFu}, 1},
     {0x3233b8u, 0xD65F03C0u, "tgkill_call RET",
-     {0}, 0},
+     {0x3840140Fu}, 1},
 };
 #define KILL_CHAIN_N (sizeof(kKillChain)/sizeof(kKillChain[0]))
 
