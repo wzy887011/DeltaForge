@@ -1370,29 +1370,34 @@ static int _in_tersafe(uintptr_t ra) {
     return ra >= g_ts_code_start && ra < g_ts_code_end;
 }
 
-/* PLT interposition: libforgehook.so 先加载，此符号覆盖 libGLESv2 的 glGetString */
+/* PLT interposition: libforgehook.so 先加载，此符号覆盖 libGLESv2 的 glGetString
+ * [v8.3] 懒加载 real_glGetString — 构造函数(120)时 libGLESv2 可能尚未加载 */
 const unsigned char *glGetString(unsigned int name) {
+    /* 懒初始化: 用 RTLD_NEXT 找后继实现，跳过本库自身 */
+    if (!real_glGetString)
+        real_glGetString = (glGetString_t)dlsym(RTLD_NEXT, "glGetString");
+
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     if (_in_tersafe(caller)) {
         switch (name) {
-            case 0x1F01: /* GL_RENDERER */
-                return (const unsigned char *)"Adreno (TM) 740";
-            case 0x1F00: /* GL_VENDOR   */
-                return (const unsigned char *)"Qualcomm";
-            case 0x1F02: /* GL_VERSION  */
-                return (const unsigned char *)"OpenGL ES 3.2 V@0730.0 (GIT@676873)";
+            case 0x1F01: return (const unsigned char *)"Adreno (TM) 740";
+            case 0x1F00: return (const unsigned char *)"Qualcomm";
+            case 0x1F02: return (const unsigned char *)"OpenGL ES 3.2 V@0730.0 (GIT@676873)";
         }
     }
-    if (!real_glGetString) return (const unsigned char *)"";
+    if (!real_glGetString) return (const unsigned char *)""; /* 极端兜底 */
     return real_glGetString(name);
 }
 
 /* PLT interposition: 覆盖 libEGL 的 eglQueryString */
 const char *eglQueryString(void *dpy, int name) {
+    if (!real_eglQueryString)
+        real_eglQueryString = (eglQueryString_t)dlsym(RTLD_NEXT, "eglQueryString");
+
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     if (_in_tersafe(caller)) {
-        if (name == 0x3053 /* EGL_VENDOR */)  return "Qualcomm";
-        if (name == 0x3054 /* EGL_VERSION */) return "1.5 Qualcomm Adreno (TM) 740";
+        if (name == 0x3053) return "Qualcomm";
+        if (name == 0x3054) return "1.5 Qualcomm Adreno (TM) 740";
     }
     if (!real_eglQueryString) return "";
     return real_eglQueryString(dpy, name);
@@ -1423,6 +1428,8 @@ static void _vk_fake_props(VkPhysDevProps *p) {
 }
 
 void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
+    if (!real_vkGetPDProps)
+        real_vkGetPDProps = (vkGetPhysicalDeviceProperties_t)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties");
     if (real_vkGetPDProps) real_vkGetPDProps(physDev, props);
     if (!props) return;
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
@@ -1430,6 +1437,8 @@ void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
 }
 
 void vkGetPhysicalDeviceProperties2(void *physDev, VkPhysDevProps2 *props2) {
+    if (!real_vkGetPDProps2)
+        real_vkGetPDProps2 = (vkGetPhysicalDeviceProperties2_t)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties2");
     if (real_vkGetPDProps2) real_vkGetPDProps2(physDev, props2);
     if (!props2) return;
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
