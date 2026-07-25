@@ -459,7 +459,8 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/sys/devices/soc0/machine",OVERRIDE_MACHINE,sizeof(OVERRIDE_MACHINE)-1},
     {"/sys/devices/soc0/family","Snapdragon\n",11},
     {"/sys/class/sensors/","\n",1},
-    /* /proc/*/status 由 open hook 动态生成（包含真实 PID），此处占位符 */
+    /* /proc/PID/status and /proc/self/status handled by open hook dynamically
+     * (includes real PID). These are placeholder entries for the match table. */
     {"/proc/net/tcp",OVERRIDE_NET_TCP,sizeof(OVERRIDE_NET_TCP)-1},
     {"/proc/net/tcp6",OVERRIDE_NET_TCP6,sizeof(OVERRIDE_NET_TCP6)-1},
     {"/proc/net/udp",OVERRIDE_NET_UDP,sizeof(OVERRIDE_NET_UDP)-1},
@@ -686,7 +687,7 @@ int open(const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
-    /* [v7.0 P2-1] /proc/*/status 动态生成（包含真实 PID）*/
+    /* [v7.0 P2-1] /proc/PID/status dynamically generated (includes real PID) */
     if(p && strstr(p,"/status") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
         ensure_proc_status();
         if(g_proc_status_len>0){int fd=override_fd(g_proc_status_buf,(size_t)g_proc_status_len);if(fd>=0)return fd;}
