@@ -305,7 +305,7 @@ static const patch_entry_t kTersafePatches[] = {
     {0x50A95C, 0x38400509}, {0x50A9BC, 0x38400503}, {0x50B704, 0x3840050A},
     {0x50E370, 0xD65F03C0},
     /* 检测链完整覆盖 - 6 节点从检测入口到 tgkill 出口 */
-    {0x419FDC, 0xD2800000},  /* detect entry -> MOV X0,#0 (report clean) */
+    {0x419FDC, 0xD65F03C0},  /* detect entry -> RET (与tersafe自修复值相同，消除翻转) */
     {0x419FE0, 0xD65F03C0},  /* detect+4 -> RET */
     {0x2E7810, 0xD65F03C0},  /* dispatch -> RET */
     {0x2F29D0, 0xD65F03C0},  /* router -> RET */
@@ -1065,7 +1065,7 @@ static int patch_game_process(void) {
     if (ts_base) {
         usleep(50000); /* 等 50ms 让 tersafe 的恢复线程跑完 */
         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
-            {0x419FDC, 0xD2800000}, {0x419FE0, 0xD65F03C0},
+            {0x419FDC, 0xD65F03C0}, {0x419FE0, 0xD65F03C0},
             {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
             {0x320D78, 0xD65F03C0}, {0x3233B8, 0xD65F03C0},
         };
@@ -1208,7 +1208,10 @@ static int do_launch(void) {
                     if (ts2 && MS_SINCE(ts_kchain) >= kchain_interval) {
                         clock_gettime(CLOCK_MONOTONIC, &ts_kchain);
                         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
-                            {0x419FDC, 0xD2800000}, {0x419FE0, 0xD65F03C0},
+                            /* 0x419FDC: 接受tersafe的RET(0xD65F03C0)，停止翻转
+                             * MOV X0,#0 和 RET 功能等价(均立即返回截断检测链)
+                             * 高频翻转本身是GTI签名，用RET消除写入噪声 */
+                            {0x419FDC, 0xD65F03C0}, {0x419FE0, 0xD65F03C0},
                             {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
                             {0x320D78, 0xD65F03C0}, {0x3233B8, 0xD65F03C0},
                         };

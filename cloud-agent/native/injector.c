@@ -153,7 +153,7 @@ static int get_all_tids(pid_t pid, pid_t *out, int max) {
 
 /* kKillChain — patched while target is ptrace-paused, tersafe threads also paused */
 static const struct { uint64_t off; uint32_t val; } kKillPatches[] = {
-    {0x419fdcu, 0xD2800000u}, {0x419fe0u, 0xD65F03C0u},
+    {0x419fdcu, 0xD65F03C0u}, {0x419fe0u, 0xD65F03C0u},
     {0x2e7810u, 0xD65F03C0u}, {0x2f29d0u, 0xD65F03C0u},
     {0x320d78u, 0xD65F03C0u}, {0x3233b8u, 0xD65F03C0u},
 };
