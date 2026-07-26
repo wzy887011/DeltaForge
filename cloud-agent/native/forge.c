@@ -60,20 +60,7 @@ static int           g_dyn_loaded = 0;
 #define DYN_UE4_COUNT       (g_dyn_loaded && g_dyn_table.ue4_count > 0 \
     ? (size_t)g_dyn_table.ue4_count : UE4_PATCH_COUNT)
 
-static void load_dyn_table(void) {
-    if (patch_loader_load(FORGE_PATCH_JSON, &g_dyn_table)) {
-        g_dyn_loaded = 1;
-        OK("[patch_loader] JSON 加载成功: tersafe=%d bss=%d ue4=%d build_id=%s",
-           g_dyn_table.tersafe_count, g_dyn_table.bss_count, g_dyn_table.ue4_count,
-           g_dyn_table.build_id[0] ? g_dyn_table.build_id : "(empty)");
-        /* 如果 JSON 中有 build_id，覆盖编译期常量 */
-        if (g_dyn_table.build_id[0] != '\0') {
-            /* 直接在 verify_tersafe_version 中使用 g_dyn_table.build_id */
-        }
-    } else {
-        WARN("[patch_loader] 未找到 %s 或解析失败，使用内置静态偏移表", FORGE_PATCH_JSON);
-    }
-}
+static void load_dyn_table(void);
 
 /* [v7.1 P2] 垃圾指令注入 — 防静态特征码匹配 */
 #define JUNK_INSN() __asm__ __volatile__( \
@@ -106,143 +93,9 @@ static void load_dyn_table(void) {
  */
 #define EXPECTED_TERSAFE_BUILD_ID  ""   /* e.g. "a1b2c3d4e5f67890..." */
 
-/* 从磁盘 ELF 文件读取 .note.gnu.build-id，输出到 hex_out（大写十六进制，末尾 \0）
- * 返回 build-id 字节数，失败返回 0 */
-static int elf_get_build_id(const char *elf_path, char *hex_out, size_t hex_sz) {
-    int fd = open(elf_path, O_RDONLY);
-    if (fd < 0) return 0;
-
-    /* 读 ELF header */
-    unsigned char ehdr[64];
-    if (read(fd, ehdr, sizeof(ehdr)) != (ssize_t)sizeof(ehdr)
-        || ehdr[0] != 0x7f || ehdr[1] != 'E' || ehdr[2] != 'L' || ehdr[3] != 'F') {
-        close(fd); return 0;
-    }
-    int is64 = (ehdr[4] == 2);
-    /* section header offset / entry size / count */
-    uint64_t shoff; uint16_t shentsize, shnum, shstrndx;
-    if (is64) {
-        shoff     = *(uint64_t*)(ehdr + 40);
-        shentsize = *(uint16_t*)(ehdr + 58);
-        shnum     = *(uint16_t*)(ehdr + 60);
-        shstrndx  = *(uint16_t*)(ehdr + 62);
-    } else {
-        shoff     = *(uint32_t*)(ehdr + 32);
-        shentsize = *(uint16_t*)(ehdr + 46);
-        shnum     = *(uint16_t*)(ehdr + 48);
-        shstrndx  = *(uint16_t*)(ehdr + 50);
-    }
-    if (!shoff || !shnum || !shstrndx) { close(fd); return 0; }
-
-    /* 读 shstrtab section header */
-    uint64_t shstr_off, shstr_sz;
-    off_t seek_pos = (off_t)(shoff + (uint64_t)shstrndx * shentsize);
-    if (lseek(fd, seek_pos, SEEK_SET) != seek_pos) { close(fd); return 0; }
-    unsigned char shhdr[64] = {0};
-    if (read(fd, shhdr, (size_t)shentsize) <= 0) { close(fd); return 0; }
-    if (is64) { shstr_off = *(uint64_t*)(shhdr+24); shstr_sz = *(uint64_t*)(shhdr+32); }
-    else       { shstr_off = *(uint32_t*)(shhdr+16); shstr_sz = *(uint32_t*)(shhdr+20); }
-    if (shstr_sz > 65536) shstr_sz = 65536;
-    char *shstrtab = (char *)malloc((size_t)shstr_sz + 1);
-    if (!shstrtab) { close(fd); return 0; }
-    lseek(fd, (off_t)shstr_off, SEEK_SET);
-    ssize_t nr = read(fd, shstrtab, (size_t)shstr_sz);
-    if (nr > 0) shstrtab[nr] = '\0'; else { free(shstrtab); close(fd); return 0; }
-
-    /* 遍历 section headers 找 .note.gnu.build-id */
-    int result = 0;
-    for (uint16_t si = 0; si < shnum && !result; si++) {
-        seek_pos = (off_t)(shoff + (uint64_t)si * shentsize);
-        if (lseek(fd, seek_pos, SEEK_SET) != seek_pos) break;
-        unsigned char sh[64] = {0};
-        if (read(fd, sh, (size_t)shentsize) <= 0) break;
-
-        uint32_t sh_name; uint32_t sh_type;
-        uint64_t sh_off, sh_size;
-        if (is64) {
-            sh_name = *(uint32_t*)(sh+0); sh_type = *(uint32_t*)(sh+4);
-            sh_off  = *(uint64_t*)(sh+24); sh_size = *(uint64_t*)(sh+32);
-        } else {
-            sh_name = *(uint32_t*)(sh+0); sh_type = *(uint32_t*)(sh+4);
-            sh_off  = *(uint32_t*)(sh+16); sh_size = *(uint32_t*)(sh+20);
-        }
-        /* SHT_NOTE = 7 */
-        if (sh_type != 7 || sh_name >= (uint32_t)shstr_sz) continue;
-        if (strncmp(shstrtab + sh_name, ".note.gnu.build-id", 18) != 0) continue;
-        if (sh_size < 16 || sh_size > 256) continue;
-
-        /* 读 note: namesz(4) descsz(4) type(4) name(namesz) desc(descsz) */
-        unsigned char note[256] = {0};
-        lseek(fd, (off_t)sh_off, SEEK_SET);
-        if (read(fd, note, (size_t)sh_size) <= 0) break;
-        uint32_t namesz = *(uint32_t*)(note+0);
-        uint32_t descsz = *(uint32_t*)(note+4);
-        /* desc starts after namesz (4-byte aligned) */
-        uint32_t desc_off = 12 + ((namesz + 3) & ~3u);
-        if (desc_off + descsz > (uint32_t)sh_size || descsz == 0) break;
-        /* encode to hex */
-        static const char hx[] = "0123456789abcdef";
-        for (uint32_t bi = 0; bi < descsz && bi * 2 + 2 < (uint32_t)hex_sz; bi++) {
-            hex_out[bi*2+0] = hx[(note[desc_off+bi] >> 4) & 0xF];
-            hex_out[bi*2+1] = hx[ note[desc_off+bi]       & 0xF];
-        }
-        hex_out[descsz * 2] = '\0';
-        result = (int)descsz;
-    }
-    free(shstrtab);
-    close(fd);
-    return result;
-}
-
-/* 从目标进程 maps 找到 libtersafe.so 的磁盘路径 */
-static int get_so_disk_path(pid_t pid, const char *soname,
-                             char *out, size_t out_sz) {
-    char maps_path[64];
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-    FILE *f = fopen(maps_path, "r");
-    if (!f) return 0;
-    char line[1024];
-    int found = 0;
-    while (fgets(line, sizeof(line), f) && !found) {
-        if (!strstr(line, soname)) continue;
-        char *slash = strchr(line, '/');
-        if (!slash) continue;
-        size_t len = strlen(slash);
-        while (len > 0 && (slash[len-1] == '\n' || slash[len-1] == '\r' || slash[len-1] == ' '))
-            len--;
-        if (len > 0 && len < out_sz) {
-            memcpy(out, slash, len); out[len] = '\0'; found = 1;
-        }
-    }
-    fclose(f);
-    return found;
-}
-
-/* 版本校验入口: 返回 1 = 版本匹配; 0 = 不匹配（跳过 patch）; -1 = 无法读取（继续） */
-static int verify_tersafe_version(pid_t pid) {
-    if (EXPECTED_TERSAFE_BUILD_ID[0] == '\0') return 1; /* 未配置，跳过校验 */
-
-    char so_path[512] = {0};
-    if (!get_so_disk_path(pid, "libtersafe.so", so_path, sizeof(so_path))) {
-        WARN("[version] 无法定位 libtersafe.so 磁盘路径，跳过校验继续执行");
-        return 1;
-    }
-    char build_id[128] = {0};
-    if (elf_get_build_id(so_path, build_id, sizeof(build_id)) == 0) {
-        WARN("[version] 无法读取 ELF build-id: %s，跳过校验继续执行", so_path);
-        return 1;
-    }
-    OK("[version] libtersafe build-id: %s", build_id);
-    if (strcmp(build_id, EXPECTED_TERSAFE_BUILD_ID) != 0) {
-        ERR("[version] build-id 不匹配! 期望=%s 实际=%s",
-            EXPECTED_TERSAFE_BUILD_ID, build_id);
-        ERR("[version] 游戏已更新 — 跳过内存 patch，避免写入错误偏移");
-        ERR("[version] 请重新逆向新版 libtersafe.so，更新偏移表后更新 build-id");
-        return 0;
-    }
-    OK("[version] build-id 验证通过 ✓");
-    return 1;
-}
+static int elf_get_build_id(const char *elf_path, char *hex_out, size_t hex_sz);
+static int get_so_disk_path(pid_t pid, const char *soname, char *out, size_t out_sz);
+static int verify_tersafe_version(pid_t pid);
 
 static void start_logcat(void) {
     /* kill existing logcat */
@@ -296,6 +149,127 @@ static FILE *g_logfile = NULL;
     if (g_logfile) { fprintf(g_logfile, "[-] " fmt "\n", ##__VA_ARGS__); fflush(g_logfile); } \
     fprintf(stderr, "\033[31m[-] " fmt "\033[0m\n", ##__VA_ARGS__); \
 } while(0)
+
+/* ========================================================================== */
+/* 后段函数实现 — 依赖上方的日志宏和静态表，放在此处避免前向引用 OK/WARN/ERR     */
+/* ========================================================================== */
+
+/* TASK-06: 启动时从 JSON 加载偏移表，失败回退内置静态表 */
+static void load_dyn_table(void) {
+    if (patch_loader_load(FORGE_PATCH_JSON, &g_dyn_table)) {
+        g_dyn_loaded = 1;
+        OK("[patch_loader] JSON 加载成功: tersafe=%d bss=%d ue4=%d build_id=%s",
+           g_dyn_table.tersafe_count, g_dyn_table.bss_count, g_dyn_table.ue4_count,
+           g_dyn_table.build_id[0] ? g_dyn_table.build_id : "(empty)");
+    } else {
+        WARN("[patch_loader] 未找到 %s 或解析失败，使用内置静态偏移表", FORGE_PATCH_JSON);
+    }
+}
+
+/* TASK-01: 从磁盘 ELF 文件读取 .note.gnu.build-id */
+static int elf_get_build_id(const char *elf_path, char *hex_out, size_t hex_sz) {
+    int fd = open(elf_path, O_RDONLY);
+    if (fd < 0) return 0;
+    unsigned char ehdr[64];
+    if (read(fd, ehdr, sizeof(ehdr)) != (ssize_t)sizeof(ehdr)
+        || ehdr[0] != 0x7f || ehdr[1] != 'E' || ehdr[2] != 'L' || ehdr[3] != 'F')
+        { close(fd); return 0; }
+    int is64 = (ehdr[4] == 2);
+    uint64_t shoff; uint16_t shentsize, shnum, shstrndx;
+    if (is64) {
+        shoff=*(uint64_t*)(ehdr+40); shentsize=*(uint16_t*)(ehdr+58);
+        shnum=*(uint16_t*)(ehdr+60); shstrndx=*(uint16_t*)(ehdr+62);
+    } else {
+        shoff=*(uint32_t*)(ehdr+32); shentsize=*(uint16_t*)(ehdr+46);
+        shnum=*(uint16_t*)(ehdr+48); shstrndx=*(uint16_t*)(ehdr+50);
+    }
+    if (!shoff||!shnum||!shstrndx) { close(fd); return 0; }
+    uint64_t shstr_off, shstr_sz;
+    off_t seek_pos = (off_t)(shoff+(uint64_t)shstrndx*shentsize);
+    if (lseek(fd,seek_pos,SEEK_SET)!=seek_pos) { close(fd); return 0; }
+    unsigned char shhdr[64]={0};
+    if (read(fd,shhdr,(size_t)shentsize)<=0) { close(fd); return 0; }
+    if (is64) { shstr_off=*(uint64_t*)(shhdr+24); shstr_sz=*(uint64_t*)(shhdr+32); }
+    else       { shstr_off=*(uint32_t*)(shhdr+16); shstr_sz=*(uint32_t*)(shhdr+20); }
+    if (shstr_sz>65536) shstr_sz=65536;
+    char *shstrtab=(char*)malloc((size_t)shstr_sz+1);
+    if (!shstrtab) { close(fd); return 0; }
+    lseek(fd,(off_t)shstr_off,SEEK_SET);
+    ssize_t nr=read(fd,shstrtab,(size_t)shstr_sz);
+    if (nr>0) shstrtab[nr]='\0'; else { free(shstrtab); close(fd); return 0; }
+    int result=0;
+    for (uint16_t si=0; si<shnum&&!result; si++) {
+        seek_pos=(off_t)(shoff+(uint64_t)si*shentsize);
+        if (lseek(fd,seek_pos,SEEK_SET)!=seek_pos) break;
+        unsigned char sh[64]={0};
+        if (read(fd,sh,(size_t)shentsize)<=0) break;
+        uint32_t sh_name,sh_type; uint64_t sh_off,sh_size;
+        if (is64) {
+            sh_name=*(uint32_t*)(sh+0); sh_type=*(uint32_t*)(sh+4);
+            sh_off=*(uint64_t*)(sh+24); sh_size=*(uint64_t*)(sh+32);
+        } else {
+            sh_name=*(uint32_t*)(sh+0); sh_type=*(uint32_t*)(sh+4);
+            sh_off=*(uint32_t*)(sh+16); sh_size=*(uint32_t*)(sh+20);
+        }
+        if (sh_type!=7||sh_name>=(uint32_t)shstr_sz) continue;
+        if (strncmp(shstrtab+sh_name,".note.gnu.build-id",18)!=0) continue;
+        if (sh_size<16||sh_size>256) continue;
+        unsigned char note[256]={0};
+        lseek(fd,(off_t)sh_off,SEEK_SET);
+        if (read(fd,note,(size_t)sh_size)<=0) break;
+        uint32_t namesz=*(uint32_t*)(note+0), descsz=*(uint32_t*)(note+4);
+        uint32_t desc_off=12+((namesz+3)&~3u);
+        if (desc_off+descsz>(uint32_t)sh_size||descsz==0) break;
+        static const char hx[]="0123456789abcdef";
+        for (uint32_t bi=0; bi<descsz&&bi*2+2<(uint32_t)hex_sz; bi++) {
+            hex_out[bi*2+0]=hx[(note[desc_off+bi]>>4)&0xF];
+            hex_out[bi*2+1]=hx[note[desc_off+bi]&0xF];
+        }
+        hex_out[descsz*2]='\0'; result=(int)descsz;
+    }
+    free(shstrtab); close(fd);
+    return result;
+}
+
+static int get_so_disk_path(pid_t pid, const char *soname,
+                             char *out, size_t out_sz) {
+    char maps_path[64];
+    snprintf(maps_path,sizeof(maps_path),"/proc/%d/maps",pid);
+    FILE *f=fopen(maps_path,"r"); if (!f) return 0;
+    char line[1024]; int found=0;
+    while (fgets(line,sizeof(line),f)&&!found) {
+        if (!strstr(line,soname)) continue;
+        char *slash=strchr(line,'/'); if (!slash) continue;
+        size_t len=strlen(slash);
+        while (len>0&&(slash[len-1]=='\n'||slash[len-1]=='\r'||slash[len-1]==' ')) len--;
+        if (len>0&&len<out_sz) { memcpy(out,slash,len); out[len]='\0'; found=1; }
+    }
+    fclose(f); return found;
+}
+
+static int verify_tersafe_version(pid_t pid) {
+    const char *expected = g_dyn_loaded && g_dyn_table.build_id[0]
+        ? g_dyn_table.build_id : EXPECTED_TERSAFE_BUILD_ID;
+    if (expected[0]=='\0') return 1;
+    char so_path[512]={0};
+    if (!get_so_disk_path(pid,"libtersafe.so",so_path,sizeof(so_path))) {
+        WARN("[version] 无法定位 libtersafe.so 磁盘路径，跳过校验继续执行");
+        return 1;
+    }
+    char build_id[128]={0};
+    if (elf_get_build_id(so_path,build_id,sizeof(build_id))==0) {
+        WARN("[version] 无法读取 ELF build-id: %s，跳过校验继续执行",so_path);
+        return 1;
+    }
+    OK("[version] libtersafe build-id: %s (expect: %s)", build_id, expected);
+    if (strcmp(build_id,expected)!=0) {
+        ERR("[version] build-id 不匹配! 游戏已更新 — 跳过内存 patch");
+        ERR("[version] 请更新偏移表 JSON 或重新逆向新版 libtersafe.so");
+        return 0;
+    }
+    OK("[version] build-id 验证通过");
+    return 1;
+}
 
 /* ============= 内存调整条目 ============= */
 typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
