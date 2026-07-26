@@ -182,9 +182,9 @@ class ForgeController:
             if resp.get("status") == "ok": self.connected = True; return True
         print("[-] forge 连接失败"); return False
 
-    def prepare(self)   -> bool: r=send_forge_command("prepare",timeout=120); print(f"    prepare: {r}"); return r.get("status")=="ok"
-    def launch(self)    -> bool: r=send_forge_command("launch", timeout=180); print(f"    launch: {r}");  return r.get("status") in ("ok","partial")
-    def patch_only(self)-> bool: r=send_forge_command("patch",  timeout=60);  print(f"    patch: {r}");   return r.get("status") in ("ok","partial")
+    def prepare(self)   -> bool: r=send_forge_command_with_retry("prepare",timeout=120); print(f"    prepare: {r}"); return r.get("status")=="ok"
+    def launch(self)    -> bool: r=send_forge_command_with_retry("launch", timeout=180); print(f"    launch: {r}");  return r.get("status") in ("ok","partial")
+    def patch_only(self)-> bool: r=send_forge_command_with_retry("patch",  timeout=60);  print(f"    patch: {r}");   return r.get("status") in ("ok","partial")
     def stop(self)      -> bool: return send_forge_command("stop").get("status")=="ok"
     def status(self)    -> dict: return send_forge_command("status")
     def clean(self)     -> int:  return send_forge_command("clean").get("cleaned",0)
@@ -194,6 +194,66 @@ class ForgeController:
         print("="*50+"\n[*] Full restart cycle")
         self.stop(); time.sleep(2); self.clean(); self.adapt_props(); self.prepare(); self.launch()
         print("[*] Done\n"+"="*50)
+
+
+# ── [TASK-08] 带重试的命令发送 ──────────────────────────────────
+def send_forge_command_with_retry(cmd: str, timeout: float = 30.0,
+                                   retries: int = 3,
+                                   retry_delay: float = 5.0) -> dict:
+    """发送 forge 命令，失败时自动重建 adb forward 后重试。"""
+    for attempt in range(retries):
+        resp = send_forge_command(cmd, timeout)
+        if resp.get("status") not in ("err",):
+            return resp
+        if attempt < retries - 1:
+            print(f"[retry] {cmd} 失败 (attempt {attempt+1}/{retries})，等待 {retry_delay}s")
+            setup_adb_forward()
+            time.sleep(retry_delay)
+    return resp
+
+
+# ── [TASK-03] forge 崩溃自恢复 Watchdog ─────────────────────────
+import threading
+
+class WatchdogThread(threading.Thread):
+    """每 interval 秒 ping forge，死了就重启。最多连续失败 max_fail 次后停止。"""
+
+    def __init__(self, ctrl: "ForgeController", interval: int = 10, max_fail: int = 3):
+        super().__init__(daemon=True, name="forge-watchdog")
+        self._ctrl     = ctrl
+        self._interval = interval
+        self._max_fail = max_fail
+        self._stop_evt = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+
+    def run(self) -> None:
+        consecutive_fail = 0
+        print(f"[watchdog] 启动，检测间隔 {self._interval}s")
+        while not self._stop_evt.wait(timeout=self._interval):
+            resp = send_forge_command("ping", timeout=5.0)
+            if resp.get("status") == "ok":
+                consecutive_fail = 0
+                continue
+            consecutive_fail += 1
+            print(f"[watchdog] forge 无响应 (连续 {consecutive_fail}/{self._max_fail})")
+            if consecutive_fail >= self._max_fail:
+                print("[watchdog] 尝试重启 forge ...")
+                try:
+                    push_and_start_forge()
+                    setup_adb_forward()
+                    time.sleep(3)
+                    if self._ctrl.connect():
+                        consecutive_fail = 0
+                        print("[watchdog] forge 重启成功")
+                    else:
+                        print("[watchdog] forge 重启失败，停止 watchdog")
+                        break
+                except Exception as e:
+                    print(f"[watchdog] 重启异常: {e}")
+                    break
+        print("[watchdog] 退出")
 
 
 if __name__ == "__main__":

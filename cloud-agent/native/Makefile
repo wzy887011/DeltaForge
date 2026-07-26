@@ -8,9 +8,9 @@ CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION
 
 all: forge libforgehook.so touch_injector injector forge_monitor
 
-forge: forge.c
+forge: forge.c patch_loader.c
 	@if [ -f "$(CC)" ]; then \
-		$(CC) $(CFLAGS_STATIC) forge.c -o forge; \
+		$(CC) $(CFLAGS_STATIC) forge.c patch_loader.c -o forge; \
 		file forge; ls -lh forge; \
 	else \
 		echo "NDK not found at $(CC). Set NDK= or run: make host"; \
@@ -54,7 +54,7 @@ forge_monitor: forge_monitor.c
 	fi
 
 host:
-	gcc -static -Os -Wall forge.c -o forge -lpthread
+	gcc -static -Os -Wall forge.c patch_loader.c -o forge -lpthread
 	gcc -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl
 	gcc -static -Os -Wall touch_injector.c -o touch_injector
 	gcc -Os -Wall injector.c -o injector -ldl
@@ -64,8 +64,8 @@ host:
 
 # Termux 设备原生编译 — 无独立 libpthread/libc，去掉 -static/-lpthread
 termux:
-	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c -o forge
-	clang -shared -fPIC -Os -Wall -DFORGEHOOK_VERSION=8 libforgehook.c -o libforgehook.so -ldl
+	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c patch_loader.c -o forge
+	clang -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION=8 libforgehook.c -o libforgehook.so -ldl
 	@if command -v patchelf >/dev/null 2>&1; then \
 		patchelf --remove-rpath libforgehook.so; \
 		echo "[termux] RUNPATH stripped from libforgehook.so"; \
@@ -73,9 +73,9 @@ termux:
 		echo "[termux] WARNING: patchelf not found — run: pkg install patchelf"; \
 		echo "[termux] RUNPATH may cause dlopen failure in Android app namespace"; \
 	fi
-	clang -Os -Wall touch_injector.c -o touch_injector
-	clang -Os -Wall injector.c -o injector -ldl
-	clang -Os -Wall forge_monitor.c -o forge_monitor
+	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer touch_injector.c -o touch_injector
+	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer injector.c -o injector -ldl
+	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge_monitor.c -o forge_monitor
 	ls -lh forge libforgehook.so touch_injector injector forge_monitor
 
 clean:

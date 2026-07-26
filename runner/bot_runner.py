@@ -9,6 +9,14 @@
 
 import subprocess, time, json, os, sys, random, math
 
+# [TASK-03/08] 集成 watchdog 和重试
+try:
+    from forge_controller import (ForgeController, WatchdogThread,
+                                   send_forge_command_with_retry)
+    _HAS_CTRL = True
+except ImportError:
+    _HAS_CTRL = False
+
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "forge_config.json")
 ROUTES_FILE = os.path.join(CONFIG_DIR, "map_routes.json")
@@ -259,6 +267,13 @@ class BotRunner:
 
     def run(self):
         self._running = True
+        # [TASK-03] 启动 forge watchdog（需先通过 set_forge_ctrl 注入 ctrl）
+        _watchdog = None
+        if _HAS_CTRL and self._forge_ctrl is not None:
+            _watchdog = WatchdogThread(self._forge_ctrl, interval=10)
+            _watchdog.start()
+            print("[bot] forge watchdog 已启动")
+
         routes = self._load_routes()
         pool = list(routes["routes"])
         random.shuffle(pool)
@@ -325,6 +340,9 @@ class BotRunner:
             self._crash_backoff = 30
         print(f"Done: {self.runs} runs, ~{self.profit:,}")
         self._running = False
+        # [TASK-03] 停止 watchdog
+        if _watchdog is not None:
+            _watchdog.stop()
 
     def stop(self):
         self._running = False

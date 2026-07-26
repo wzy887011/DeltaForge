@@ -175,12 +175,19 @@ static void patch_kill_chain_while_paused(pid_t pid) {
    用于 ptrace 远程 syscall — 我们不能执行目标栈上的代码 (W^X)。 ── */
 static uint64_t find_svc_gadget(pid_t pid) {
     const char *candidates[] = {"libc.so", "linker64", "libdl.so", NULL};
-    char mem_path[64], line[1024];
-    snprintf(mem_path, sizeof(mem_path), "/proc/%d/maps", pid);
-    FILE *mf = fopen(mem_path, "r");
+    char maps_path[64], mem_path[64], line[1024];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    snprintf(mem_path,  sizeof(mem_path),  "/proc/%d/mem",  pid);
+    FILE *mf = fopen(maps_path, "r");
     if (!mf) return 0;
 
+    /* open /proc/pid/mem once, reuse across all candidate segments */
+    int mem_fd = open(mem_path, O_RDONLY);
+
     uint64_t gadget = 0;
+    /* fixed scan buffer — 64KB, reused across segments */
+    static uint32_t scan_buf[16384];
+
     while (fgets(line, sizeof(line), mf) && !gadget) {
         uint64_t start, end; char perms[8], fname[256] = {0};
         if (sscanf(line, "%llx-%llx %7s %*s %*s %*s %255s",
@@ -195,24 +202,21 @@ static uint64_t find_svc_gadget(pid_t pid) {
             if (strncmp(base, candidates[i], strlen(candidates[i])) == 0) { match = 1; break; }
         if (!match) continue;
 
-        /* 读 text 段, 扫描 SVC #0 = 0xD4000001 */
-        size_t size = (size_t)(end - start);
-        if (size > 0x200000) size = 0x200000; /* 前 2MB 足够 */
-        uint32_t *buf = (uint32_t *)malloc(size);
-        if (!buf) continue;
-        snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
-        int fd = open(mem_path, O_RDONLY);
-        if (fd >= 0) {
-            ssize_t n = pread(fd, buf, size, (off_t)start);
-            if (n > 0) {
-                for (size_t i = 0; i < (size_t)n / 4; i++) {
-                    if (buf[i] == 0xD4000001) { gadget = start + i * 4; break; }
-                }
+        if (mem_fd < 0) continue;
+        /* scan in 64KB chunks to cover segments larger than 2MB */
+        uint64_t pos = start;
+        while (pos < end && !gadget) {
+            size_t chunk = sizeof(scan_buf);
+            if (pos + chunk > end) chunk = (size_t)(end - pos);
+            ssize_t n = pread(mem_fd, scan_buf, chunk, (off_t)pos);
+            if (n <= 0) break;
+            for (size_t i = 0; i < (size_t)n / 4; i++) {
+                if (scan_buf[i] == 0xD4000001u) { gadget = pos + i * 4; break; }
             }
-            close(fd);
+            pos += (uint64_t)n;
         }
-        free(buf);
     }
+    if (mem_fd >= 0) close(mem_fd);
     fclose(mf);
     return gadget;
 }
@@ -236,7 +240,8 @@ static int64_t remote_syscall(pid_t pid, uint64_t svc_addr,
     regs.regs[5]  = a5;
     regs.regs[8]  = sysno;
     regs.pc       = svc_addr;
-    regs.regs[30] = 0;
+    /* point LR at a known BRK #0 so an accidental return traps cleanly */
+    regs.regs[30] = svc_addr + 4;
 
     if (ptrace_setregs(pid, &regs) != 0) return -1;
 
@@ -330,8 +335,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ntids; i++) {
         if (tids[i] == pid) continue;
         if (ptrace(PTRACE_ATTACH, tids[i], NULL, NULL) == 0) {
-            waitpid(tids[i], NULL, __WALL);
-            nother++;
+            /* waitpid with timeout: poll up to 500ms per thread */
+            int ws; int waited = 0;
+            while (waited < 500) {
+                pid_t r = waitpid(tids[i], &ws, WNOHANG | __WALL);
+                if (r == tids[i]) { nother++; break; }
+                if (r < 0) break;
+                usleep(10000); waited += 10;
+            }
+            if (waited >= 500)
+                ptrace(PTRACE_DETACH, tids[i], NULL, NULL);
         }
     }
     printf("[+] frozen %d additional threads\n", nother);

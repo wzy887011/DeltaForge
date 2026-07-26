@@ -45,12 +45,12 @@
 #define JUNK_INSN() __asm__ __volatile__( \
     "and x0, x0, x0\n\t" \
     "orr x1, x1, xzr\n\t" \
-    ::: "memory")
+    :: : "x0", "x1", "memory")
 
 #define JUNK_INSN2() __asm__ __volatile__( \
     "orr x2, x2, xzr\n\t" \
     "and x3, x3, x3\n\t" \
-    ::: "memory")
+    :: : "x2", "x3", "memory")
 
 /* forward declarations — 函数定义在后，但前向构造函数中需要引用 */
 static uintptr_t get_module_base(const char *so_name);
@@ -247,6 +247,8 @@ static void _hide_self_from_maps(void) {
                             madvise((void*)start, len, MADV_DONTDUMP);
                             hook_log("[P3] mremap FAILED, fallback DONTDUMP\n");
                         } else {
+                            /* 恢复原始权限 (数据段通常 rw-p) */
+                            mprotect((void*)start, len, PROT_READ|PROT_WRITE);
                             hook_log("[P3] mremap anon ok\n");
                         }
                     }
@@ -263,6 +265,7 @@ static void _hide_self_from_maps(void) {
 #define AUDIT_BUF_SIZE 32768
 static char  g_audit_buf[AUDIT_BUF_SIZE];
 static int   g_audit_pos = 0;
+static pthread_mutex_t g_audit_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void flush_audit(void) {
     if (g_audit_pos <= 0) return;
@@ -291,6 +294,7 @@ static void forge_audit(const char *action, const char *path) {
         !strstr(path, "/sys/") &&
         !strstr(path, "/sdcard/Tencent"))
         return;
+    pthread_mutex_lock(&g_audit_mtx);
     int n = snprintf(g_audit_buf + g_audit_pos,
         (size_t)(AUDIT_BUF_SIZE - g_audit_pos),
         "[GAP][%s] %s\n", action, path);
@@ -298,6 +302,7 @@ static void forge_audit(const char *action, const char *path) {
         g_audit_pos += n;
         if (g_audit_pos >= AUDIT_BUF_SIZE - 640) flush_audit();
     }
+    pthread_mutex_unlock(&g_audit_mtx);
 }
 
 
@@ -336,15 +341,30 @@ static int dirname_join_real(const char *self_path, char *out, size_t out_sz) {
 static int find_self_from_maps(char *out, size_t out_sz) {
     int fd = (int)syscall(SYS_openat, AT_FDCWD, C_maps_path, O_RDONLY, 0);
     if (fd < 0) return 0;
-    char buf[32768];
-    ssize_t n = (ssize_t)syscall(SYS_read, fd, buf, sizeof(buf) - 1);
+
+    /* dynamic buffer matching _hide_self_from_maps FIX-B */
+    size_t cap = 131072;
+    char *buf = NULL;
+    ssize_t n = 0;
+    while (cap <= 4 * 1024 * 1024) {
+        if (buf) munmap(buf, cap / 2 + 1);
+        buf = (char *)mmap(NULL, cap + 1, PROT_READ|PROT_WRITE,
+                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (buf == MAP_FAILED) { buf = NULL; break; }
+        if (lseek(fd, 0, SEEK_SET) != 0) break;
+        n = 0; ssize_t r;
+        while ((r = (ssize_t)syscall(SYS_read, fd, buf + n,
+                                     cap - (size_t)n)) > 0) n += r;
+        if ((size_t)n < cap) break;
+        cap *= 2;
+    }
     syscall(SYS_close, fd);
-    if (n <= 0) return 0;
+    if (!buf || n <= 0) { if (buf && buf != MAP_FAILED) munmap(buf, cap+1); return 0; }
     buf[n] = '\0';
 
-    /* 逐行解析，找包含 libtdmqimei 的行，提取路径列 (第6列，'/'开头) */
     const char *needle = C_qimei;
     char *line = buf;
+    int found = 0;
     while (line && *line) {
         char *eol = strchr(line, '\n');
         if (eol) *eol = '\0';
@@ -357,6 +377,21 @@ static int find_self_from_maps(char *out, size_t out_sz) {
                     len--;
                 if (len > 0 && len < out_sz) {
                     memcpy(out, path, len);
+                    out[len] = '\0';
+                    if (eol) *eol = '\n';
+                    found = 1;
+                    break;
+                }
+            }
+        }
+
+        if (!eol) break;
+        *eol = '\n';
+        line = eol + 1;
+    }
+    munmap(buf, cap + 1);
+    return found;
+}
                     out[len] = '\0';
                     if (eol) *eol = '\n';
                     return 1;
@@ -497,14 +532,62 @@ static const char OVERRIDE_MACHINE[]="Snapdragon 8+ Gen1\n";
 static char g_proc_status_buf[512];
 static int  g_proc_status_len = 0;
 
+/* [TASK-04] 动态刷新: 每次调用都重新生成，不缓存
+ * 避免首次生成后 TracerPid 因外部 ptrace attach 变为非零
+ * 但 TracerPid 字段已在 PROC_STATUS_FMT 硬写为 0，始终安全 */
 static void ensure_proc_status(void) {
-    if (g_proc_status_len > 0) return;
     pid_t tgid = getpid();
     pid_t tid  = (pid_t)syscall(SYS_gettid);
     g_proc_status_len = snprintf(g_proc_status_buf, sizeof(g_proc_status_buf),
         PROC_STATUS_FMT, tgid, tid, tgid, tid, tgid, tgid);
     if (g_proc_status_len < 0 || g_proc_status_len >= (int)sizeof(g_proc_status_buf))
         g_proc_status_len = 0;
+}
+
+/* [TASK-04] 对任意 /proc/X/status 内容做行级过滤:
+ *   TracerPid: <非零>  →  TracerPid:\t0
+ *   State: t           →  State:\tS (sleeping)
+ * buf 原地修改，不改变总长度（用空格补齐） */
+static void filter_status_tracerpid(char *buf, size_t len) {
+    char *p = buf;
+    char *end = buf + len;
+    while (p < end) {
+        char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
+        size_t line_len = nl ? (size_t)(nl - p + 1) : (size_t)(end - p);
+
+        if (line_len > 11 && memcmp(p, "TracerPid:", 10) == 0) {
+            /* 找到 TracerPid 行，将值替换为 0，其余用空格补齐 */
+            char *val_start = p + 10;
+            /* skip whitespace */
+            while (val_start < p + (long)line_len - 1 &&
+                   (*val_start == ' ' || *val_start == '\t')) val_start++;
+            char *val_end = nl ? nl : end;
+            /* 写入 "TracerPid:\t0" 并用空格填充原有数字 */
+            p[10] = '\t'; p[11] = '0';
+            for (char *pad = p + 12; pad < val_end; pad++) *pad = ' ';
+        } else if (line_len > 7 && memcmp(p, "State:", 6) == 0) {
+            /* 如果进程处于 traced 状态 't'，改为 'S (sleeping)' */
+            char *s = p + 6;
+            while (s < p + (long)line_len - 1 && (*s == ' ' || *s == '\t')) s++;
+            if (s < end && *s == 't') {
+                *s = 'S';
+                if (s + 1 < end) { s[1] = ' '; }
+                if (s + 2 < end) { s[2] = '('; }
+                if (s + 3 < end) { s[3] = 's'; }
+                if (s + 4 < end) { s[4] = 'l'; }
+                if (s + 5 < end) { s[5] = 'e'; }
+                if (s + 6 < end) { s[6] = 'e'; }
+                if (s + 7 < end) { s[7] = 'p'; }
+                if (s + 8 < end) { s[8] = 'i'; }
+                if (s + 9 < end) { s[9] = 'n'; }
+                if (s + 10 < end){ s[10]= 'g'; }
+                if (s + 11 < end){ s[11]= ')'; }
+            }
+        }
+
+        if (!nl) break;
+        p = nl + 1;
+    }
 }
 
 /* /proc/self/environ — 清空，隐藏 LD_PRELOAD 等注入痕迹 */

@@ -38,6 +38,42 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "crypt_strings.h"
+#include "patch_loader.h"
+#include <sys/un.h>
+
+/* ============= TASK-06: 动态 patch 表 (启动时从 JSON 加载，失败回退静态) ===== */
+#define FORGE_PATCH_JSON "/data/local/tmp/forge_patches.json"
+static patch_table_t g_dyn_table;   /* 动态加载结果 */
+static int           g_dyn_loaded = 0;
+
+/* 宏：透明访问 — 优先动态表，fallback 静态表 */
+#define DYN_TERSAFE_PATCHES (g_dyn_loaded && g_dyn_table.tersafe_count > 0 \
+    ? g_dyn_table.tersafe_patches : kTersafePatches)
+#define DYN_TERSAFE_COUNT   (g_dyn_loaded && g_dyn_table.tersafe_count > 0 \
+    ? (size_t)g_dyn_table.tersafe_count : TERSAFE_PATCH_COUNT)
+#define DYN_BSS_OFFSETS     (g_dyn_loaded && g_dyn_table.bss_count > 0 \
+    ? g_dyn_table.tersafe_bss : kTersafeBssOffsets)
+#define DYN_BSS_COUNT       (g_dyn_loaded && g_dyn_table.bss_count > 0 \
+    ? (size_t)g_dyn_table.bss_count : TERSAFE_BSS_COUNT)
+#define DYN_UE4_PATCHES     (g_dyn_loaded && g_dyn_table.ue4_count > 0 \
+    ? g_dyn_table.ue4_patches : kUE4Patches)
+#define DYN_UE4_COUNT       (g_dyn_loaded && g_dyn_table.ue4_count > 0 \
+    ? (size_t)g_dyn_table.ue4_count : UE4_PATCH_COUNT)
+
+static void load_dyn_table(void) {
+    if (patch_loader_load(FORGE_PATCH_JSON, &g_dyn_table)) {
+        g_dyn_loaded = 1;
+        OK("[patch_loader] JSON 加载成功: tersafe=%d bss=%d ue4=%d build_id=%s",
+           g_dyn_table.tersafe_count, g_dyn_table.bss_count, g_dyn_table.ue4_count,
+           g_dyn_table.build_id[0] ? g_dyn_table.build_id : "(empty)");
+        /* 如果 JSON 中有 build_id，覆盖编译期常量 */
+        if (g_dyn_table.build_id[0] != '\0') {
+            /* 直接在 verify_tersafe_version 中使用 g_dyn_table.build_id */
+        }
+    } else {
+        WARN("[patch_loader] 未找到 %s 或解析失败，使用内置静态偏移表", FORGE_PATCH_JSON);
+    }
+}
 
 /* [v7.1 P2] 垃圾指令注入 — 防静态特征码匹配 */
 #define JUNK_INSN() __asm__ __volatile__( \
@@ -62,14 +98,182 @@
 #define BACKOFF_BASE_MS    100
 #define BACKOFF_MAX_MS     2000
 
+/* ============= TASK-01: libtersafe.so ELF build-id 版本绑定 =============
+ * 空字符串 = 跳过校验（首次部署时先跑一次抓 id 再填）
+ * 非空 = 必须与磁盘文件的 .note.gnu.build-id 完全匹配才允许 patch
+ * 填法: 在游戏加载后运行 `sha1sum /proc/<pid>/maps` 找到 libtersafe 路径，
+ *       再 `readelf -n libtersafe.so | grep "Build ID"` 得到十六进制串填入此处
+ */
+#define EXPECTED_TERSAFE_BUILD_ID  ""   /* e.g. "a1b2c3d4e5f67890..." */
+
+/* 从磁盘 ELF 文件读取 .note.gnu.build-id，输出到 hex_out（大写十六进制，末尾 \0）
+ * 返回 build-id 字节数，失败返回 0 */
+static int elf_get_build_id(const char *elf_path, char *hex_out, size_t hex_sz) {
+    int fd = open(elf_path, O_RDONLY);
+    if (fd < 0) return 0;
+
+    /* 读 ELF header */
+    unsigned char ehdr[64];
+    if (read(fd, ehdr, sizeof(ehdr)) != (ssize_t)sizeof(ehdr)
+        || ehdr[0] != 0x7f || ehdr[1] != 'E' || ehdr[2] != 'L' || ehdr[3] != 'F') {
+        close(fd); return 0;
+    }
+    int is64 = (ehdr[4] == 2);
+    /* section header offset / entry size / count */
+    uint64_t shoff; uint16_t shentsize, shnum, shstrndx;
+    if (is64) {
+        shoff     = *(uint64_t*)(ehdr + 40);
+        shentsize = *(uint16_t*)(ehdr + 58);
+        shnum     = *(uint16_t*)(ehdr + 60);
+        shstrndx  = *(uint16_t*)(ehdr + 62);
+    } else {
+        shoff     = *(uint32_t*)(ehdr + 32);
+        shentsize = *(uint16_t*)(ehdr + 46);
+        shnum     = *(uint16_t*)(ehdr + 48);
+        shstrndx  = *(uint16_t*)(ehdr + 50);
+    }
+    if (!shoff || !shnum || !shstrndx) { close(fd); return 0; }
+
+    /* 读 shstrtab section header */
+    uint64_t shstr_off, shstr_sz;
+    off_t seek_pos = (off_t)(shoff + (uint64_t)shstrndx * shentsize);
+    if (lseek(fd, seek_pos, SEEK_SET) != seek_pos) { close(fd); return 0; }
+    unsigned char shhdr[64] = {0};
+    if (read(fd, shhdr, (size_t)shentsize) <= 0) { close(fd); return 0; }
+    if (is64) { shstr_off = *(uint64_t*)(shhdr+24); shstr_sz = *(uint64_t*)(shhdr+32); }
+    else       { shstr_off = *(uint32_t*)(shhdr+16); shstr_sz = *(uint32_t*)(shhdr+20); }
+    if (shstr_sz > 65536) shstr_sz = 65536;
+    char *shstrtab = (char *)malloc((size_t)shstr_sz + 1);
+    if (!shstrtab) { close(fd); return 0; }
+    lseek(fd, (off_t)shstr_off, SEEK_SET);
+    ssize_t nr = read(fd, shstrtab, (size_t)shstr_sz);
+    if (nr > 0) shstrtab[nr] = '\0'; else { free(shstrtab); close(fd); return 0; }
+
+    /* 遍历 section headers 找 .note.gnu.build-id */
+    int result = 0;
+    for (uint16_t si = 0; si < shnum && !result; si++) {
+        seek_pos = (off_t)(shoff + (uint64_t)si * shentsize);
+        if (lseek(fd, seek_pos, SEEK_SET) != seek_pos) break;
+        unsigned char sh[64] = {0};
+        if (read(fd, sh, (size_t)shentsize) <= 0) break;
+
+        uint32_t sh_name; uint32_t sh_type;
+        uint64_t sh_off, sh_size;
+        if (is64) {
+            sh_name = *(uint32_t*)(sh+0); sh_type = *(uint32_t*)(sh+4);
+            sh_off  = *(uint64_t*)(sh+24); sh_size = *(uint64_t*)(sh+32);
+        } else {
+            sh_name = *(uint32_t*)(sh+0); sh_type = *(uint32_t*)(sh+4);
+            sh_off  = *(uint32_t*)(sh+16); sh_size = *(uint32_t*)(sh+20);
+        }
+        /* SHT_NOTE = 7 */
+        if (sh_type != 7 || sh_name >= (uint32_t)shstr_sz) continue;
+        if (strncmp(shstrtab + sh_name, ".note.gnu.build-id", 18) != 0) continue;
+        if (sh_size < 16 || sh_size > 256) continue;
+
+        /* 读 note: namesz(4) descsz(4) type(4) name(namesz) desc(descsz) */
+        unsigned char note[256] = {0};
+        lseek(fd, (off_t)sh_off, SEEK_SET);
+        if (read(fd, note, (size_t)sh_size) <= 0) break;
+        uint32_t namesz = *(uint32_t*)(note+0);
+        uint32_t descsz = *(uint32_t*)(note+4);
+        /* desc starts after namesz (4-byte aligned) */
+        uint32_t desc_off = 12 + ((namesz + 3) & ~3u);
+        if (desc_off + descsz > (uint32_t)sh_size || descsz == 0) break;
+        /* encode to hex */
+        static const char hx[] = "0123456789abcdef";
+        for (uint32_t bi = 0; bi < descsz && bi * 2 + 2 < (uint32_t)hex_sz; bi++) {
+            hex_out[bi*2+0] = hx[(note[desc_off+bi] >> 4) & 0xF];
+            hex_out[bi*2+1] = hx[ note[desc_off+bi]       & 0xF];
+        }
+        hex_out[descsz * 2] = '\0';
+        result = (int)descsz;
+    }
+    free(shstrtab);
+    close(fd);
+    return result;
+}
+
+/* 从目标进程 maps 找到 libtersafe.so 的磁盘路径 */
+static int get_so_disk_path(pid_t pid, const char *soname,
+                             char *out, size_t out_sz) {
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *f = fopen(maps_path, "r");
+    if (!f) return 0;
+    char line[1024];
+    int found = 0;
+    while (fgets(line, sizeof(line), f) && !found) {
+        if (!strstr(line, soname)) continue;
+        char *slash = strchr(line, '/');
+        if (!slash) continue;
+        size_t len = strlen(slash);
+        while (len > 0 && (slash[len-1] == '\n' || slash[len-1] == '\r' || slash[len-1] == ' '))
+            len--;
+        if (len > 0 && len < out_sz) {
+            memcpy(out, slash, len); out[len] = '\0'; found = 1;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+/* 版本校验入口: 返回 1 = 版本匹配; 0 = 不匹配（跳过 patch）; -1 = 无法读取（继续） */
+static int verify_tersafe_version(pid_t pid) {
+    if (EXPECTED_TERSAFE_BUILD_ID[0] == '\0') return 1; /* 未配置，跳过校验 */
+
+    char so_path[512] = {0};
+    if (!get_so_disk_path(pid, "libtersafe.so", so_path, sizeof(so_path))) {
+        WARN("[version] 无法定位 libtersafe.so 磁盘路径，跳过校验继续执行");
+        return 1;
+    }
+    char build_id[128] = {0};
+    if (elf_get_build_id(so_path, build_id, sizeof(build_id)) == 0) {
+        WARN("[version] 无法读取 ELF build-id: %s，跳过校验继续执行", so_path);
+        return 1;
+    }
+    OK("[version] libtersafe build-id: %s", build_id);
+    if (strcmp(build_id, EXPECTED_TERSAFE_BUILD_ID) != 0) {
+        ERR("[version] build-id 不匹配! 期望=%s 实际=%s",
+            EXPECTED_TERSAFE_BUILD_ID, build_id);
+        ERR("[version] 游戏已更新 — 跳过内存 patch，避免写入错误偏移");
+        ERR("[version] 请重新逆向新版 libtersafe.so，更新偏移表后更新 build-id");
+        return 0;
+    }
+    OK("[version] build-id 验证通过 ✓");
+    return 1;
+}
+
 static void start_logcat(void) {
-    system("killall logcat 2>/dev/null; sleep 0.5");
-    system("logcat -c 2>/dev/null; "
-           "logcat -v time 2>/dev/null | "
-           "grep -iE 'tersafe|TSS|ACE|Qimei|TGPA|GCloud|MSDK|TDM|"
-           "anti.cheat|forbid|ban|frozen|kicked|emulator|"
-           "fingerprint|hardware|manufacturer|device_id' "
-           "> " DETECT_LOG " 2>&1 &");
+    /* kill existing logcat */
+    const char *kill_argv[] = {"/system/bin/killall", "logcat", NULL};
+    run_cmd(kill_argv);
+    usleep(500000);
+
+    /* clear logcat buffer */
+    const char *clear_argv[] = {"/system/bin/logcat", "-c", NULL};
+    run_cmd(clear_argv);
+
+    /* spawn: logcat -v time | grep ... > DETECT_LOG & */
+    pid_t p = fork();
+    if (p == 0) {
+        int out = open(DETECT_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (out >= 0) { dup2(out, 1); dup2(out, 2); close(out); }
+        int pfd[2]; pipe(pfd);
+        pid_t lc = fork();
+        if (lc == 0) {
+            close(pfd[0]); dup2(pfd[1], 1); close(pfd[1]);
+            const char *a[] = {"/system/bin/logcat", "-v", "time", NULL};
+            execv(a[0], (char *const *)a); _exit(127);
+        }
+        close(pfd[1]); dup2(pfd[0], 0); close(pfd[0]);
+        const char *a[] = {"/system/bin/grep", "-iE",
+            "tersafe|TSS|ACE|Qimei|TGPA|GCloud|MSDK|TDM|"
+            "anti.cheat|forbid|ban|frozen|kicked|emulator|"
+            "fingerprint|hardware|manufacturer|device_id",
+            NULL};
+        execv(a[0], (char *const *)a); _exit(127);
+    }
     fprintf(stderr, "[+] monitor log: %s\n", DETECT_LOG);
 }
 
@@ -270,7 +474,7 @@ static int open_mem(pid_t pid, int mode) {
 }
 
 static int mem_read32(pid_t pid, uint64_t addr, uint32_t *out) {
-    int fd = open_mem(pid, O_RDWR);
+    int fd = open_mem(pid, O_RDONLY);
     if (fd < 0) return -1;
     if (lseek(fd, (off_t)addr, SEEK_SET) != (off_t)addr) return -1;
     if (read(fd, out, 4) != 4) return -1;
@@ -344,14 +548,19 @@ static uint64_t get_module_base(pid_t pid, const char *module_spec) {
 
 /* 轮询等待 so 加载, 渐进退避 100ms→2000ms, timeout_ms 超时返回 0 */
 static uint64_t wait_for_module(pid_t pid, const char *mod, int timeout_ms) {
+    struct timespec ts_start, ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
     unsigned delay = BACKOFF_BASE_MS;
-    for (int e = 0; e < timeout_ms; e += delay) {
+    for (;;) {
         uint64_t b = get_module_base(pid, mod);
         if (b) return b;
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        long elapsed = (long)((ts_now.tv_sec - ts_start.tv_sec) * 1000 +
+                              (ts_now.tv_nsec - ts_start.tv_nsec) / 1000000);
+        if (elapsed >= timeout_ms) return 0;
         usleep(delay * 1000);
         delay = delay < BACKOFF_MAX_MS ? delay * 2 : BACKOFF_MAX_MS;
     }
-    return 0;
 }
 
 /* ============= 进程查找: /proc 遍历 + cmdline 匹配 ============= */
@@ -376,23 +585,7 @@ static pid_t get_pid_by_name(const char *name) {
 }
 
 static int target_is_running(void) {
-    DIR *d = opendir("/proc");
-    if (!d) return 0;
-    struct dirent *ent;
-    int f = 0;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
-        char p[256];
-        snprintf(p, sizeof(p), "/proc/%s/cmdline", ent->d_name);
-        int fd = open(p, O_RDONLY);
-        if (fd < 0) continue;
-        char buf[256] = {0};
-        read(fd, buf, sizeof(buf)-1);
-        close(fd);
-        if (strstr(buf, TARGET_PKG)) { f = 1; break; }
-    }
-    closedir(d);
-    return f;
+    return get_pid_by_name(TARGET_PKG) != 0;
 }
 
 /* ============= 文件系统递归删除 — 含路径安全校验 ============= */
@@ -790,6 +983,12 @@ static int patch_game_process(void) {
     int bss_ok = 0, bss_fail = 0;
     int ue4_ok = 0;
 
+    /* 0. [TASK-01] ELF build-id 版本校验 — 防止写入已更新版本的错误偏移 */
+    if (verify_tersafe_version(pid) == 0) {
+        WARN("版本校验失败，跳过所有内存 patch（游戏可运行，但无反作弊覆盖）");
+        return -2;  /* 区别于 -1 错误，-2 = 版本不符 */
+    }
+
     /* 1. libtersafe.so — 带退避等待加载 */
     uint64_t ts_base = wait_for_module(pid, C_tersafe, 30000);
     if (ts_base == 0) {
@@ -810,9 +1009,9 @@ static int patch_game_process(void) {
     OK("libtersafe.so base=0x%lx", (unsigned long)ts_base);
 
     /* 2. tersafe 代码补丁 61 处 (verify-before-patch) */
-    for (size_t i = 0; i < TERSAFE_PATCH_COUNT; i++) {
-        uint64_t addr = ts_base + kTersafePatches[i].offset;
-        if (safe_verify_and_write(pid, addr, kTersafePatches[i].value) == 0) tersafe_ok++;
+    for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
+        uint64_t addr = ts_base + DYN_TERSAFE_PATCHES[i].offset;
+        if (safe_verify_and_write(pid, addr, DYN_TERSAFE_PATCHES[i].value) == 0) tersafe_ok++;
         else tersafe_fail++;
     }
     OK("tersafe code: %d ok / %d fail", tersafe_ok, tersafe_fail);
@@ -824,9 +1023,9 @@ static int patch_game_process(void) {
         uint64_t bss_limit = ts_base + 0xC00000;
 
         /* 3a. 精确偏移清零 (硬编码，当前版本有效) */
-        for (size_t i = 0; i < TERSAFE_BSS_COUNT; i++) {
-            uint64_t addr = bss_base + kTersafeBssOffsets[i];
-            if (kTersafeBssOffsets[i] > 0xC00000 || addr >= bss_limit) {
+        for (size_t i = 0; i < DYN_BSS_COUNT; i++) {
+            uint64_t addr = bss_base + DYN_BSS_OFFSETS[i];
+            if (DYN_BSS_OFFSETS[i] > 0xC00000 || addr >= bss_limit) {
                 bss_fail++; continue;
             }
             if (safe_write32(pid, addr, 0, 3) == 0) bss_ok++;
@@ -871,9 +1070,9 @@ static int patch_game_process(void) {
     uint64_t ue4_base = wait_for_module(pid, C_ue4, 20000);
     if (ue4_base) {
         usleep(500000);
-        for (size_t i = 0; i < UE4_PATCH_COUNT; i++) {
-            uint64_t addr = ue4_base + kUE4Patches[i].offset;
-            if (safe_verify_and_write(pid, addr, kUE4Patches[i].value) == 0) ue4_ok++;
+        for (size_t i = 0; i < DYN_UE4_COUNT; i++) {
+            uint64_t addr = ue4_base + DYN_UE4_PATCHES[i].offset;
+            if (safe_verify_and_write(pid, addr, DYN_UE4_PATCHES[i].value) == 0) ue4_ok++;
         }
         OK("UE4: %d ok", ue4_ok);
         total_ok += ue4_ok;
@@ -921,6 +1120,8 @@ static int do_prepare(void) {
     signal(SIGHUP, sig_handler);
     /* Normalize forge process name for discretion */
     prctl(PR_SET_NAME, "[kworker/u:0]", 0, 0, 0);
+    /* [TASK-06] 启动时加载外置偏移表，失败回退内置静态表 */
+    load_dyn_table();
     protect_devmode();
     kill_suspicious_procs();
     block_tdm_reporting();  /* ← 新增: iptables 阻断上报 */
@@ -981,12 +1182,36 @@ static int do_launch(void) {
             if (cleaner != 0) _exit(0);  /* 中间进程退出 */
             /* 以下是真正的清理 daemon */
             prctl(PR_SET_NAME, "[kworker/0:2-clean]", 0, 0, 0);
+
+            /* [TASK-02] 两阶段轮询:
+             *   注入后前 10s 保持 100ms（等 tersafe 自修复窗口过去）
+             *   之后切换: killchain 1s / BSS 500ms / full patch 5s / UE4 2s
+             */
+            struct timespec ts_inject_done;
+            clock_gettime(CLOCK_MONOTONIC, &ts_inject_done);
+            /* 各操作的上次执行时间 */
+            struct timespec ts_kchain = ts_inject_done;
+            struct timespec ts_bss    = ts_inject_done;
+            struct timespec ts_full   = ts_inject_done;
+            struct timespec ts_ue4    = ts_inject_done;
+            #define MS_SINCE(ts_prev) ({ \
+                struct timespec _now; clock_gettime(CLOCK_MONOTONIC, &_now); \
+                (long)((_now.tv_sec-(ts_prev).tv_sec)*1000 + \
+                       (_now.tv_nsec-(ts_prev).tv_nsec)/1000000); })
+
             while (1) {
-                usleep(100000);  /* [v7.1 Fix 3] 100ms 间隔 — 更快响应 TerSafe 补丁还原 */
+                struct timespec ts_now_loop;
+                clock_gettime(CLOCK_MONOTONIC, &ts_now_loop);
+                long since_inject = (long)((ts_now_loop.tv_sec - ts_inject_done.tv_sec)*1000 +
+                                           (ts_now_loop.tv_nsec - ts_inject_done.tv_nsec)/1000000);
+                int maintain = (since_inject > 10000); /* >10s 切换到维护阶段 */
+
+                usleep(maintain ? 500000 : 100000); /* 维护阶段 500ms 基础周期 */
+
                 pid_t cp = get_pid_by_name(TARGET_PKG);
                 if (cp <= 0) _exit(0);
 
-                /* Targeted file cleanup — no recursive scanning */
+                /* Targeted file cleanup — 每周期 */
                 static const char *kGuardPrecise[] = {
                     APP_DATA "/files/GPMSDK.mmap3",
                     APP_DATA "/shared_prefs/GCloudCoreSP.xml",
@@ -998,17 +1223,16 @@ static int do_launch(void) {
                 };
                 for (int i = 0; kGuardPrecise[i]; i++) unlink(kGuardPrecise[i]);
 
-                /* Layered patch verification — prevent rollback */
+                /* Layered patch verification */
                 {
-                    /* [v8.1] unsigned 消除 signed overflow UB，防50天后溢出 */
-                    static unsigned int cycle = 0u;
-                    if (++cycle >= 30u) cycle = 0u;
-                    pid_t vp2 = get_pid_by_name(TARGET_PKG);
-                    uint64_t ts2 = vp2 > 0 ? get_module_base(vp2, C_tersafe) : 0;
-                    uint64_t ue4b = vp2 > 0 ? get_module_base(vp2, C_ue4) : 0;
+                    pid_t vp2 = cp;
+                    uint64_t ts2  = get_module_base(vp2, C_tersafe);
+                    uint64_t ue4b = get_module_base(vp2, C_ue4);
 
-                    /* 每周期: 检测链 6 节点 (最关键的防线) */
-                    if (ts2) {
+                    /* kKillChain: 每 1s (维护) 或 每周期 (注入窗口) */
+                    long kchain_interval = maintain ? 1000 : 100;
+                    if (ts2 && MS_SINCE(ts_kchain) >= kchain_interval) {
+                        clock_gettime(CLOCK_MONOTONIC, &ts_kchain);
                         static const struct { uint64_t off; uint32_t exp; } kChk[] = {
                             {0x419FDC, 0xD2800000}, {0x419FE0, 0xD65F03C0},
                             {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
@@ -1025,47 +1249,54 @@ static int do_launch(void) {
                         }
                     }
 
-                    /* Every 3 cycles: full code patch verification (67 sites) */
-                    if (ts2 && (cycle % 3 == 0)) {
-                        for (size_t i = 0; i < TERSAFE_PATCH_COUNT; i++) {
+                    /* Full code patch: 每 5s (维护) 或 每 300ms (注入窗口) */
+                    long full_interval = maintain ? 5000 : 300;
+                    if (ts2 && MS_SINCE(ts_full) >= full_interval) {
+                        clock_gettime(CLOCK_MONOTONIC, &ts_full);
+                        for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
                             uint32_t cur = 0;
-                            if (mem_read32(vp2, ts2 + kTersafePatches[i].offset, &cur) == 0
-                                && cur != kTersafePatches[i].value) {
+                            if (mem_read32(vp2, ts2 + DYN_TERSAFE_PATCHES[i].offset, &cur) == 0
+                                && cur != DYN_TERSAFE_PATCHES[i].value) {
                                 WARN("code patch reverted off=0x%llx — repatch",
-                                     (unsigned long long)kTersafePatches[i].offset);
-                                safe_write32(vp2, ts2 + kTersafePatches[i].offset,
-                                             kTersafePatches[i].value, 3);
+                                     (unsigned long long)DYN_TERSAFE_PATCHES[i].offset);
+                                safe_write32(vp2, ts2 + DYN_TERSAFE_PATCHES[i].offset,
+                                             DYN_TERSAFE_PATCHES[i].value, 3);
                             }
                         }
                     }
 
-                    /* 每 5 周期: BSS 清零验证 (40处) */
-                    if (ts2 && (cycle % 5 == 0)) {
+                    /* BSS 清零: 每 500ms (维护) 或 每周期 (注入窗口) */
+                    long bss_interval = maintain ? 500 : 100;
+                    if (ts2 && MS_SINCE(ts_bss) >= bss_interval) {
+                        clock_gettime(CLOCK_MONOTONIC, &ts_bss);
                         uint64_t bss2 = get_module_base(vp2, "libtersafe.so:bss");
                         if (bss2) {
-                            for (size_t i = 0; i < TERSAFE_BSS_COUNT; i++) {
+                            for (size_t i = 0; i < DYN_BSS_COUNT; i++) {
                                 uint32_t cur = 0;
-                                if (mem_read32(vp2, bss2 + kTersafeBssOffsets[i], &cur) == 0
+                                if (mem_read32(vp2, bss2 + DYN_BSS_OFFSETS[i], &cur) == 0
                                     && cur != 0) {
-                                    safe_write32(vp2, bss2 + kTersafeBssOffsets[i], 0, 3);
+                                    safe_write32(vp2, bss2 + DYN_BSS_OFFSETS[i], 0, 3);
                                 }
                             }
                         }
                     }
 
-                    /* 每 2 周期: UE4 引擎补丁 (6处) */
-                    if (ue4b && (cycle % 2 == 0)) {
-                        for (size_t i = 0; i < UE4_PATCH_COUNT; i++) {
+                    /* UE4: 每 2s (维护) 或 每 200ms (注入窗口) */
+                    long ue4_interval = maintain ? 2000 : 200;
+                    if (ue4b && MS_SINCE(ts_ue4) >= ue4_interval) {
+                        clock_gettime(CLOCK_MONOTONIC, &ts_ue4);
+                        for (size_t i = 0; i < DYN_UE4_COUNT; i++) {
                             uint32_t cur = 0;
-                            if (mem_read32(vp2, ue4b + kUE4Patches[i].offset, &cur) == 0
-                                && cur != kUE4Patches[i].value) {
-                                safe_write32(vp2, ue4b + kUE4Patches[i].offset,
-                                             kUE4Patches[i].value, 3);
+                            if (mem_read32(vp2, ue4b + DYN_UE4_PATCHES[i].offset, &cur) == 0
+                                && cur != DYN_UE4_PATCHES[i].value) {
+                                safe_write32(vp2, ue4b + DYN_UE4_PATCHES[i].offset,
+                                             DYN_UE4_PATCHES[i].value, 3);
                             }
                         }
                     }
                 }
             }
+            #undef MS_SINCE
         }
         /* 回收中间进程，避免僵尸 */
         if (mid > 0) waitpid(mid, NULL, 0);
@@ -1249,7 +1480,65 @@ static int run_tcp_server(void) {
     if (listen(fd, 5) < 0) { ERR("listen failed"); close(fd); return -1; }
     OK("TCP server listening on %s:%d", CTRL_HOST, CTRL_PORT);
 
+    /* [TASK-07] UDS IPC server — forge_monitor 告警实时通知 */
+#define FORGE_IPC_SOCK "/data/local/tmp/forge_ipc.sock"
+    int ufd = -1;
+    {
+        unlink(FORGE_IPC_SOCK);
+        ufd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (ufd >= 0) {
+            struct sockaddr_un uaddr;
+            memset(&uaddr, 0, sizeof(uaddr));
+            uaddr.sun_family = AF_UNIX;
+            strncpy(uaddr.sun_path, FORGE_IPC_SOCK, sizeof(uaddr.sun_path)-1);
+            if (bind(ufd, (struct sockaddr*)&uaddr, sizeof(uaddr)) == 0 && listen(ufd, 4) == 0) {
+                /* 非阻塞，不阻塞 TCP accept 循环 */
+                int fl = fcntl(ufd, F_GETFL, 0);
+                if (fl >= 0) fcntl(ufd, F_SETFL, fl | O_NONBLOCK);
+                OK("[IPC] UDS server listening: %s", FORGE_IPC_SOCK);
+            } else {
+                close(ufd); ufd = -1;
+                WARN("[IPC] UDS bind/listen failed");
+            }
+        }
+    }
+
     while (1) {
+        /* 先检查 UDS IPC 连接（非阻塞） */
+        if (ufd >= 0) {
+            int ucfd = accept(ufd, NULL, NULL);
+            if (ucfd >= 0) {
+                char ibuf[256] = {0};
+                ssize_t in = recv(ucfd, ibuf, sizeof(ibuf)-1, 0);
+                if (in > 0) {
+                    OK("[IPC] alert from monitor: %.120s", ibuf);
+                    /* 收到告警，立即触发一次 kKillChain 重推 */
+                    pid_t vp = get_pid_by_name(TARGET_PKG);
+                    if (vp > 0) {
+                        uint64_t ts2 = get_module_base(vp, C_tersafe);
+                        if (ts2) {
+                            static const struct { uint64_t off; uint32_t exp; } kChk[] = {
+                                {0x419FDC,0xD2800000},{0x419FE0,0xD65F03C0},
+                                {0x2E7810,0xD65F03C0},{0x2F29D0,0xD65F03C0},
+                                {0x320D78,0xD65F03C0},{0x3233B8,0xD65F03C0},
+                            };
+                            int repatch = 0;
+                            for (int ci = 0; ci < 6; ci++) {
+                                uint32_t cur = 0;
+                                if (mem_read32(vp, ts2+kChk[ci].off, &cur)==0 && cur!=kChk[ci].exp) {
+                                    safe_write32(vp, ts2+kChk[ci].off, kChk[ci].exp, 3);
+                                    repatch++;
+                                }
+                            }
+                            if (repatch > 0)
+                                OK("[IPC] emergency repatch: %d/6 sites", repatch);
+                        }
+                    }
+                }
+                close(ucfd);
+            }
+        }
+
         struct sockaddr_in cli;
         socklen_t cli_len = sizeof(cli);
         int cfd = accept(fd, (struct sockaddr*)&cli, &cli_len);
@@ -1278,6 +1567,7 @@ static int run_tcp_server(void) {
         }
         close(cfd);
     }
+    if (ufd >= 0) close(ufd);
     close(fd);
     return 0;
 }

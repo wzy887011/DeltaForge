@@ -25,6 +25,8 @@
 #include <sys/inotify.h>
 #include <sys/select.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <stdint.h>
 
 #define TARGET_PKG   "com.tencent.tmgp.dfm"
@@ -63,6 +65,26 @@ static pid_t      g_pid     = 0;
 static char g_seen[MAX_SEEN][512];
 static int  g_seen_n = 0;
 
+/* ---- [TASK-07] UDS IPC 通知 forge ---- */
+#define FORGE_IPC_SOCK "/data/local/tmp/forge_ipc.sock"
+
+static void notify_forge(const char *event) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, FORGE_IPC_SOCK, sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || errno == EINPROGRESS) {
+        char msg[128];
+        int n = snprintf(msg, sizeof(msg), "{\"event\":\"%s\"}\n", event);
+        if (n > 0) send(fd, msg, (size_t)n, MSG_NOSIGNAL);
+    }
+    close(fd);
+}
+
 /* ---- log ---- */
 static void mlog(const char *lv, const char *fmt, ...) {
     char buf[1024]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
@@ -70,6 +92,8 @@ static void mlog(const char *lv, const char *fmt, ...) {
     strftime(ts, sizeof(ts), "%m-%d %H:%M:%S", tm);
     if (g_log) { fprintf(g_log,"[%s][%s] %s\n", ts, lv, buf); fflush(g_log); }
     if (g_verbose || lv[0]=='A') fprintf(stderr,"[%s][%s] %s\n", ts, lv, buf);
+    /* [TASK-07] ALERT 级别立即通知 forge 触发紧急 patch */
+    if (lv[0] == 'A') notify_forge(buf);
 }
 #define INFO(f,...) mlog("INFO ",f,##__VA_ARGS__)
 #define ALRT(f,...) mlog("ALERT",f,##__VA_ARGS__)
