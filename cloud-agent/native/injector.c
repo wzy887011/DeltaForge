@@ -354,18 +354,105 @@ int main(int argc, char **argv) {
     if (ptrace_setregs(pid, &regs) != 0) { perror("setregs"); return 1; }
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) { perror("cont"); return 1; }
 
-    /* ── 等待 brk trap ── */
-    int status;
-    if (waitpid(pid, &status, 0) == -1) { perror("wait"); return 1; }
-
+    /* ── 信号感知等待循环 (v8.4) ──
+       dlopen 内部 syscall (mmap/read/mprotect) 可能被信号中断返回 EINTR。
+       单次 waitpid+读x0 无法区分 "BRK 触发" vs "信号中断 syscall"。
+       修复: 循环 waitpid, 检查 WSTOPSIG, 只在 SIGTRAP 时读取最终 handle,
+       非 TRAP 信号 → 诊断 → EINTR 则重置 PC 重试。
+       ── */
     uint64_t handle = 0;
-    if (WIFSTOPPED(status)) {
-        struct user_pt_regs out;
-        ptrace_getregs(pid, &out);
-        handle = out.regs[0];
-        printf("[*] dlopen returned x0=0x%llx\n", (unsigned long long)handle);
-    } else {
-        printf("[-] unexpected status: 0x%x\n", status);
+    int done = 0;
+    int retries = 0;
+    const int max_retries = 10;
+    int status;
+
+    while (!done && retries <= max_retries) {
+        if (waitpid(pid, &status, 0) == -1) {
+            perror("waitpid");
+            break;
+        }
+
+        if (WIFEXITED(status)) {
+            printf("[-] 目标进程退出 (exit=%d)\n", WEXITSTATUS(status));
+            break;
+        }
+
+        if (WIFSIGNALED(status)) {
+            int termsig = WTERMSIG(status);
+            printf("[-] 目标进程被信号 %d (%s) 杀死%s\n",
+                   termsig, strsignal(termsig),
+                   WCOREDUMP(status) ? " (core dumped)" : "");
+            break;
+        }
+
+        if (WIFSTOPPED(status)) {
+            int sig = WSTOPSIG(status);
+
+            if (sig == SIGTRAP) {
+                /* 我们的 BRK #0 — dlopen 真正执行完毕 */
+                struct user_pt_regs out;
+                if (ptrace_getregs(pid, &out) == 0) {
+                    handle = out.regs[0];
+                    printf("[*] dlopen returned x0=0x%llx (%s)\n",
+                           (unsigned long long)handle,
+                           (int64_t)handle < 0 ? strerror((int)-(int64_t)handle) : "OK");
+                }
+                done = 1;
+            } else if (sig == SIGSEGV) {
+                /* shellcode 崩溃 — 读取故障 PC */
+                struct user_pt_regs out;
+                ptrace_getregs(pid, &out);
+                printf("[-] SIGSEGV at pc=0x%llx, x0=0x%llx — shellcode crash\n",
+                       (unsigned long long)out.pc, (unsigned long long)out.regs[0]);
+                break;
+            } else {
+                /* 其他信号中断 — 很可能来自 dlopen 内部 syscall */
+                struct user_pt_regs out;
+                ptrace_getregs(pid, &out);
+                int64_t cur_x0 = (int64_t)out.regs[0];
+
+                printf("[*] 信号 %d (%s) at pc=0x%llx, x0=0x%llx\n",
+                       sig, strsignal(sig),
+                       (unsigned long long)out.pc,
+                       (unsigned long long)cur_x0);
+
+                /* EINTR (-4): dlopen 内部 syscall 被中断
+                   重置 PC = shellcode 开头重试整个 dlopen 调用 */
+                if (cur_x0 == -4) {
+                    retries++;
+                    printf("[*] EINTR 重试 %d/%d\n", retries, max_retries);
+                    out.pc = sc_addr;
+                    if (ptrace_setregs(pid, &out) != 0) {
+                        perror("setregs(retry)");
+                        break;
+                    }
+                    /* 压制引起 EINTR 的信号, 重新 CONT */
+                    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
+                        perror("cont(retry)");
+                        break;
+                    }
+                } else if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
+                    /* 作业控制信号 — 压制, 继续 */
+                    printf("[*] 压制信号 %d, 继续执行\n", sig);
+                    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
+                        perror("cont(suppress)");
+                        break;
+                    }
+                } else {
+                    /* 非 EINTR 也非作业控制 — 转发信号 */
+                    printf("[*] 转发信号 %d 到目标\n", sig);
+                    if (ptrace(PTRACE_CONT, pid, NULL, (void*)(uintptr_t)sig) != 0) {
+                        perror("cont(forward)");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!done) {
+        fprintf(stderr, "[-] dlopen 未完成 (retries=%d, handle=0x%llx)\n",
+                retries, (unsigned long long)handle);
     }
 
     /* ── 恢复寄存器，detach 主线程，再 detach 所有冻结线程 ── */
@@ -378,8 +465,9 @@ int main(int argc, char **argv) {
 
     /* 检查 handle: NULL 或 error range (> 0xfffffffffffff000) 均失败 */
     if (!handle || (int64_t)handle < 0) {
-        fprintf(stderr, "[-] dlopen 失败 (handle=0x%llx)\n",
-                (unsigned long long)handle);
+        fprintf(stderr, "[-] dlopen 失败 (handle=0x%llx, %s)\n",
+                (unsigned long long)handle,
+                handle ? strerror((int)-(int64_t)handle) : "NULL");
         return 1;
     }
 
