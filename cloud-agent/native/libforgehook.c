@@ -392,19 +392,6 @@ static int find_self_from_maps(char *out, size_t out_sz) {
     munmap(buf, cap + 1);
     return found;
 }
-                    out[len] = '\0';
-                    if (eol) *eol = '\n';
-                    return 1;
-                }
-            }
-        }
-
-        if (!eol) break;
-        *eol = '\n';
-        line = eol + 1;
-    }
-    return 0;
-}
 
 /* CRITICAL: constructor(47) — MUST be earliest constructor.
  * Android linker ALWAYS uses BIND_NOW (RTLD_NOW), resolving all symbols
