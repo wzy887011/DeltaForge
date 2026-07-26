@@ -132,6 +132,7 @@ static void start_logcat(void) {
 
 static int do_prepare(void);
 static int do_launch(void);
+static int run_cmd(const char *argv[]);  /* forward — used by start_logcat */
 
 /* ============= 日志宏 ============= */
 static int g_verbose = 0;

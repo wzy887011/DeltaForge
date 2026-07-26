@@ -4,19 +4,16 @@
 #pragma once
 #include <stdint.h>
 
-typedef struct {
-    uint64_t offset;
-    uint32_t value;
-} patch_entry_dyn_t;
+typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
 
 typedef struct {
-    patch_entry_dyn_t *tersafe_patches;
-    int                tersafe_count;
-    uint64_t          *tersafe_bss;
-    int                bss_count;
-    patch_entry_dyn_t *ue4_patches;
-    int                ue4_count;
-    char               build_id[128]; /* expected tersafe build-id, "" = skip */
+    patch_entry_t *tersafe_patches;
+    int            tersafe_count;
+    uint64_t      *tersafe_bss;
+    int            bss_count;
+    patch_entry_t *ue4_patches;
+    int            ue4_count;
+    char           build_id[128]; /* expected tersafe build-id, "" = skip */
 } patch_table_t;
 
 // 从 JSON 文件加载偏移表，成功返回 1，失败返回 0

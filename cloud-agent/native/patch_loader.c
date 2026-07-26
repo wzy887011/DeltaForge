@@ -60,7 +60,7 @@ static int read_str_value(const char *p, char *dest, size_t dest_sz) {
 
 /* 解析一个 patch 数组 [{offset:X,value:Y},...] */
 static int parse_patch_array(const char *start,
-                              patch_entry_dyn_t *out, int max_out) {
+                              patch_entry_t *out, int max_out) {
     const char *p = skip_ws(start);
     if (*p != '[') return 0;
     p++;
@@ -144,8 +144,8 @@ int patch_loader_load(const char *json_path, patch_table_t *out) {
     /* tersafe_patches */
     p = find_key(buf, "tersafe_patches");
     if (p) {
-        out->tersafe_patches = (patch_entry_dyn_t *)malloc(
-            sizeof(patch_entry_dyn_t) * PL_MAX_ENTRIES);
+        out->tersafe_patches = (patch_entry_t *)malloc(
+            sizeof(patch_entry_t) * PL_MAX_ENTRIES);
         if (out->tersafe_patches)
             out->tersafe_count = parse_patch_array(p, out->tersafe_patches, PL_MAX_ENTRIES);
     }
@@ -161,8 +161,8 @@ int patch_loader_load(const char *json_path, patch_table_t *out) {
     /* ue4_patches */
     p = find_key(buf, "ue4_patches");
     if (p) {
-        out->ue4_patches = (patch_entry_dyn_t *)malloc(
-            sizeof(patch_entry_dyn_t) * PL_MAX_ENTRIES);
+        out->ue4_patches = (patch_entry_t *)malloc(
+            sizeof(patch_entry_t) * PL_MAX_ENTRIES);
         if (out->ue4_patches)
             out->ue4_count = parse_patch_array(p, out->ue4_patches, PL_MAX_ENTRIES);
     }
