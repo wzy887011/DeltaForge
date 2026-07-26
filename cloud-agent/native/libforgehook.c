@@ -1807,7 +1807,7 @@ static void *_adjust_code_thread(void *unused) {
             if (!rv) { rbuf[ri++]='0'; } else {
                 char tmp[16]; int ti=0;
                 while (rv>0){tmp[ti++]='0'+(rv%10);rv/=10;}
-                while(ti-->0) rbuf[ri++]=tmp[ti+1];
+                while(ti-->0) rbuf[ri++]=tmp[ti];
             }
             rbuf[ri++]='\n'; rbuf[ri]='\0';
             hook_log(rbuf);
