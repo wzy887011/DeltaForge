@@ -1,7 +1,7 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/injector.c v5.8
+// 法器: DeltaForge/cloud-agent/native/injector.c v8.5
 // 描述: ptrace 注入器 — 自动解析 dlopen 所在库，正确计算目标地址
-//   ARM64 上无 mmap syscall, 改用目标进程栈存放路径字符串
+//   ARM64 W^X 严格 — 栈不可执行, 改用 ptrace+mmap 分配 RWX 内存
 // 编译: clang -Os -Wall injector.c -o injector -ldl
 // 用法: ./injector <PID> /data/local/tmp/libforgehook.so
 // ============================================================
@@ -170,6 +170,110 @@ static void patch_kill_chain_while_paused(pid_t pid) {
     printf("[+] kKillChain pre-patch: %d/6 (ts=0x%llx, paused)\n", ok, (unsigned long long)ts);
 }
 
+/* ── 在目标进程中搜索 SVC #0 指令 ──
+   遍历 libc.so / linker64 的 text 段, 找 0xD4000001。
+   用于 ptrace 远程 syscall — 我们不能执行目标栈上的代码 (W^X)。 ── */
+static uint64_t find_svc_gadget(pid_t pid) {
+    const char *candidates[] = {"libc.so", "linker64", "libdl.so", NULL};
+    char mem_path[64], line[1024];
+    snprintf(mem_path, sizeof(mem_path), "/proc/%d/maps", pid);
+    FILE *mf = fopen(mem_path, "r");
+    if (!mf) return 0;
+
+    uint64_t gadget = 0;
+    while (fgets(line, sizeof(line), mf) && !gadget) {
+        uint64_t start, end; char perms[8], fname[256] = {0};
+        if (sscanf(line, "%llx-%llx %7s %*s %*s %*s %255s",
+                   (unsigned long long *)&start,
+                   (unsigned long long *)&end, perms, fname) < 3) continue;
+        if (!(perms[0] == 'r' && perms[2] == 'x')) continue;
+
+        const char *base = strrchr(fname, '/');
+        base = base ? base + 1 : fname;
+        int match = 0;
+        for (int i = 0; candidates[i]; i++)
+            if (strncmp(base, candidates[i], strlen(candidates[i])) == 0) { match = 1; break; }
+        if (!match) continue;
+
+        /* 读 text 段, 扫描 SVC #0 = 0xD4000001 */
+        size_t size = (size_t)(end - start);
+        if (size > 0x200000) size = 0x200000; /* 前 2MB 足够 */
+        uint32_t *buf = (uint32_t *)malloc(size);
+        if (!buf) continue;
+        snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+        int fd = open(mem_path, O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = pread(fd, buf, size, (off_t)start);
+            if (n > 0) {
+                for (size_t i = 0; i < (size_t)n / 4; i++) {
+                    if (buf[i] == 0xD4000001) { gadget = start + i * 4; break; }
+                }
+            }
+            close(fd);
+        }
+        free(buf);
+    }
+    fclose(mf);
+    return gadget;
+}
+
+/* ── 在目标进程中执行一个 syscall ──
+   用 PTRACE_SYSCALL: tracee 在 SVC #0 处进入/退出 syscall 时各停一次。
+   返回: syscall 返回值 (x0), -1 表示 ptrace 失败。 ── */
+static int64_t remote_syscall(pid_t pid, uint64_t svc_addr,
+                              uint64_t sysno,
+                              uint64_t a0, uint64_t a1, uint64_t a2,
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    struct user_pt_regs regs, saved;
+    if (ptrace_getregs(pid, &saved) != 0) return -1;
+
+    memcpy(&regs, &saved, sizeof(regs));
+    regs.regs[0]  = a0;
+    regs.regs[1]  = a1;
+    regs.regs[2]  = a2;
+    regs.regs[3]  = a3;
+    regs.regs[4]  = a4;
+    regs.regs[5]  = a5;
+    regs.regs[8]  = sysno;
+    regs.pc       = svc_addr;
+    regs.regs[30] = 0;
+
+    if (ptrace_setregs(pid, &regs) != 0) return -1;
+
+    /* syscall-enter: tracee 跑到 SVC #0 并停下 */
+    if (ptrace(PTRACE_SYSCALL, pid, NULL, NULL) != 0) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+    if (!WIFSTOPPED(status)) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+
+    /* syscall-exit: syscall 执行完, 停在 SVC 的下一条指令 */
+    if (ptrace(PTRACE_SYSCALL, pid, NULL, NULL) != 0) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+    if (waitpid(pid, &status, 0) == -1) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+    if (!WIFSTOPPED(status)) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+
+    struct user_pt_regs out;
+    if (ptrace_getregs(pid, &out) != 0) {
+        ptrace_setregs(pid, &saved); return -1;
+    }
+
+    int64_t result = (int64_t)out.regs[0];
+    /* 恢复原始寄存器, 让进程可以继续正常运行 (PC 回到原位置) */
+    ptrace_setregs(pid, &saved);
+    return result;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "用法: %s <PID> <so_path>\n", argv[0]);
@@ -243,17 +347,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* ── 路径字符串写到目标栈 ── */
-    uint64_t str_addr = (saved.sp - 0x400) & ~0xFULL;
-    printf("[*] 路径写入栈 0x%llx\n", (unsigned long long)str_addr);
-    if (pv_writev(pid, str_addr, so, slen) != (ssize_t)slen) {
-        fprintf(stderr, "[-] 写路径失败\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return 1;
-    }
-    printf("[+] 路径已写入\n");
-
-    /* ── 正确解析 dlopen ──
+    /* ── 解析 dlopen 地址 ──
        dlsym(RTLD_DEFAULT, "dlopen") 在 Android >= 7.0 上返回 libdl.so
        中地址。不能假设它在 linker64 里。用 /proc/self/maps 定位它
        落在哪个库 → 取该库文件名 → 在目标 /proc/PID/maps 找同名库 →
@@ -266,7 +360,6 @@ int main(int argc, char **argv) {
     }
     printf("[*] 本地 dlopen=0x%llx\n", (unsigned long long)local_dlopen);
 
-    /* 1. 在 /proc/self/maps 定位 dlopen 所在 entry */
     char owner_full[256] = {0};
     uint64_t local_base = find_containing_entry("/proc/self/maps",
                                                   (uint64_t)local_dlopen,
@@ -279,7 +372,6 @@ int main(int argc, char **argv) {
     printf("[*] dlopen 在: %s (本地 base=0x%llx)\n",
            owner_full, (unsigned long long)local_base);
 
-    /* 2. 取文件名部分，在目标 maps 中找同名库 */
     char *lib_name = strrchr(owner_full, '/');
     lib_name = lib_name ? lib_name + 1 : owner_full;
     printf("[*] 目标中搜索: %s\n", lib_name);
@@ -292,11 +384,67 @@ int main(int argc, char **argv) {
     }
     printf("[*] 目标 %s base=0x%llx\n", lib_name, (unsigned long long)target_base);
 
-    /* 3. 正确计算 */
     uint64_t offset = (uint64_t)local_dlopen - local_base;
     uint64_t fn_dlopen = target_base + offset;
     printf("[*] offset=0x%llx → 目标 dlopen=0x%llx\n",
            (unsigned long long)offset, (unsigned long long)fn_dlopen);
+
+    /* ── v8.5: 分配 RWX 内存, 替代栈执行 ──
+       ARM64 Android 严格 W^X, 栈无执行权限。旧方案把 shellcode 写到
+       saved.sp - 0x300 再设 PC 过去 → SIGSEGV 在第一指令。
+       修复: ptrace 远程调用 mmap 分配 PROT_READ|PROT_WRITE|PROT_EXEC
+       内存, 把路径+shellcode 写入该区域再执行。 ── */
+
+    /* 1. 找 SVC #0 gadget */
+    uint64_t svc_addr = find_svc_gadget(pid);
+    if (!svc_addr) {
+        fprintf(stderr, "[-] 在目标进程中找不到 SVC #0 指令\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 1;
+    }
+    printf("[*] SVC #0 gadget @ 0x%llx\n", (unsigned long long)svc_addr);
+
+    /* 2. mmap RWX 内存 (2 页: 路径+代码+栈)
+       先尝试 PROT_READ|PROT_WRITE|PROT_EXEC,
+       若 SELinux 拒绝则退到 RW → 写 shellcode → mprotect RX */
+    int64_t rwx_base = remote_syscall(pid, svc_addr,
+                                      222,     /* __NR_mmap */
+                                      0, 0x2000, 7, /* addr=NULL, size=8KB, prot=RWX */
+                                      0x22,    /* MAP_PRIVATE|MAP_ANONYMOUS */
+                                      (uint64_t)-1, 0  /* fd=-1, offset=0 */);
+    int need_mprotect = 0;
+    if (rwx_base < 0 || (uint64_t)rwx_base > 0xfffffffffffff000ULL) {
+        /* 回退: mmap RW, 稍后 mprotect → RX */
+        rwx_base = remote_syscall(pid, svc_addr,
+                                  222, 0, 0x2000, 3,  /* prot=RW */
+                                  0x22, (uint64_t)-1, 0);
+        if (rwx_base < 0 || (uint64_t)rwx_base > 0xfffffffffffff000ULL) {
+            fprintf(stderr, "[-] mmap 失败 — 无法分配内存\n");
+            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            return 1;
+        }
+        need_mprotect = 1;
+        printf("[*] mmap RW @ 0x%llx (需 mprotect→RX)\n", (unsigned long long)rwx_base);
+    } else {
+        printf("[+] mmap RWX @ 0x%llx\n", (unsigned long long)rwx_base);
+    }
+
+    /* 3. 写路径和 shellcode */
+    uint64_t rw_base = (uint64_t)rwx_base;
+    uint64_t sc_addr  = rw_base + 0x400;   /* code at +1KB */
+    uint64_t str_addr = rw_base;           /* path at start */
+    uint64_t sp_addr  = rw_base + 0x1000;  /* 4KB stack for dlopen */
+
+    printf("[*] str=0x%llx sc=0x%llx sp=0x%llx\n",
+           (unsigned long long)str_addr,
+           (unsigned long long)sc_addr,
+           (unsigned long long)sp_addr);
+
+    if (pv_writev(pid, str_addr, so, slen) != (ssize_t)slen) {
+        fprintf(stderr, "[-] 写路径失败\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 1;
+    }
 
     /* ── 构造 shellcode ──
        movz/movk x16 = fn_dlopen
@@ -306,60 +454,59 @@ int main(int argc, char **argv) {
        blr x16
        brk #0
     ── */
-    uint32_t code[24];
-    int n = 0;
-
-    /* x16 = fn_dlopen */
+    uint32_t code[24]; int n = 0;
     code[n++] = 0xD2800010 | ((fn_dlopen & 0xFFFF) << 5);
-    if (((fn_dlopen >> 16) & 0xFFFF))
-        code[n++] = 0xF2A00010 | (((fn_dlopen >> 16) & 0xFFFF) << 5);
-    if (((fn_dlopen >> 32) & 0xFFFF))
-        code[n++] = 0xF2C00010 | (((fn_dlopen >> 32) & 0xFFFF) << 5);
-    if (((fn_dlopen >> 48) & 0xFFFF))
-        code[n++] = 0xF2E00010 | (((fn_dlopen >> 48) & 0xFFFF) << 5);
-
-    /* x0 = str_addr */
+    if (((fn_dlopen >> 16) & 0xFFFF)) code[n++] = 0xF2A00010 | (((fn_dlopen >> 16) & 0xFFFF) << 5);
+    if (((fn_dlopen >> 32) & 0xFFFF)) code[n++] = 0xF2C00010 | (((fn_dlopen >> 32) & 0xFFFF) << 5);
+    if (((fn_dlopen >> 48) & 0xFFFF)) code[n++] = 0xF2E00010 | (((fn_dlopen >> 48) & 0xFFFF) << 5);
     code[n++] = 0xD2800000 | ((str_addr & 0xFFFF) << 5);
-    if (((str_addr >> 16) & 0xFFFF))
-        code[n++] = 0xF2A00000 | (((str_addr >> 16) & 0xFFFF) << 5);
-    if (((str_addr >> 32) & 0xFFFF))
-        code[n++] = 0xF2C00000 | (((str_addr >> 32) & 0xFFFF) << 5);
-    if (((str_addr >> 48) & 0xFFFF))
-        code[n++] = 0xF2E00000 | (((str_addr >> 48) & 0xFFFF) << 5);
-
-    /* x1 = 2 (RTLD_NOW), x2 = 0 */
-    code[n++] = 0xD2800041;
-    code[n++] = 0xD2800002;
-
-    /* blr x16; brk #0 */
-    code[n++] = 0xD63F0200;
-    code[n++] = 0xD4200000;
-
-    /* ── 写 shellcode 到目标栈 ── */
-    uint64_t sc_addr = (saved.sp - 0x300) & ~0xFULL;
+    if (((str_addr >> 16) & 0xFFFF)) code[n++] = 0xF2A00000 | (((str_addr >> 16) & 0xFFFF) << 5);
+    if (((str_addr >> 32) & 0xFFFF)) code[n++] = 0xF2C00000 | (((str_addr >> 32) & 0xFFFF) << 5);
+    if (((str_addr >> 48) & 0xFFFF)) code[n++] = 0xF2E00000 | (((str_addr >> 48) & 0xFFFF) << 5);
+    code[n++] = 0xD2800041; code[n++] = 0xD2800002;
+    code[n++] = 0xD63F0200; code[n++] = 0xD4200000;
     size_t clen = n * 4;
+
     if (pv_writev(pid, sc_addr, code, clen) != (ssize_t)clen) {
         fprintf(stderr, "[-] shellcode write failed\n");
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return 1;
     }
 
-    /* ── 修改 PC ── */
-    struct user_pt_regs regs;
-    memcpy(&regs, &saved, sizeof(regs));
-    regs.pc = sc_addr;
-    regs.sp = sc_addr - 0x80;
-    regs.regs[30] = 0;
+    /* 4. 如果 mmap 只给了 RW, 现在 mprotect → RX */
+    if (need_mprotect) {
+        int64_t mpret = remote_syscall(pid, svc_addr,
+                                       226,    /* __NR_mprotect */
+                                       rw_base, 0x2000, 5  /* PROT_READ|PROT_EXEC */,
+                                       0, 0, 0);
+        if (mpret != 0) {
+            fprintf(stderr, "[-] mprotect→RX 失败: 0x%llx (%s)\n",
+                    (unsigned long long)mpret,
+                    (uint64_t)mpret > 0xfffffffffffff000ULL ?
+                    strerror((int)-(int64_t)mpret) : "OK");
+            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            return 1;
+        }
+        printf("[+] mprotect→RX OK\n");
+    }
 
-    if (ptrace_setregs(pid, &regs) != 0) { perror("setregs"); return 1; }
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) { perror("cont"); return 1; }
+    /* 5. 修改 PC 执行 shellcode */
+    {
+        struct user_pt_regs regs;
+        memcpy(&regs, &saved, sizeof(regs));
+        regs.pc = sc_addr;
+        regs.sp = sp_addr;
+        regs.regs[30] = 0;
+
+        if (ptrace_setregs(pid, &regs) != 0) { perror("setregs"); return 1; }
+        if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) { perror("cont"); return 1; }
+    }
 
     /* ── 信号感知等待循环 (v8.4) ──
-       dlopen 内部 syscall (mmap/read/mprotect) 可能被信号中断返回 EINTR。
-       单次 waitpid+读x0 无法区分 "BRK 触发" vs "信号中断 syscall"。
-       修复: 循环 waitpid, 检查 WSTOPSIG, 只在 SIGTRAP 时读取最终 handle,
+       dlopen 内部 syscall 可能被信号中断返回 EINTR。
+       循环 waitpid, 检查 WSTOPSIG, 只在 SIGTRAP 时读取最终 handle,
        非 TRAP 信号 → 诊断 → EINTR 则重置 PC 重试。
-       ── */
+       v8.5: PC=sc_addr(在 RWX 区), SP=sp_addr。 ── */
     uint64_t handle = 0;
     int done = 0;
     int retries = 0;
@@ -389,7 +536,6 @@ int main(int argc, char **argv) {
             int sig = WSTOPSIG(status);
 
             if (sig == SIGTRAP) {
-                /* 我们的 BRK #0 — dlopen 真正执行完毕 */
                 struct user_pt_regs out;
                 if (ptrace_getregs(pid, &out) == 0) {
                     handle = out.regs[0];
@@ -399,14 +545,12 @@ int main(int argc, char **argv) {
                 }
                 done = 1;
             } else if (sig == SIGSEGV) {
-                /* shellcode 崩溃 — 读取故障 PC */
                 struct user_pt_regs out;
                 ptrace_getregs(pid, &out);
                 printf("[-] SIGSEGV at pc=0x%llx, x0=0x%llx — shellcode crash\n",
                        (unsigned long long)out.pc, (unsigned long long)out.regs[0]);
                 break;
             } else {
-                /* 其他信号中断 — 很可能来自 dlopen 内部 syscall */
                 struct user_pt_regs out;
                 ptrace_getregs(pid, &out);
                 int64_t cur_x0 = (int64_t)out.regs[0];
@@ -416,34 +560,26 @@ int main(int argc, char **argv) {
                        (unsigned long long)out.pc,
                        (unsigned long long)cur_x0);
 
-                /* EINTR (-4): dlopen 内部 syscall 被中断
-                   重置 PC = shellcode 开头重试整个 dlopen 调用 */
                 if (cur_x0 == -4) {
                     retries++;
                     printf("[*] EINTR 重试 %d/%d\n", retries, max_retries);
                     out.pc = sc_addr;
+                    out.sp = sp_addr;
                     if (ptrace_setregs(pid, &out) != 0) {
-                        perror("setregs(retry)");
-                        break;
+                        perror("setregs(retry)"); break;
                     }
-                    /* 压制引起 EINTR 的信号, 重新 CONT */
                     if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
-                        perror("cont(retry)");
-                        break;
+                        perror("cont(retry)"); break;
                     }
                 } else if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
-                    /* 作业控制信号 — 压制, 继续 */
                     printf("[*] 压制信号 %d, 继续执行\n", sig);
                     if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
-                        perror("cont(suppress)");
-                        break;
+                        perror("cont(suppress)"); break;
                     }
                 } else {
-                    /* 非 EINTR 也非作业控制 — 转发信号 */
                     printf("[*] 转发信号 %d 到目标\n", sig);
                     if (ptrace(PTRACE_CONT, pid, NULL, (void*)(uintptr_t)sig) != 0) {
-                        perror("cont(forward)");
-                        break;
+                        perror("cont(forward)"); break;
                     }
                 }
             }
@@ -455,7 +591,7 @@ int main(int argc, char **argv) {
                 retries, (unsigned long long)handle);
     }
 
-    /* ── 恢复寄存器，detach 主线程，再 detach 所有冻结线程 ── */
+    /* 6. 恢复寄存器, detach 所有线程 */
     ptrace_setregs(pid, &saved);
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
     for (int i = 0; i < ntids; i++) {
@@ -463,7 +599,6 @@ int main(int argc, char **argv) {
         ptrace(PTRACE_DETACH, tids[i], NULL, (void*)0);
     }
 
-    /* 检查 handle: NULL 或 error range (> 0xfffffffffffff000) 均失败 */
     if (!handle || (int64_t)handle < 0) {
         fprintf(stderr, "[-] dlopen 失败 (handle=0x%llx, %s)\n",
                 (unsigned long long)handle,
