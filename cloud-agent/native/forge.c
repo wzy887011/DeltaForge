@@ -96,6 +96,7 @@ static void load_dyn_table(void);
 static int elf_get_build_id(const char *elf_path, char *hex_out, size_t hex_sz);
 static int get_so_disk_path(pid_t pid, const char *soname, char *out, size_t out_sz);
 static int verify_tersafe_version(pid_t pid);
+static int run_cmd(const char *argv[]);  /* forward for start_logcat */
 
 static void start_logcat(void) {
     /* kill existing logcat */
@@ -132,7 +133,6 @@ static void start_logcat(void) {
 
 static int do_prepare(void);
 static int do_launch(void);
-static int run_cmd(const char *argv[]);  /* forward — used by start_logcat */
 
 /* ============= 日志宏 ============= */
 static int g_verbose = 0;
