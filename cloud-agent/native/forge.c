@@ -273,7 +273,6 @@ static int verify_tersafe_version(pid_t pid) {
 }
 
 /* ============= 内存调整条目 ============= */
-typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
 
 /* --- libtersafe.so 代码段调整，67 处 (含检测链 6) ---
  * 基于 delta_force_detection_final_static_report.md 中的 offset 表
