@@ -927,8 +927,23 @@ int open(const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
-    /* [v7.0 P2-1] /proc/PID/status dynamically generated (includes real PID) */
+    /* [v7.0 P2-1 + TASK-04] /proc/PID/status — 动态生成并过滤 TracerPid
+     * 先读真实 /proc/self/status，过滤 TracerPid/State 字段，比静态缓冲更完整 */
     if(p && strstr(p,"/status") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        /* 尝试读真实内容并过滤 TracerPid */
+        int rfd = _open(p, O_RDONLY, 0);
+        if (rfd >= 0) {
+            char sbuf[2048] = {0};
+            ssize_t sn = read(rfd, sbuf, sizeof(sbuf)-1);
+            close(rfd);
+            if (sn > 0) {
+                sbuf[sn] = '\0';
+                filter_status_tracerpid(sbuf, (size_t)sn);
+                int fd = override_fd(sbuf, (size_t)sn);
+                if (fd >= 0) return fd;
+            }
+        }
+        /* fallback: 静态缓冲 */
         ensure_proc_status();
         if(g_proc_status_len>0){int fd=override_fd(g_proc_status_buf,(size_t)g_proc_status_len);if(fd>=0)return fd;}
     }
