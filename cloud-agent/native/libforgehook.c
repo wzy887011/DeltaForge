@@ -879,7 +879,106 @@ static int make_filtered_maps_fd(void) {
     return mfd;
 }
 
-/* ============================================================
+/* [v8.8.2] LXC 容器痕迹过滤
+ * 从 /proc/self/mountinfo 移除 lxcfs/docker 行，避免暴露容器底座 */
+static int make_filtered_mountinfo_fd(void) {
+    int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mountinfo", O_RDONLY, 0);
+    if (rfd < 0) return -1;
+    char *raw = (char *)mmap(NULL, 65537, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (raw == MAP_FAILED) { syscall(SYS_close, rfd); return -1; }
+    ssize_t total = 0, n;
+    while ((n = (ssize_t)syscall(SYS_read, rfd, raw + total, 65536 - (size_t)total)) > 0) total += n;
+    syscall(SYS_close, rfd);
+    if (total <= 0) { munmap(raw, 65537); return -1; }
+    raw[total] = '\0';
+
+    /* 过滤含容器指纹的挂载行 */
+    static const char *MI_FILTER[] = {
+        "lxcfs", "fuse.lxcfs", "docker", "podman", "containerd",
+        "nsfs", "overlay", "fuse.glusterfs", NULL
+    };
+    int mfd = (int)syscall(__NR_memfd_create, "mi_", 0);
+    if (mfd < 0) { munmap(raw, 65537); return -1; }
+    char *line = raw, *out = raw;
+    size_t out_len = 0;
+    while (line && *line) {
+        char *eol = strchr(line, '\n'); if (!eol) break;
+        *eol = '\0';
+        int skip = 0;
+        for (const char **f = MI_FILTER; *f; f++)
+            if (strstr(line, *f)) { skip = 1; break; }
+        if (!skip) {
+            size_t ll = (size_t)(eol - line) + 1;
+            memmove(out + out_len, line, ll); out_len += ll;
+        }
+        *eol = '\n'; line = eol + 1;
+    }
+    if (out_len > 0) {
+        ftruncate(mfd, (off_t)out_len);
+        void *a = mmap(NULL, out_len, PROT_WRITE, MAP_SHARED, mfd, 0);
+        if (a != MAP_FAILED) { memcpy(a, out, out_len); munmap(a, out_len); }
+        lseek(mfd, 0, SEEK_SET);
+    }
+    munmap(raw, 65537);
+    return mfd;
+}
+
+/* 从 /proc/self/cgroup 移除 LXC/Docker 路径，替换为手机样式 cgroup 路径 */
+static int make_filtered_cgroup_fd(void) {
+    int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/cgroup", O_RDONLY, 0);
+    if (rfd < 0) return -1;
+    char raw[4096] = {0};
+    ssize_t n = (ssize_t)syscall(SYS_read, rfd, raw, sizeof(raw) - 1);
+    syscall(SYS_close, rfd);
+    if (n <= 0) return -1;
+    raw[n] = '\0';
+
+    /* 清除含容器路径的条目，将路径替换为 /apps 风格 */
+    static const char *CG_BAD[] = {
+        "docker", "lxc", "user.slice", "machine.slice", "containerd", NULL
+    };
+    int mfd = (int)syscall(__NR_memfd_create, "cg_", 0);
+    if (mfd < 0) return -1;
+    char out[4096]; int out_len = 0;
+    char *line = raw;
+    while (line && *line && out_len < (int)sizeof(out) - 64) {
+        char *eol = strchr(line, '\n'); if (!eol) break;
+        *eol = '\0';
+        /* 找到第三个 ':' 之后的路径部分 */
+        char *c1 = strchr(line, ':');
+        char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+        if (c2) {
+            const char *path = c2 + 1;
+            int bad = 0;
+            for (const char **b = CG_BAD; *b; b++)
+                if (strstr(path, *b)) { bad = 1; break; }
+            size_t prefix = (size_t)(c2 - line) + 1;
+            if (out_len + (int)prefix + 4 < (int)sizeof(out)) {
+                memcpy(out + out_len, line, prefix); out_len += (int)prefix;
+                if (bad) { out[out_len++] = '/'; }
+                else {
+                    size_t plen = strlen(path);
+                    memcpy(out + out_len, path, plen); out_len += (int)plen;
+                }
+                out[out_len++] = '\n';
+            }
+        } else {
+            size_t ll = strlen(line);
+            if (out_len + (int)ll + 2 < (int)sizeof(out)) {
+                memcpy(out + out_len, line, ll);
+                out_len += (int)ll; out[out_len++] = '\n';
+            }
+        }
+        *eol = '\n'; line = eol + 1;
+    }
+    if (out_len > 0) {
+        ftruncate(mfd, (off_t)out_len);
+        void *a = mmap(NULL, (size_t)out_len, PROT_WRITE, MAP_SHARED, mfd, 0);
+        if (a != MAP_FAILED) { memcpy(a, out, (size_t)out_len); munmap(a, (size_t)out_len); }
+        lseek(mfd, 0, SEEK_SET);
+    }
+    return mfd;
+}
  * CRITICAL: g_hooks_ready — 延迟激活所有 libc hook
  *
  * BUG (v6.0, 数小时排查): hijack 模式 (替换 libtdmqimei.so) 下游戏闪退，
@@ -930,6 +1029,13 @@ int open(const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
+    /* [v8.8.2] mountinfo/cgroup LXC 容器痕迹过滤 */
+    if(p && strstr(p,"mountinfo") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        int mfd=make_filtered_mountinfo_fd(); if(mfd>=0)return mfd;
+    }
+    if(p && strstr(p,"cgroup") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        int mfd=make_filtered_cgroup_fd(); if(mfd>=0)return mfd;
+    }
     /* [v7.0 P2-1 + TASK-04] /proc/PID/status — 动态生成并过滤 TracerPid
      * 先读真实 /proc/self/status，过滤 TracerPid/State 字段，比静态缓冲更完整 */
     if(p && strstr(p,"/status") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
@@ -968,6 +1074,13 @@ int openat(int dir,const char *p,int flags,...){
     }
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
+    }
+    /* [v8.8.2] mountinfo/cgroup LXC 容器痕迹过滤 (openat) */
+    if(p && strstr(p,"mountinfo") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        int mfd=make_filtered_mountinfo_fd(); if(mfd>=0)return mfd;
+    }
+    if(p && strstr(p,"cgroup") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
+        int mfd=make_filtered_cgroup_fd(); if(mfd>=0)return mfd;
     }
     if(p && strstr(p,"/status") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
         ensure_proc_status();

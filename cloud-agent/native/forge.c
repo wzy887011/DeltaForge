@@ -1185,7 +1185,8 @@ static void spoof_serial_bind(void) {
 }
 
 /* L2: resetprop 全局覆写 IMEI 与序列号
- * 优先 Magisk/KernelSU 内置，回退到用户手动部署的 standalone resetprop */
+ * 优先 Magisk/KernelSU 内置，回退到用户手动部署的 standalone resetprop
+ * 若均不可用，LXC 容器中改用 build.prop 直写（见 modify_props_lxc） */
 static void resetprop_identity(void) {
     static const char * const rp_locs[] = {
         "/system/bin/resetprop",
@@ -1198,7 +1199,11 @@ static void resetprop_identity(void) {
     const char *rp = NULL;
     for (int i = 0; rp_locs[i]; i++)
         if (access(rp_locs[i], X_OK) == 0) { rp = rp_locs[i]; break; }
-    if (!rp) { WARN("[L2] resetprop not found, HOOK_PROPS only"); return; }
+    if (!rp) {
+        WARN("[L2] resetprop not found, falling back to build.prop (LXC)");
+        modify_props_lxc();
+        return;
+    }
 
     char imei[16], imei2[16], serial[16];
     hwid_gen_imei(imei); hwid_gen_imei(imei2);
@@ -1226,7 +1231,43 @@ static void resetprop_identity(void) {
     OK("[L2] resetprop done (IMEI=%s serial=%s)", imei, serial);
 }
 
-/* L3: OAID/VAID 身份文件随机替换 */
+/* L2b: LXC 容器中无 resetprop 时，直接 remount + 修改 build.prop
+ * 让 getprop 全局可见正确值（重启后生效，需在游戏启动前执行）*/
+static void modify_props_lxc(void) {
+    char serial[16]; hwid_samsung_serial(serial, sizeof(serial));
+    char imei[16];   hwid_gen_imei(imei);
+
+    /* 尝试以 rw 挂载根/system 分区 */
+    int rw_ok = (system("mount -o remount,rw / 2>/dev/null") == 0) ||
+                (system("mount -o remount,rw /system 2>/dev/null") == 0);
+    if (!rw_ok) { WARN("[L2b] remount rw 失败，build.prop 修改跳过"); return; }
+
+    char cmd[640];
+    /* 修改所有分区的 build.prop */
+    snprintf(cmd, sizeof(cmd),
+        "for f in /system/build.prop /vendor/build.prop /product/build.prop "
+        "         /system/system/build.prop /odm/build.prop; do "
+        "  [ -f \"$f\" ] || continue; "
+        "  sed -i "
+        "    -e 's/ro\\.serialno=.*/ro.serialno=%s/g' "
+        "    -e 's/ro\\.boot\\.serialno=.*/ro.boot.serialno=%s/g' "
+        "    \"$f\" 2>/dev/null; "
+        "done", serial, serial);
+    system(cmd);
+
+    /* 注入 IMEI（追加，因大多数 build.prop 不含 ril.imei）*/
+    snprintf(cmd, sizeof(cmd),
+        "f=/system/build.prop; "
+        "grep -q 'ro.ril.imei' \"$f\" 2>/dev/null && "
+        "  sed -i 's/ro\\.ril\\.imei=.*/ro.ril.imei=%s/g' \"$f\" 2>/dev/null || "
+        "  echo 'ro.ril.imei=%s' >> \"$f\" 2>/dev/null",
+        imei, imei);
+    system(cmd);
+
+    OK("[L2b] build.prop patched (serial=%s imei=%s)", serial, imei);
+    /* 恢复只读挂载 */
+    system("mount -o remount,ro / 2>/dev/null || mount -o remount,ro /system 2>/dev/null");
+}
 static void spoof_oaid_vaid(void) {
     char hex[17]; int fd;
     hwid_rand_hex(hex, 16);
