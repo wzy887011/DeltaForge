@@ -895,7 +895,7 @@ static int make_filtered_mountinfo_fd(void) {
     /* 过滤含容器指纹的挂载行 */
     static const char *MI_FILTER[] = {
         "lxcfs", "fuse.lxcfs", "docker", "podman", "containerd",
-        "nsfs", "overlay", "fuse.glusterfs", NULL
+        "nsfs", "fuse.glusterfs", NULL   /* 去掉 overlay：Android 自身也用 overlayfs */
     };
     int mfd = (int)syscall(__NR_memfd_create, "mi_", 0);
     if (mfd < 0) { munmap(raw, 65537); return -1; }
@@ -908,8 +908,10 @@ static int make_filtered_mountinfo_fd(void) {
         for (const char **f = MI_FILTER; *f; f++)
             if (strstr(line, *f)) { skip = 1; break; }
         if (!skip) {
-            size_t ll = (size_t)(eol - line) + 1;
-            memmove(out + out_len, line, ll); out_len += ll;
+            size_t ll = (size_t)(eol - line);  /* 不含终止符 */
+            memmove(out + out_len, line, ll);
+            out_len += ll;
+            out[out_len++] = '\n';             /* 显式写 newline，不是 \0 */
         }
         *eol = '\n'; line = eol + 1;
     }

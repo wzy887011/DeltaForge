@@ -1187,6 +1187,7 @@ static void spoof_serial_bind(void) {
 /* L2: resetprop 全局覆写 IMEI 与序列号
  * 优先 Magisk/KernelSU 内置，回退到用户手动部署的 standalone resetprop
  * 若均不可用，LXC 容器中改用 build.prop 直写（见 modify_props_lxc） */
+static void modify_props_lxc(void);   /* forward declaration */
 static void resetprop_identity(void) {
     static const char * const rp_locs[] = {
         "/system/bin/resetprop",
