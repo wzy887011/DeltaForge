@@ -1042,6 +1042,7 @@ static int make_filtered_cgroup_fd(void) {
     }
     return mfd;
 }
+/* ============================================================
  * CRITICAL: g_hooks_ready — 延迟激活所有 libc hook
  *
  * BUG (v6.0, 数小时排查): hijack 模式 (替换 libtdmqimei.so) 下游戏闪退，
