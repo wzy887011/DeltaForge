@@ -2117,9 +2117,7 @@ static const hook_prop_t HOOK_PROPS[]={
     PROFILE_ENTRY("persist.sys.device_name","SM-G9730"),
     PROFILE_ENTRY("bluetooth.name","SM-G9730"),
     PROFILE_ENTRY("wifi.interface","wlan0"),
-    /* serial blanking */
-    PROFILE_CLEAR("ro.serialno"),
-    PROFILE_CLEAR("ro.boot.serialno"),
+    /* serial — 值在 v8.6 IMEI 区统一设置，此处只 clear hostname */
     PROFILE_CLEAR("net.hostname"),
     /* virtualization markers — clear */
     PROFILE_CLEAR("ro.boot.qemu.avd_name"),
@@ -2134,7 +2132,7 @@ static const hook_prop_t HOOK_PROPS[]={
     PROFILE_CLEAR("nemud.player_package"),
     PROFILE_CLEAR("qemu.hw.mainkeys"),
     PROFILE_CLEAR("qemu.sf.lcd_density"),
-    PROFILE_CLEAR("ro.hardware.gralloc"),
+    PROFILE_ENTRY("ro.hardware.gralloc","adreno"),  /* SM8150 = Adreno 640 */
     PROFILE_CLEAR("ro.product.base_version"),
     /* odm/product fallback — clear partition-specific props */
     PROFILE_CLEAR("ro.product.odm.brand"),
@@ -2166,6 +2164,20 @@ static const hook_prop_t HOOK_PROPS[]={
     PROFILE_ENTRY("ro.boot.serialno",      "R58M74JXMWP"),
     PROFILE_ENTRY("sys.serialno",          "R58M74JXMWP"),
     PROFILE_ENTRY("persist.sys.device_id", "359825100468870"),
+    /* [v8.7] GPU/渲染器属性 — SM-G9730 = Snapdragon 855 = Adreno 640 */
+    PROFILE_ENTRY("ro.hardware.egl",           "adreno"),
+    PROFILE_ENTRY("ro.hardware.vulkan",        "adreno"),
+    PROFILE_ENTRY("ro.opengles.version",       "196610"),   /* 0x30002 = GLES 3.2 */
+    PROFILE_ENTRY("ro.soc.manufacturer",       "QUALCOMM"),
+    PROFILE_ENTRY("ro.soc.model",              "SM8150"),   /* Snapdragon 855 */
+    PROFILE_ENTRY("ro.board.first_api_level",  "28"),
+    /* 清除更多模拟器 GPU 标记 */
+    PROFILE_CLEAR("ro.kernel.qemu.gles"),
+    PROFILE_CLEAR("ro.boot.qemu.cpuvulkan.version"),
+    PROFILE_CLEAR("ro.hardware.audio.primary"),  /* emulator 中常为 goldfish_audio */
+    PROFILE_CLEAR("android.emu.avd_name"),
+    /* 二进制路径掩盖 — 告知应用 su 来自系统 */
+    PROFILE_ENTRY("ro.build.selinux",          "1"),
     PROFILE_END
 };
 
