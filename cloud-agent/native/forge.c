@@ -40,6 +40,7 @@
 #include "crypt_strings.h"
 #include "patch_loader.h"
 #include <sys/un.h>
+#include <sys/mount.h>
 
 /* ============= TASK-06: 动态 patch 表 (启动时从 JSON 加载，失败回退静态) ===== */
 #define FORGE_PATCH_JSON "/data/local/tmp/forge_patches.json"
@@ -1088,6 +1089,228 @@ static int patch_game_process(void) {
 static volatile sig_atomic_t g_stop = 0;
 static void sig_handler(int sig) { (void)sig; g_stop = 1; }
 
+/* ================================================================
+ * v8.8 深层设备环境重建 — 整合神念/时间刺客技术
+ *
+ * 云机伪装真手机的7个层次：
+ * L0: IP/ASN      — WireGuard 出口 (见 runner/setup_network.sh)
+ * L1: 内核级      — mount --bind /sys/devices/soc0/serial_number
+ * L2: 全局属性    — resetprop IMEI/Serial
+ * L3: 身份文件    — OAID/VAID 文件替换
+ * L4: SSAID       — settings_ssaid.xml 深度修改
+ * L5: DFM 指纹    — 清理 TDM/QIMEI/登录记录
+ * L6: 进程运行时  — TerSafe patch + LD_PRELOAD (已有)
+ * ================================================================ */
+#define SERIAL_KERN_PATH "/sys/devices/soc0/serial_number"
+#define SERIAL_BIND_TMP  "/data/local/tmp/.sn_bind"
+#define OAID_PATH        "/data/system/oaid_persistence_0"
+#define VAID_PATH        "/data/system/vaid_persistence_platform"
+#define SSAID_XML        "/data/system/users/0/settings_ssaid.xml"
+
+/* /dev/urandom 生成 len 位十六进制字符串 */
+static void hwid_rand_hex(char *buf, size_t len) {
+    unsigned char raw[64];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) { snprintf(buf, len + 1, "%0*d", (int)len, 0); return; }
+    size_t need = (len + 1) / 2;
+    if (need > sizeof(raw)) need = sizeof(raw);
+    if (read(fd, raw, need) <= 0) {/* partial ok */}
+    close(fd);
+    for (size_t i = 0; i < len; i++)
+        snprintf(buf + i, 3, "%02x", (unsigned)(raw[i / 2]));
+    buf[len] = '\0';
+}
+
+/* Samsung 序列号格式: R 开头共 11 位大写字母数字，如 R58M74JXMWP */
+static void hwid_samsung_serial(char *buf, size_t sz) {
+    static const char *ch = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
+    unsigned char raw[12];
+    if (sz < 12) { if (sz) buf[0] = '\0'; return; }
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) { if (read(fd, raw, sizeof(raw)) <= 0) {/*ok*/} close(fd); }
+    buf[0] = 'R';
+    for (int i = 1; i < 11; i++) buf[i] = ch[raw[i] % 34];
+    buf[11] = '\0';
+}
+
+/* Luhn 校验位 — 计算 14 位数字的第 15 位校验位 */
+static int luhn_check_digit(const char *d14) {
+    int sum = 0;
+    for (int i = 0; i < 14; i++) {
+        int v = d14[13 - i] - '0';
+        if (i % 2 == 0) { v *= 2; if (v > 9) v -= 9; }
+        sum += v;
+    }
+    return (10 - sum % 10) % 10;
+}
+
+/* 生成合法 IMEI: TAC=35982510 (Samsung SM-G9730) + 随机6位 + Luhn */
+static void hwid_gen_imei(char *buf) {
+    unsigned char raw[3];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) { if (read(fd, raw, 3) <= 0) {/*ok*/} close(fd); }
+    snprintf(buf, 16, "35982510%02d%02d%02d",
+             (int)(raw[0] % 100), (int)(raw[1] % 100), (int)(raw[2] % 100));
+    buf[14] = '0' + luhn_check_digit(buf);
+    buf[15] = '\0';
+}
+
+/* L1: mount --bind 内核 serial_number 节点
+ * 比 resetprop 更底层，覆盖 /sys 直读路径 */
+static void spoof_serial_bind(void) {
+    if (access(SERIAL_KERN_PATH, F_OK) != 0) return;
+    char serial[16]; hwid_samsung_serial(serial, sizeof(serial));
+    int fd = open(SERIAL_BIND_TMP, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { WARN("[L1] serial tmp: %s", strerror(errno)); return; }
+    write(fd, serial, strlen(serial));
+    close(fd);
+    umount2(SERIAL_KERN_PATH, MNT_DETACH);
+    if (mount(SERIAL_BIND_TMP, SERIAL_KERN_PATH, NULL, MS_BIND | MS_RDONLY, NULL) == 0)
+        OK("[L1] serial bind → %s", serial);
+    else
+        WARN("[L1] serial bind failed: %s", strerror(errno));
+}
+
+/* L2: resetprop 全局覆写 IMEI 与序列号
+ * Magisk/KernelSU resetprop 修改 init property 空间（全局可见）*/
+static void resetprop_identity(void) {
+    static const char * const rp_locs[] = {
+        "/system/bin/resetprop",
+        "/data/adb/magisk/resetprop",
+        "/data/adb/ksu/bin/resetprop",
+        NULL
+    };
+    const char *rp = NULL;
+    for (int i = 0; rp_locs[i]; i++)
+        if (access(rp_locs[i], X_OK) == 0) { rp = rp_locs[i]; break; }
+    if (!rp) { WARN("[L2] resetprop not found, HOOK_PROPS only"); return; }
+
+    char imei[16], imei2[16], serial[16];
+    hwid_gen_imei(imei); hwid_gen_imei(imei2);
+    hwid_samsung_serial(serial, sizeof(serial));
+
+    char cmd[320];
+#define RP(k, v) do { snprintf(cmd,sizeof(cmd),"%s %s %s 2>/dev/null",rp,(k),(v)); system(cmd); } while(0)
+    RP("ro.serialno",        serial);
+    RP("ro.boot.serialno",   serial);
+    RP("sys.serialno",       serial);
+    RP("ril.imei",           imei);
+    RP("ril.imei1",          imei);
+    RP("ril.imei2",          imei2);
+    RP("gsm.imei",           imei);
+    RP("persist.radio.imei", imei);
+    RP("ro.ril.miui.imei0",  imei);
+#undef RP
+    /* 循环覆盖所有名称含 imei 的属性 */
+    snprintf(cmd, sizeof(cmd),
+        "for k in $(getprop | sed -n 's/\\[\\([^]]*imei[^]]*\\)\\].*/\\1/Ip'); do "
+        "  v=$(getprop \"$k\"); "
+        "  [ \"${#v}\" -ge 14 ] && %s \"$k\" '%s' 2>/dev/null; "
+        "done", rp, imei);
+    system(cmd);
+    OK("[L2] resetprop done (IMEI=%s serial=%s)", imei, serial);
+}
+
+/* L3: OAID/VAID 身份文件随机替换 */
+static void spoof_oaid_vaid(void) {
+    char hex[17]; int fd;
+    hwid_rand_hex(hex, 16);
+    fd = open(OAID_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) { write(fd, hex, 16); close(fd); OK("[L3] OAID → %s", hex); }
+    else WARN("[L3] OAID write: %s", strerror(errno));
+
+    hwid_rand_hex(hex, 16);
+    fd = open(VAID_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) { write(fd, hex, 16); close(fd); OK("[L3] VAID → %s", hex); }
+    else WARN("[L3] VAID write: %s", strerror(errno));
+}
+
+/* L4: settings_ssaid.xml 深度修改 (abx2xml → sed → xml2abx)
+ * SSAID 是游戏用于绑定设备的最持久标识之一 */
+static void spoof_ssaid(void) {
+    if (access(SSAID_XML, F_OK) != 0) {
+        WARN("[L4] %s not found", SSAID_XML); return;
+    }
+    const char *abx2xml = access("/system/bin/abx2xml", X_OK) == 0
+                          ? "/system/bin/abx2xml" : "/system/xbin/abx2xml";
+    if (access(abx2xml, X_OK) != 0) {
+        WARN("[L4] abx2xml not available, skip SSAID deep mod"); return;
+    }
+    char dfm_hex[17]; hwid_rand_hex(dfm_hex, 16);
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd),
+        "%s -i '" SSAID_XML "' 2>/dev/null && "
+        /* 替换 userkey UUID */
+        "OLD_UK=$(grep -oP '(?<=\")[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}(?=\")' "
+            "'" SSAID_XML "' | head -1) && "
+        "NEW_UK=$(cat /proc/sys/kernel/random/uuid) && "
+        "[ -n \"$OLD_UK\" ] && "
+            "sed -i \"s|$OLD_UK|$NEW_UK|g\" '" SSAID_XML "' 2>/dev/null; "
+        /* 替换 DFM App-specific ID */
+        "OLD_AID=$(grep -oP '(?<=value=\")[0-9a-f]{16}(?=\")' '" SSAID_XML "' | head -1) && "
+        "[ -n \"$OLD_AID\" ] && "
+            "sed -i \"s|$OLD_AID|%s|g\" '" SSAID_XML "' 2>/dev/null; "
+        "xml2abx -i '" SSAID_XML "' 2>/dev/null",
+        abx2xml, dfm_hex);
+    int rc = system(cmd);
+    if (rc == 0) OK("[L4] SSAID rotated (DFM=%s)", dfm_hex);
+    else WARN("[L4] SSAID mod rc=%d", rc);
+}
+
+/* L5: DFM 游戏指纹缓存彻底清理
+ * 这些文件存储设备指纹与登录历史，清理后游戏视为全新设备 */
+static void clean_dfm_fingerprints(void) {
+    static const char * const fp_files[] = {
+        "/data/data/" TARGET_PKG "/files/tdm_track.dat",
+        "/data/data/" TARGET_PKG "/files/tdm_counter",
+        "/data/data/" TARGET_PKG "/files/tri_init",
+        "/data/data/" TARGET_PKG "/files/TRI_CM_AUDIT",
+        "/data/data/" TARGET_PKG "/files/login-identifier.txt",
+        "/data/data/" TARGET_PKG "/files/MSDK.mmap3",
+        "/data/data/" TARGET_PKG "/files/ace_shell_di.dat",
+        "/data/data/" TARGET_PKG "/files/jwt_token.txt",
+        "/data/data/" TARGET_PKG "/files/itop_login.txt",
+        "/data/data/" TARGET_PKG "/files/.iii",
+        "/data/data/" TARGET_PKG "/files/.system_android_l2",
+        "/data/user/0/" TARGET_PKG "/files/tdm_track.dat",
+        "/data/user/0/" TARGET_PKG "/files/tdm_counter",
+        "/data/user/0/" TARGET_PKG "/files/tri_init",
+        "/data/user/0/" TARGET_PKG "/files/TRI_CM_AUDIT",
+        "/data/user/0/" TARGET_PKG "/files/login-identifier.txt",
+        "/data/user/0/" TARGET_PKG "/files/MSDK.mmap3",
+        "/data/user/0/" TARGET_PKG "/files/ace_shell_di.dat",
+        "/data/user/0/" TARGET_PKG "/files/.iii",
+        "/data/user/0/" TARGET_PKG "/files/.system_android_l2",
+        "/data/user/0/" TARGET_PKG "/files/apm_qcc_finally",
+        NULL
+    };
+    static const char * const fp_dirs[] = {
+        "/data/data/" TARGET_PKG "/files/com.tencent.qimei.sdk.QimeiSDK",
+        "/data/data/" TARGET_PKG "/files/com.tencent.tdm.qimei.sdk.QimeiSDK",
+        "/data/data/" TARGET_PKG "/files/com.tencent.tbs.qimei.sdk.QimeiSDK",
+        "/data/data/" TARGET_PKG "/files/hawk_data",
+        "/data/data/" TARGET_PKG "/files/ano_tmp",
+        "/data/data/" TARGET_PKG "/files/tdm_tmp",
+        "/data/data/" TARGET_PKG "/shared_prefs",
+        "/data/data/" TARGET_PKG "/databases",
+        "/data/user/0/" TARGET_PKG "/files/com.tencent.qimei.sdk.QimeiSDK",
+        "/data/user/0/" TARGET_PKG "/files/com.tencent.tdm.qimei.sdk.QimeiSDK",
+        "/data/user/0/" TARGET_PKG "/files/apm_qcc",
+        "/data/user/0/" TARGET_PKG "/files/apm_qcc_finally",
+        "/data/user/0/" TARGET_PKG "/databases",
+        "/data/user/0/" TARGET_PKG "/shared_prefs",
+        NULL
+    };
+    int cnt = 0;
+    for (int i = 0; fp_files[i]; i++) cnt += (unlink(fp_files[i]) == 0) ? 1 : 0;
+    char cmd[512];
+    for (int i = 0; fp_dirs[i]; i++) {
+        snprintf(cmd, sizeof(cmd), "rm -rf -- '%s' 2>/dev/null", fp_dirs[i]);
+        if (system(cmd) == 0) cnt++;
+    }
+    OK("[L5] DFM 指纹缓存清理 %d 项", cnt);
+}
+
 static int do_prepare(void) {
     signal(SIGTERM, sig_handler);
     signal(SIGINT, sig_handler);
@@ -1102,13 +1325,18 @@ static int do_prepare(void) {
     clean_virt_traces();
     stop_game();
     sleep(2);
+    /* [v8.8 L5] DFM 指纹缓存清理 — 在游戏停止后立即执行，消除跨会话设备关联 */
+    clean_dfm_fingerprints();
     int n = clean_all_ac_files();
     OK("清理文件: %d 个", n);
     restore_dirs();
     adapt_properties();
-    /* [v8.6] Android ID 注入 — root 直写 settings 数据库
-     * SSAID 是登录指纹最重要的一项，云机每次不同会触发"新设备"告警
-     * 固定为 Samsung SM-G9730 风格的真实格式 16位小写hex */
+    /* [v8.8] 深层设备标识重建 (L1–L4) */
+    spoof_serial_bind();    /* L1: 内核级 serial mount --bind */
+    resetprop_identity();   /* L2: 全局 IMEI/Serial resetprop */
+    spoof_oaid_vaid();      /* L3: OAID/VAID 文件替换 */
+    spoof_ssaid();          /* L4: SSAID XML 轮换 */
+    /* [v8.6/v8.8] Android ID — settings put 全局写入 */
     {
         /* settings put 在所有 Android 版本均可用，无需 sqlite3 CLI */
         system("settings put secure android_id 7a3f9b2c1d4e8f06 2>/dev/null || true");
