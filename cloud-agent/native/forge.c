@@ -1110,11 +1110,8 @@ static int do_prepare(void) {
      * SSAID 是登录指纹最重要的一项，云机每次不同会触发"新设备"告警
      * 固定为 Samsung SM-G9730 风格的真实格式 16位小写hex */
     {
-        const char *sql_cmd =
-            "sqlite3 /data/data/com.android.providers.settings/databases/settings.db "
-            "\"UPDATE secure SET value='7a3f9b2c1d4e8f06' WHERE name='android_id'\" "
-            "2>/dev/null || true";
-        system(sql_cmd);
+        /* settings put 在所有 Android 版本均可用，无需 sqlite3 CLI */
+        system("settings put secure android_id 7a3f9b2c1d4e8f06 2>/dev/null || true");
         OK("[hwid] Android ID 已固定");
     }
     protect_devmode();

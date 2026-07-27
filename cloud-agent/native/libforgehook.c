@@ -2384,7 +2384,7 @@ int getifaddrs(struct ifaddrs **ifap) {
 typedef int (*ioctl_t)(int, unsigned long, ...);
 static ioctl_t _ioctl = NULL;
 
-int ioctl(int fd, unsigned long req, ...) {
+int __attribute__((overloadable)) ioctl(int fd, unsigned long req, ...) {
     va_list ap; va_start(ap, req);
     void *arg = va_arg(ap, void *); va_end(ap);
     if (!_ioctl) _ioctl = (ioctl_t)dlsym(RTLD_NEXT, "ioctl");
