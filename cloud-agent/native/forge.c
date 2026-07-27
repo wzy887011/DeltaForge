@@ -1156,28 +1156,43 @@ static void hwid_gen_imei(char *buf) {
 }
 
 /* L1: mount --bind 内核 serial_number 节点
- * 比 resetprop 更底层，覆盖 /sys 直读路径 */
+ * 不同 SoC 路径不同，依次尝试 */
 static void spoof_serial_bind(void) {
-    if (access(SERIAL_KERN_PATH, F_OK) != 0) return;
+    static const char * const sn_paths[] = {
+        "/sys/devices/soc0/serial_number",
+        "/sys/class/android_usb/android0/iSerial",
+        "/sys/devices/platform/soc/soc:usb-phy/serial_number",
+        "/proc/cpuinfo",   /* 作为只读 bind 源，不挂载此，仅做探测 */
+        NULL
+    };
+    const char *target = NULL;
+    for (int i = 0; sn_paths[i]; i++) {
+        if (i == 3) break;  /* /proc/cpuinfo 仅探测用，不 bind */
+        if (access(sn_paths[i], F_OK) == 0) { target = sn_paths[i]; break; }
+    }
+    if (!target) { WARN("[L1] serial_number sysfs 路径未找到，跳过 bind"); return; }
+
     char serial[16]; hwid_samsung_serial(serial, sizeof(serial));
     int fd = open(SERIAL_BIND_TMP, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { WARN("[L1] serial tmp: %s", strerror(errno)); return; }
     write(fd, serial, strlen(serial));
     close(fd);
-    umount2(SERIAL_KERN_PATH, MNT_DETACH);
-    if (mount(SERIAL_BIND_TMP, SERIAL_KERN_PATH, NULL, MS_BIND | MS_RDONLY, NULL) == 0)
-        OK("[L1] serial bind → %s", serial);
+    umount2(target, MNT_DETACH);
+    if (mount(SERIAL_BIND_TMP, target, NULL, MS_BIND | MS_RDONLY, NULL) == 0)
+        OK("[L1] serial bind %s → %s", target, serial);
     else
-        WARN("[L1] serial bind failed: %s", strerror(errno));
+        WARN("[L1] serial bind %s failed: %s", target, strerror(errno));
 }
 
 /* L2: resetprop 全局覆写 IMEI 与序列号
- * Magisk/KernelSU resetprop 修改 init property 空间（全局可见）*/
+ * 优先 Magisk/KernelSU 内置，回退到用户手动部署的 standalone resetprop */
 static void resetprop_identity(void) {
     static const char * const rp_locs[] = {
         "/system/bin/resetprop",
         "/data/adb/magisk/resetprop",
         "/data/adb/ksu/bin/resetprop",
+        "/data/local/tmp/resetprop",   /* standalone 手动部署路径 */
+        "/sbin/resetprop",             /* 某些旧版 Magisk */
         NULL
     };
     const char *rp = NULL;
@@ -1228,33 +1243,38 @@ static void spoof_oaid_vaid(void) {
 /* L4: settings_ssaid.xml 深度修改 (abx2xml → sed → xml2abx)
  * SSAID 是游戏用于绑定设备的最持久标识之一 */
 static void spoof_ssaid(void) {
-    if (access(SSAID_XML, F_OK) != 0) {
-        WARN("[L4] %s not found", SSAID_XML); return;
-    }
-    const char *abx2xml = access("/system/bin/abx2xml", X_OK) == 0
-                          ? "/system/bin/abx2xml" : "/system/xbin/abx2xml";
-    if (access(abx2xml, X_OK) != 0) {
-        WARN("[L4] abx2xml not available, skip SSAID deep mod"); return;
-    }
+    /* Android 不同版本 SSAID XML 路径不同 */
+    static const char * const ssaid_paths[] = {
+        "/data/system/users/0/settings_ssaid.xml",
+        "/data/system/0/settings_ssaid.xml",
+        "/data/system/users/0/settings.xml",
+        NULL
+    };
+    const char *xml = NULL;
+    for (int i = 0; ssaid_paths[i]; i++)
+        if (access(ssaid_paths[i], F_OK) == 0) { xml = ssaid_paths[i]; break; }
+    if (!xml) { WARN("[L4] settings_ssaid.xml 未找到，跳过"); return; }
+
+    /* 确认工具可用 */
+    const char *abx2xml =
+        access("/system/bin/abx2xml", X_OK) == 0  ? "/system/bin/abx2xml" :
+        access("/system/xbin/abx2xml", X_OK) == 0 ? "/system/xbin/abx2xml" : NULL;
+    if (!abx2xml) { WARN("[L4] abx2xml not available, skip SSAID deep mod"); return; }
+
     char dfm_hex[17]; hwid_rand_hex(dfm_hex, 16);
     char cmd[768];
     snprintf(cmd, sizeof(cmd),
-        "%s -i '" SSAID_XML "' 2>/dev/null && "
-        /* 替换 userkey UUID */
-        "OLD_UK=$(grep -oP '(?<=\")[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}(?=\")' "
-            "'" SSAID_XML "' | head -1) && "
+        "%s -i '%s' 2>/dev/null && "
+        "OLD_UK=$(grep -oP '(?<=\")[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}(?=\")' '%s' | head -1) && "
         "NEW_UK=$(cat /proc/sys/kernel/random/uuid) && "
-        "[ -n \"$OLD_UK\" ] && "
-            "sed -i \"s|$OLD_UK|$NEW_UK|g\" '" SSAID_XML "' 2>/dev/null; "
-        /* 替换 DFM App-specific ID */
-        "OLD_AID=$(grep -oP '(?<=value=\")[0-9a-f]{16}(?=\")' '" SSAID_XML "' | head -1) && "
-        "[ -n \"$OLD_AID\" ] && "
-            "sed -i \"s|$OLD_AID|%s|g\" '" SSAID_XML "' 2>/dev/null; "
-        "xml2abx -i '" SSAID_XML "' 2>/dev/null",
-        abx2xml, dfm_hex);
+        "[ -n \"$OLD_UK\" ] && sed -i \"s|$OLD_UK|$NEW_UK|g\" '%s' 2>/dev/null; "
+        "OLD_AID=$(grep -oP '(?<=value=\")[0-9a-f]{16}(?=\")' '%s' | head -1) && "
+        "[ -n \"$OLD_AID\" ] && sed -i \"s|$OLD_AID|%s|g\" '%s' 2>/dev/null; "
+        "xml2abx -i '%s' 2>/dev/null",
+        abx2xml, xml, xml, xml, xml, dfm_hex, xml, xml);
     int rc = system(cmd);
-    if (rc == 0) OK("[L4] SSAID rotated (DFM=%s)", dfm_hex);
-    else WARN("[L4] SSAID mod rc=%d", rc);
+    if (rc == 0) OK("[L4] SSAID rotated @ %s (DFM=%s)", xml, dfm_hex);
+    else WARN("[L4] SSAID mod rc=%d @ %s", rc, xml);
 }
 
 /* L5: DFM 游戏指纹缓存彻底清理
