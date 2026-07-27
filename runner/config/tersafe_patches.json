@@ -68,7 +68,11 @@
     {"offset": "0x2E7810", "value": "0xD65F03C0", "comment": "kKillChain[2] RET"},
     {"offset": "0x2F29D0", "value": "0xD65F03C0", "comment": "kKillChain[3] RET"},
     {"offset": "0x320D78", "value": "0xD65F03C0", "comment": "kKillChain[4] RET"},
-    {"offset": "0x3233B8", "value": "0xD65F03C0", "comment": "kKillChain[5] RET"}
+    {"offset": "0x3233B8", "value": "0xD65F03C0", "comment": "kKillChain[5] RET"},
+    {"offset": "0x36BC8C", "value": "0xD65F03C0", "comment": "kKillChain[6] RET — tombstone_14新检测链入口"},
+    {"offset": "0x36BED8", "value": "0xD65F03C0", "comment": "kKillChain[7] RET"},
+    {"offset": "0x370D98", "value": "0xD65F03C0", "comment": "kKillChain[8] RET"},
+    {"offset": "0x371210", "value": "0xD65F03C0", "comment": "kKillChain[9] RET — tgkill自杀点"}
   ],
   "tersafe_bss": [
     "0x47F0","0x4C28","0x5800","0x5848","0x5888","0x58B0","0x58E8","0x5918",
