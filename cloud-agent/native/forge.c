@@ -1434,6 +1434,24 @@ static int do_prepare(void) {
         system("settings put secure android_id 7a3f9b2c1d4e8f06 2>/dev/null || true");
         OK("[hwid] Android ID 已固定");
     }
+    /* [v8.9] LD_PRELOAD 预加载 — wrap.PKG 属性让 zygote 在 app 启动前自动注入
+     * 优先于 ptrace 注入，彻底绕过 Android 12+ linker namespace 隔离
+     * resetprop -n 绕过 property_service 直写，无视 ro.* 限制 */
+    {
+        const char *rp = find_resetprop();
+        if (rp) {
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd),
+                "%s wrap.%s 'LD_PRELOAD=/data/local/tmp/libforgehook.so' 2>/dev/null",
+                rp, TARGET_PKG);
+            if (system(cmd) == 0)
+                OK("[hook] wrap.%s LD_PRELOAD 已设置 — 系统级注入就绪", TARGET_PKG);
+            else
+                WARN("[hook] wrap 属性设置失败，将回退 ptrace 注入");
+        } else {
+            WARN("[hook] resetprop 不可用，wrap 属性无法设置");
+        }
+    }
     protect_devmode();
     return 0;
 }
