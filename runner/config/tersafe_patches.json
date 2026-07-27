@@ -1,6 +1,6 @@
 {
   "description": "DeltaForge patch table — update offsets when tersafe.so changes",
-  "build_id": "",
+  "build_id": "d70d7926094ae39a46745c12ddcc1877641f82e8",
   "tersafe_patches": [
     {"offset": "0x5137C0", "value": "0x2A1F03FF", "comment": "return 0xFF"},
     {"offset": "0x516640", "value": "0x2A1F03FF", "comment": "return 0xFF"},

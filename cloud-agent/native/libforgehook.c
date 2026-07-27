@@ -430,6 +430,37 @@ static void _do_chainload(void) {
     }
 }
 
+/* [sensor] constructor(46) — 创建 SM-G9730 伪传感器目录供 opendir 重定向使用
+ * 运行时机：g_hooks_ready=0，所有 syscall 直接透传内核，无递归风险。 */
+__attribute__((constructor(46)))
+static void _create_fake_sensor_dir(void) {
+    static const struct { const char *sub; const char *name_v; const char *vendor_v; } kS[] = {
+        {"accelerometer_sensor","K6DS3TR Acceleration\n","STMicro\n"},
+        {"gyro_sensor",         "K6DS3TR Gyroscope\n",   "STMicro\n"},
+        {"magnetic_sensor",     "MMC5633NJ mag\n",       "Memsic\n"},
+        {"proximity_sensor",    "proximity\n",           "Samsung\n"},
+        {"light_sensor",        "light\n",               "Samsung\n"},
+        {"pressure_sensor",     "BARO_PRESSURE_Sensor\n","STMicro\n"},
+        {NULL,NULL,NULL}
+    };
+    const char *base = "/data/local/tmp/.forge_s";
+    mkdir(base, 0755);
+    for (int i = 0; kS[i].sub; i++) {
+        char d[256], f[256]; int fd;
+        snprintf(d, sizeof(d), "%s/%s", base, kS[i].sub);
+        mkdir(d, 0755);
+        snprintf(f, sizeof(f), "%s/name", d);
+        fd = (int)syscall(SYS_openat, AT_FDCWD, f, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644);
+        if (fd>=0){syscall(SYS_write,fd,kS[i].name_v,strlen(kS[i].name_v));syscall(SYS_close,fd);}
+        snprintf(f, sizeof(f), "%s/vendor", d);
+        fd = (int)syscall(SYS_openat, AT_FDCWD, f, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644);
+        if (fd>=0){syscall(SYS_write,fd,kS[i].vendor_v,strlen(kS[i].vendor_v));syscall(SYS_close,fd);}
+        snprintf(f, sizeof(f), "%s/version", d);
+        fd = (int)syscall(SYS_openat, AT_FDCWD, f, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644);
+        if (fd>=0){syscall(SYS_write,fd,"1\n",2);syscall(SYS_close,fd);}
+    }
+}
+
 __attribute__((constructor(47)))
 static void _resolve_qimei_path(void) {
     hook_log("[CTOR] 47 enter\n");
@@ -685,6 +716,36 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/sys/devices/soc0/soc_id","500\n",4},
     {"/sys/devices/soc0/machine",OVERRIDE_MACHINE,sizeof(OVERRIDE_MACHINE)-1},
     {"/sys/devices/soc0/family","Snapdragon\n",11},
+    /* SM-G9730 (beyond1q / Snapdragon 855) sensor attribute files
+     * 对游戏直接读取 sysfs sensor 属性的探测点提供真实设备数据 */
+    {"/sys/class/sensors/accelerometer_sensor/name",
+     "K6DS3TR Acceleration\n", sizeof("K6DS3TR Acceleration\n")-1},
+    {"/sys/class/sensors/accelerometer_sensor/vendor",
+     "STMicro\n", sizeof("STMicro\n")-1},
+    {"/sys/class/sensors/accelerometer_sensor/version","1\n",2},
+    {"/sys/class/sensors/gyro_sensor/name",
+     "K6DS3TR Gyroscope\n", sizeof("K6DS3TR Gyroscope\n")-1},
+    {"/sys/class/sensors/gyro_sensor/vendor",
+     "STMicro\n", sizeof("STMicro\n")-1},
+    {"/sys/class/sensors/gyro_sensor/version","1\n",2},
+    {"/sys/class/sensors/magnetic_sensor/name",
+     "MMC5633NJ mag\n", sizeof("MMC5633NJ mag\n")-1},
+    {"/sys/class/sensors/magnetic_sensor/vendor",
+     "Memsic\n", sizeof("Memsic\n")-1},
+    {"/sys/class/sensors/magnetic_sensor/version","1\n",2},
+    {"/sys/class/sensors/proximity_sensor/name",
+     "proximity\n", sizeof("proximity\n")-1},
+    {"/sys/class/sensors/proximity_sensor/vendor",
+     "Samsung\n", sizeof("Samsung\n")-1},
+    {"/sys/class/sensors/light_sensor/name",
+     "light\n", sizeof("light\n")-1},
+    {"/sys/class/sensors/light_sensor/vendor",
+     "Samsung\n", sizeof("Samsung\n")-1},
+    {"/sys/class/sensors/pressure_sensor/name",
+     "BARO_PRESSURE_Sensor\n", sizeof("BARO_PRESSURE_Sensor\n")-1},
+    {"/sys/class/sensors/pressure_sensor/vendor",
+     "STMicro\n", sizeof("STMicro\n")-1},
+    /* fallback: 任何其他 sensor sysfs 读 → 空行 */
     {"/sys/class/sensors/","\n",1},
     /* /proc/PID/status and /proc/self/status handled by open hook dynamically
      * (includes real PID). These are placeholder entries for the match table. */
@@ -1397,6 +1458,13 @@ DIR *opendir(const char *name) {
     if (!_opendir) _opendir = (opendir_t)dlsym(RTLD_NEXT, "opendir");
     if (!HOOKS_READY()) return _opendir ? _opendir(name) : NULL;
     if (hidden(name)) { errno = ENOENT; return NULL; }
+    /* [sensor] 重定向 /sys/class/sensors 到伪造传感器目录 */
+    if (name && strncmp(name, "/sys/class/sensors", 18) == 0 &&
+        (name[18] == '\0' || name[18] == '/')) {
+        char fake[256];
+        snprintf(fake, sizeof(fake), "/data/local/tmp/.forge_s%s", name + 18);
+        return _opendir ? _opendir(fake) : NULL;
+    }
     return _opendir ? _opendir(name) : NULL;
 }
 

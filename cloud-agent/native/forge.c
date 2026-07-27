@@ -92,7 +92,7 @@ static void load_dyn_table(void);
  * 填法: 在游戏加载后运行 `sha1sum /proc/<pid>/maps` 找到 libtersafe 路径，
  *       再 `readelf -n libtersafe.so | grep "Build ID"` 得到十六进制串填入此处
  */
-#define EXPECTED_TERSAFE_BUILD_ID  ""   /* e.g. "a1b2c3d4e5f67890..." */
+#define EXPECTED_TERSAFE_BUILD_ID  "d70d7926094ae39a46745c12ddcc1877641f82e8"
 
 static int elf_get_build_id(const char *elf_path, char *hex_out, size_t hex_sz);
 static int get_so_disk_path(pid_t pid, const char *soname, char *out, size_t out_sz);
@@ -687,10 +687,37 @@ static void clean_virt_traces(void) {
 }
 
 /* ============= Telemetry file batch cleanup ============= */
-/* 文件清理暂时禁用 - 激进删除检查文件被游戏检测为第三方插件 */
+/* 使用 truncate(0) 代替 unlink：保留 inode/目录项，仅清空内容。
+ * unlink 触发游戏第三方插件检测（可能因 inotify/文件存在性校验）；
+ * truncate 保留文件但令游戏 SDK 读到空数据，等效清空指纹。 */
+static int safe_trunc(const char *path) {
+    int fd = open(path, O_WRONLY | O_TRUNC);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
+}
+
 static int clean_all_ac_files(void) {
-    WARN("文件清理已禁用 (被game检测为third-party plugin)");
-    return 0;
+    static const char * const kACFiles[] = {
+        APP_DATA "/shared_prefs/GCloudCoreSP.xml",
+        APP_DATA "/shared_prefs/tdm.xml",
+        APP_DATA "/shared_prefs/tgpa.xml",
+        APP_DATA "/shared_prefs/qm_global_sp.xml",
+        APP_DATA "/shared_prefs/ACE-MSDK.xml",
+        APP_DATA "/shared_prefs/TGPA_ShieldSDK_Data.xml",
+        APP_DATA "/shared_prefs/mmkvlite_log_app_state.mmkv",
+        APP_DATA "/files/GPMSDK.mmap3",
+        APP_DATA "/files/tdm_track.dat",
+        APP_DATA "/files/qimei_deviceId",
+        APP_DATA "/databases/analytics.db",
+        APP_DATA "/databases/tencent_analytics.db",
+        NULL
+    };
+    int count = 0;
+    for (int i = 0; kACFiles[i]; i++)
+        count += safe_trunc(kACFiles[i]);
+    OK("[clean_ac] truncated %d AC files", count);
+    return count;
 }
 
 /* ============= 目录重建 + SELinux 上下文修复 ============= */
@@ -1439,10 +1466,10 @@ static int do_launch(void) {
         if (pid) hide_injection_from_maps(pid);
     }
     if (pid) {
-        unlink(APP_DATA "/files/GPMSDK.mmap3");
-        unlink(APP_DATA "/shared_prefs/GCloudCoreSP.xml");
-        unlink(APP_DATA "/files/tdm_track.dat");
-        unlink(APP_DATA "/shared_prefs/qm_global_sp.xml");
+        safe_trunc(APP_DATA "/files/GPMSDK.mmap3");
+        safe_trunc(APP_DATA "/shared_prefs/GCloudCoreSP.xml");
+        safe_trunc(APP_DATA "/files/tdm_track.dat");
+        safe_trunc(APP_DATA "/shared_prefs/qm_global_sp.xml");
         OK("二次文件清理完成");
     }
     /* B5: 后台每30秒重复清理 — double-fork 避免僵尸进程 */
@@ -1493,7 +1520,7 @@ static int do_launch(void) {
                     APP_DATA "/shared_prefs/tgpa.xml",
                     NULL
                 };
-                for (int i = 0; kGuardPrecise[i]; i++) unlink(kGuardPrecise[i]);
+                for (int i = 0; kGuardPrecise[i]; i++) safe_trunc(kGuardPrecise[i]);
 
                 /* Layered patch verification */
                 {
