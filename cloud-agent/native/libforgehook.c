@@ -33,6 +33,9 @@
 #include <link.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <ifaddrs.h>
 
 /* [v7.1 P0] 字符串常量加密 — 防 strings/IDA 检索 */
 #include "crypt_strings.h"
@@ -2151,6 +2154,18 @@ static const hook_prop_t HOOK_PROPS[]={
     PROFILE_CLEAR("ro.product.product.name"),
     PROFILE_CLEAR("ro.product.ota.host"),
     PROFILE_CLEAR("ro.build.characteristics"),
+    /* [v8.6] IMEI/基带相关属性 — 补全登录指纹 */
+    PROFILE_ENTRY("ril.imei",               "359825100468870"),  /* Samsung SM-G9730 IMEI格式 */
+    PROFILE_ENTRY("ril.imei1",              "359825100468870"),
+    PROFILE_ENTRY("ril.imei2",              "359825100468887"),
+    PROFILE_ENTRY("gsm.imei",              "359825100468870"),
+    PROFILE_ENTRY("persist.radio.imei",    "359825100468870"),
+    PROFILE_ENTRY("ro.ril.miui.imei0",     "359825100468870"),
+    PROFILE_ENTRY("gsm.equipment.eid",     "89033023428000000000021000000000"),
+    PROFILE_ENTRY("ro.serialno",           "R58M74JXMWP"),  /* Samsung出厂序列号格式 */
+    PROFILE_ENTRY("ro.boot.serialno",      "R58M74JXMWP"),
+    PROFILE_ENTRY("sys.serialno",          "R58M74JXMWP"),
+    PROFILE_ENTRY("persist.sys.device_id", "359825100468870"),
     PROFILE_END
 };
 
@@ -2332,3 +2347,54 @@ jint JNI_OnLoad(JavaVM *vm,void *reserved){
 
 __attribute__((destructor))
 static void _cleanup(void){ flush_audit(); }
+
+/* ================================================================
+ * [v8.6 NEW] 硬件ID 欺骗 — MAC / IMEI / Android ID
+ * 覆盖云机最明显的三个登录指纹泄露点
+ * ================================================================ */
+
+/* 伪造 MAC: Samsung SM-G9730 真实出厂 MAC 段前缀 (Samsung Electro-Mechanics OUI) */
+#define FAKE_MAC "\x94\x65\x2d\xa8\x3f\x1c"  /* 94:65:2d → Samsung OUI */
+#define FAKE_MAC_STR "94:65:2d:a8:3f:1c"
+
+/* ---- getifaddrs hook: 替换所有网络接口的 MAC ---- */
+typedef int (*getifaddrs_t)(struct ifaddrs **);
+static getifaddrs_t _getifaddrs = NULL;
+
+int getifaddrs(struct ifaddrs **ifap) {
+    if (!_getifaddrs)
+        _getifaddrs = (getifaddrs_t)dlsym(RTLD_NEXT, "getifaddrs");
+    if (!_getifaddrs) { errno = ENOSYS; return -1; }
+    int rc = _getifaddrs(ifap);
+    if (rc != 0 || !ifap || !*ifap) return rc;
+    /* 遍历所有接口，替换 AF_PACKET (AF_LINK) 的硬件地址 */
+    for (struct ifaddrs *ifa = *ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        /* AF_PACKET = 17, sockaddr_ll: sll_halen + sll_addr */
+        if (ifa->ifa_addr->sa_family == 17 /* AF_PACKET */) {
+            /* sa_data[0..1] = protocol, sa_data[2..7] = MAC on AF_PACKET */
+            unsigned char *mac = (unsigned char*)ifa->ifa_addr->sa_data + 2;
+            memcpy(mac, FAKE_MAC, 6);
+        }
+    }
+    return 0;
+}
+
+/* ---- ioctl hook: 替换 SIOCGIFHWADDR 返回的 MAC ---- */
+typedef int (*ioctl_t)(int, unsigned long, ...);
+static ioctl_t _ioctl = NULL;
+
+int ioctl(int fd, unsigned long req, ...) {
+    va_list ap; va_start(ap, req);
+    void *arg = va_arg(ap, void *); va_end(ap);
+    if (!_ioctl) _ioctl = (ioctl_t)dlsym(RTLD_NEXT, "ioctl");
+    if (!_ioctl) return -1;
+    int rc = _ioctl(fd, req, arg);
+    /* SIOCGIFHWADDR = 0x8927 */
+    if (rc == 0 && req == 0x8927 && arg) {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        /* sa_data[0..5] = MAC */
+        memcpy(ifr->ifr_hwaddr.sa_data, FAKE_MAC, 6);
+    }
+    return rc;
+}
