@@ -614,7 +614,10 @@ static const char *find_resetprop(void) {
     static char rp[128] = {0};
     if (rp[0]) return rp;
     static const char *cands[] = {
+        "/data/local/tmp/resetprop",          /* standalone 手动部署 */
+        "/system/bin/resetprop",
         "/data/adb/magisk/resetprop",
+        "/data/adb/ksu/bin/resetprop",
         "/data/adb/magisk32/resetprop",
         "/sbin/.magisk/mirror/system/bin/resetprop",
         "/sbin/resetprop",
