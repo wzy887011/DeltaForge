@@ -63,6 +63,8 @@
     {"offset": "0x50A9BC", "value": "0x38400503", "comment": "LDRB from stack"},
     {"offset": "0x50B704", "value": "0x3840050A", "comment": "LDRB from stack"},
     {"offset": "0x50E370", "value": "0xD65F03C0", "comment": "RET"},
+    {"offset": "0x2bfae8", "value": "0xD65F03C0", "comment": "kKillChain[10] RET — dl_iterate_phdr scan 入口 tombstone_17 null ptr crash"},
+    {"offset": "0x1e7600", "value": "0xD65F03C0", "comment": "kKillChain[11] RET — dl_iterate_phdr 调用方 tombstone_17"},
     {"offset": "0x419FDC", "value": "0xD65F03C0", "comment": "kKillChain[0] RET — 与tersafe自修复值相同消除翻转"},
     {"offset": "0x419FE0", "value": "0xD65F03C0", "comment": "kKillChain[1] RET"},
     {"offset": "0x2E7810", "value": "0xD65F03C0", "comment": "kKillChain[2] RET"},
