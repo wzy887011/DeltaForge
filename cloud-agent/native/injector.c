@@ -446,7 +446,10 @@ int main(int argc, char **argv) {
     uint64_t rw_base = (uint64_t)rwx_base;
     uint64_t sc_addr  = rw_base + 0x400;   /* code at +1KB */
     uint64_t str_addr = rw_base;           /* path at start */
-    uint64_t sp_addr  = rw_base + 0x1000;  /* 4KB stack for dlopen */
+    /* 使用目标线程的真实栈，保留 TLS/thread-local 访问
+     * 在原始 sp 下方 0x2000(8KB) 处落栈——不会踩现有帧，dlopen 内部调用链深度足够
+     * 修复: 自定义孤立 4KB 栈导致 dlopen 在 Android12 内部调用链 SIGSEGV */
+    uint64_t sp_addr  = (saved.sp - 0x2000) & ~0xFULL;
 
     printf("[*] str=0x%llx sc=0x%llx sp=0x%llx\n",
            (unsigned long long)str_addr,
