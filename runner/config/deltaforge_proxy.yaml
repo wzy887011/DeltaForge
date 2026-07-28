@@ -8,6 +8,8 @@ proxies:
     type: socks5
     server: d7c6fa4a9b166a29.natapp.cc
     port: 8870
+    username: forge
+    password: Q3DLo_jYvBCAZkJpDCOmdQ
 
 proxy-groups:
   - name: GLOBAL
