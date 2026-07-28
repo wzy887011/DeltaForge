@@ -6,8 +6,8 @@ log-level: silent
 proxies:
   - name: PC-Home
     type: socks5
-    server: 183.161.248.96
-    port: 19443
+    server: d7c6fa4a9b166a29.natapp.cc
+    port: 8870
     username: forge
     password: Q3DLo_jYvBCAZkJpDCOmdQ
 
