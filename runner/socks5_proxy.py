@@ -1,28 +1,56 @@
 """
-DeltaForge PC SOCKS5 proxy — no dependencies, pure stdlib Python 3.
-Listens on 0.0.0.0:1080, forwards traffic through PC's internet connection.
+DeltaForge PC SOCKS5 proxy — with username/password authentication (RFC 1929).
+Only authenticated clients can use this proxy.
 Run: python socks5_proxy.py
 """
 import socket
 import threading
 import struct
 import sys
+import secrets
+import string
 
 HOST = "0.0.0.0"
 PORT = 1080
 
+# Credentials — auto-generated on first run, printed to console
+USERNAME = "forge"
+PASSWORD = secrets.token_urlsafe(16)  # random 16-char password each run
+
+
+def auth_ok(conn):
+    """SOCKS5 username/password sub-negotiation (RFC 1929)."""
+    data = conn.recv(515)
+    if not data or data[0] != 1:
+        return False
+    ulen = data[1]
+    uname = data[2:2 + ulen].decode(errors="ignore")
+    plen = data[2 + ulen]
+    passwd = data[3 + ulen:3 + ulen + plen].decode(errors="ignore")
+    ok = (uname == USERNAME and passwd == PASSWORD)
+    conn.sendall(b"\x01" + (b"\x00" if ok else b"\x01"))
+    return ok
+
 
 def handle(conn, addr):
     try:
-        # SOCKS5 greeting
+        # SOCKS5 greeting — advertise username/password auth only
         data = conn.recv(262)
         if not data or data[0] != 5:
             return
-        conn.sendall(b"\x05\x00")  # no auth
+        # Check client supports method 0x02 (username/password)
+        methods = data[2:2 + data[1]]
+        if 0x02 not in methods:
+            conn.sendall(b"\x05\xff")  # no acceptable method
+            return
+        conn.sendall(b"\x05\x02")  # require username/password
+
+        if not auth_ok(conn):
+            return  # wrong credentials — drop silently
 
         # SOCKS5 request
         data = conn.recv(4)
-        if len(data) < 4 or data[1] != 1:  # only CONNECT supported
+        if len(data) < 4 or data[1] != 1:
             conn.sendall(b"\x05\x07\x00\x01" + b"\x00" * 6)
             return
 
@@ -42,19 +70,16 @@ def handle(conn, addr):
 
         dst_port = struct.unpack("!H", conn.recv(2))[0]
 
-        # connect to target
         try:
             remote = socket.create_connection((dst_host, dst_port), timeout=10)
         except Exception:
             conn.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
             return
 
-        # reply success
         bind = remote.getsockname()
         bip = socket.inet_aton(bind[0]) if ":" not in bind[0] else b"\x00" * 4
         conn.sendall(b"\x05\x00\x00\x01" + bip + struct.pack("!H", bind[1]))
 
-        # relay
         remote.settimeout(None)
         conn.settimeout(None)
         stop = threading.Event()
@@ -88,7 +113,6 @@ def main():
     srv.bind((HOST, PORT))
     srv.listen(128)
 
-    # show PC outbound IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -97,11 +121,11 @@ def main():
     except Exception:
         local_ip = "unknown"
 
-    print(f"[+] SOCKS5 proxy listening on {HOST}:{PORT}")
-    print(f"[*] PC local IP: {local_ip}")
-    print(f"[*] Keep this window open")
-    print(f"[*] On cloud phone run:")
-    print(f"       su -c \"sh /data/local/tmp/proxy_phone.sh start\"")
+    print(f"[+] SOCKS5 proxy (auth required) listening on {HOST}:{PORT}")
+    print(f"[*] PC local IP : {local_ip}")
+    print(f"[*] Username    : {USERNAME}")
+    print(f"[*] Password    : {PASSWORD}")
+    print(f"[*] Keep this window open — password changes on restart")
     print()
 
     while True:
