@@ -6,8 +6,8 @@ log-level: silent
 proxies:
   - name: PC-Home
     type: socks5
-    server: g4a6c967.natappfree.cc
-    port: 48912
+    server: d7c6fa4a9b166a29.natapp.cc
+    port: 8870
 
 proxy-groups:
   - name: GLOBAL
