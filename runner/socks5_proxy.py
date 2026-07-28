@@ -10,6 +10,11 @@ PORT     = 1080
 USERNAME = "forge"
 PASSWORD = "Q3DLo_jYvBCAZkJpDCOmdQ"   # set once, stable across restarts
 
+# IP allowlist — only these IPs can connect (leave empty to allow all with auth)
+# After switching to direct port forwarding, add your cloud phone's IP here:
+# e.g. ALLOWED_IPS = {"1.2.3.4"}
+ALLOWED_IPS: set = set()  # empty = no IP restriction (auth still required)
+
 MAX_FAIL     = 5        # failed auth attempts before temp-ban
 BAN_SECONDS  = 300      # 5-minute ban per offending IP
 MAX_CONNS    = 20       # max concurrent connections total
@@ -72,6 +77,11 @@ def handle(conn, addr):
     try:
         if is_banned(ip):
             log(f"[BAN]  {ip} rejected (still banned)")
+            return
+
+        # IP allowlist check
+        if ALLOWED_IPS and ip not in ALLOWED_IPS:
+            log(f"[DROP] {ip} not in allowlist")
             return
 
         data = conn.recv(262)
