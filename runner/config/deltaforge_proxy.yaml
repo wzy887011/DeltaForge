@@ -4,18 +4,18 @@ mode: global
 log-level: silent
 
 proxies:
-  - name: PC-Home
+  - name: KDL-China
     type: socks5
-    server: d7c6fa4a9b166a29.natapp.cc
-    port: 8870
-    username: forge
-    password: Q3DLo_jYvBCAZkJpDCOmdQ
+    server: q360.kdltpspro.com
+    port: 15818
+    username: t18521305213132
+    password: vrs981gj
 
 proxy-groups:
   - name: GLOBAL
     type: select
     proxies:
-      - PC-Home
+      - KDL-China
       - DIRECT
 
 rules:
