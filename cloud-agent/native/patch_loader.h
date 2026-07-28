@@ -1,10 +1,15 @@
 // patch_loader.h — TASK-06: 外置偏移表热更新
 // forge 启动时读取 /data/local/tmp/forge_patches.json，
-// 失败则回退内置静态表 kTersafePatches / kTersafeBssOffsets / kUE4Patches
+// forge 8.7 要求 build-id 与逐条 expected opcode 完整后才启用写入。
 #pragma once
 #include <stdint.h>
 
-typedef struct { uint64_t offset; uint32_t value; } patch_entry_t;
+typedef struct {
+    uint64_t offset;
+    uint32_t value;
+    uint32_t expected;
+    int      has_expected;
+} patch_entry_t;
 
 typedef struct {
     patch_entry_t *tersafe_patches;
@@ -14,6 +19,7 @@ typedef struct {
     patch_entry_t *ue4_patches;
     int            ue4_count;
     char           build_id[128]; /* expected tersafe build-id, "" = skip */
+    char           ue4_build_id[128];
 } patch_table_t;
 
 // 从 JSON 文件加载偏移表，成功返回 1，失败返回 0

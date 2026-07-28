@@ -1,6 +1,6 @@
 # DeltaForge 项目汇总文档
 
-**版本**: v8.8.3  |  **更新**: 2026-07-27  |  **仓库**: github.com:wzy887011/DeltaForge
+**版本**: v8.7  |  **更新**: 2026-07-28  |  **仓库**: github.com:wzy887011/DeltaForge
 
 ---
 
@@ -28,14 +28,14 @@ DeltaForge 是一套针对 **三角洲行动 (com.tencent.tmgp.dfm)** 的云手�
   │
   ├── /data/local/tmp/
   │   ├── forge          (主控守护进程)
-  │   ├── libforgehook.so (LD_PRELOAD 注入库)
+  │   ├── libforgehook.so (进程内 Hook 库)
   │   ├── injector       (ptrace 注入器)
   │   ├── forge_monitor  (行为监控)
   │   └── forge_patches.json (偏移表，forge 启动时加载)
   │
   └── [游戏进程 com.tencent.tmgp.dfm]
-      ├── LD_PRELOAD=libforgehook.so (Hook 层)
-      └── forge ptrace 写入 TerSafe 内存 (Patch 层)
+      ├── forge validated write (Patch 层，唯一写入所有者)
+      └── injector ptrace dlopen libforgehook.so (Hook 层)
 ```
 
 ---
@@ -47,24 +47,24 @@ DeltaForge 是一套针对 **三角洲行动 (com.tencent.tmgp.dfm)** 的云手�
 | 层次 | 检测方 | 检测手段 | 我们的对策 |
 |------|--------|----------|------------|
 | L0 网络层 | 服务端 | 出口 IP ASN（数据中心 vs 移动运营商） | WireGuard / SOCKS5 代理（待配置） |
-| L1 内核层 | TerSafe | 读 `/sys/devices/soc0/serial_number` | mount --bind 假值（LXC 无此路径，跳过） |
-| L2 全局属性 | TerSafe/GTI | `getprop ro.serialno`、IMEI | resetprop 或 build.prop 直改（LXC fallback） |
+| L1 内核层 | TerSafe | `/proc`、Device Tree、`soc0`/KGSL | 已有节点用只读 bind；缺失 `soc0`/KGSL 仍需镜像层补齐 |
+| L2 全局属性 | TerSafe/GTI | `getprop ro.serialno`、IMEI | resetprop；缺失时 fail-closed，由进程 Hook 兜底 |
 | L3 身份文件 | 游戏 SDK | OAID/VAID 文件直读 | do_prepare() 随机替换 |
 | L4 SSAID | TDM/QIMEI | settings_ssaid.xml per-app ID | abx2xml + sed 轮换（当前云机无该文件） |
 | L5 游戏指纹缓存 | TDM/QIMEI | tdm_track.dat、login-identifier.txt 等 | 启动前 rm -rf 14+ 路径 |
-| L6 TerSafe 运行时 | TerSafe | 反调试、反 hook、kKillChain 自杀 | ptrace + /proc/pid/mem 内存 patch（113处）|
-| L7 进程属性 | TerSafe/GTI | __system_property_get、/proc、/sys | LD_PRELOAD libforgehook.so Hook |
-| L8 LXC 容器特征 | GTI | /proc/self/mountinfo 含 lxcfs | 动态过滤行（v8.8.2+） |
+| L6 TerSafe 运行时 | TerSafe | 反调试、反 hook、kKillChain 自杀 | 75 条代码项 + 40 条 BSS 项，Build ID/原值约束 |
+| L7 进程属性 | TerSafe/GTI | __system_property_get、/proc、/sys | validated write 后 ptrace `dlopen` Hook |
+| L8 LXC 容器特征 | GTI | /proc/self/mountinfo 含 lxcfs | 进程内过滤；宿主/namespace 仍是残余面 |
 
 ### 2.2 TerSafe 绕过机制
 
 TerSafe (`libtersafe.so`) 是腾讯自研反作弊 SDK，运行在游戏进程内，主要行为：
 
 1. **版本绑定校验** (`verify_tersafe_version`)：检查 ELF build-id，防止偏移表版本错乱
-2. **代码 patch**：67 处函数开头写 `MOV W0,#0xFF; RET`（`0x2A1F03FF`）或直接 `RET`
-3. **BSS 段清零**：40 个已知偏移 + 动态扫描首 0x10000 字节，值为 1-0xFF 的 DWORD 清零
-4. **kKillChain 禁用**：10 个自杀节点全部 patch 为 `RET`（`0xD65F03C0`）
-5. **UE4 引擎检测**：6 处 UE4 detect 函数 patch 为 `RET`
+2. **代码 patch**：JSON 中 75 项，每项必须匹配 `expected` 或已是目标值
+3. **BSS 段清零**：只处理 JSON 中 40 个显式地址，不做低值启发式扫描
+4. **写入所有权**：只有 `forge.c` 写目标模块；Hook/Injector 无独立偏移表
+5. **UE4**：当前表为 0，旧 6 个 RVA 因 Build ID 不匹配保持隔离
 
 **patch 流程**：
 ```
@@ -72,19 +72,15 @@ forge 启动
   → do_prepare()  [环境伪装]
   → start_game()  [am start 启动游戏]
   → wait_for_pid  [等待游戏进程出现]
-  → ptrace ATTACH
-  → freeze threads
   → verify_tersafe_version
-  → patch tersafe code (67)
-  → patch tersafe BSS (40 + sweep)
-  → patch UE4 detect (6)
-  → inject libforgehook.so via dlopen
-  → ptrace DETACH
+  → preflight code (75) + BSS (40)
+  → validated write (75 + 40, fail-closed)
+  → injector ptrace dlopen libforgehook.so
 ```
 
 ### 2.3 libforgehook.so Hook 机制
 
-通过 `LD_PRELOAD` 注入游戏进程，拦截以下接口：
+默认由 injector 在写入成功后加载；仅显式 `--hijack` 使用旧替换模式。拦截以下接口：
 
 | Hook 函数 | 作用 |
 |-----------|------|
@@ -127,26 +123,16 @@ do_prepare()
  ├── adapt_properties()        setprop 非 ro.* 属性
  ├── spoof_serial_bind()       [L1] mount --bind serial（LXC下跳过）
  ├── resetprop_identity()      [L2] resetprop 全局 IMEI/Serial
- │    └── 若无 resetprop → modify_props_lxc() [L2b] 直改 build.prop
+ │    └── 若无 resetprop → 跳过系统分区写入，由 libforgehook 兜底
  ├── spoof_oaid_vaid()         [L3] 随机写 OAID/VAID 文件
  ├── spoof_ssaid()             [L4] abx2xml 轮换 SSAID（文件不存在则跳过）
  └── settings put android_id  固定 Android ID
 ```
 
-### 2.5 kKillChain 节点列表（当前）
+### 2.5 高频维护子集（当前）
 
-| 节点 | 偏移 | 说明 |
-|------|------|------|
-| [0] | 0x419FDC | 与 TerSafe 自修复值相同，消除 GTI 翻转签名 |
-| [1] | 0x419FE0 | |
-| [2] | 0x2E7810 | |
-| [3] | 0x2F29D0 | |
-| [4] | 0x320D78 | |
-| [5] | 0x3233B8 | |
-| [6] | 0x36BC8C | tombstone_14 新发现 — 检测链入口 |
-| [7] | 0x36BED8 | tombstone_14 中间节点 |
-| [8] | 0x370D98 | tombstone_14 中间节点 |
-| [9] | 0x371210 | tombstone_14 tgkill 自杀点（v8.8.3 修复）|
+`0x419FDC`、`0x419FE0`、`0x2E7810`、`0x2F29D0`、`0x320D78`、
+`0x3233B8`。这些地址从 75 项 JSON 表中查找，所有回写仍执行 expected 校验。
 
 ---
 
@@ -255,30 +241,29 @@ su -c "sh /data/local/tmp/setup_network.sh check"  # 全链路泄漏检测
 |------|------|------|
 | L0 IP/ASN | 未配置 | 出口为数据中心 ASN，登录时服务端可见 |
 | L1 内核 serial | 跳过 | LXC 无 soc0 sysfs 路径 |
-| L2 全局属性 | 部分 | 无 resetprop → build.prop 直改（需remount成功）|
+| L2 全局属性 | 部分 | 有 resetprop 时全局覆盖；否则只保留进程内 Hook |
 | L3 OAID/VAID | ✓ | 每次启动随机替换 |
 | L4 SSAID | 跳过 | 云机无 settings_ssaid.xml（Android ID 已通过 L6 覆盖）|
 | L5 DFM 指纹缓存 | ✓ | 14 项文件/目录清理 |
-| L6 TerSafe patch | ✓ | 113 处 patch（67代码+40 BSS+6 UE4）|
+| L6 TerSafe patch | 待云机复测 | 75 代码 + 40 BSS + 0 UE4；全表预检与 fail-closed |
 | L7 HOOK_PROPS | ✓ | 进程内全覆盖（三星 SM-G9730 画像）|
-| L8 LXC/mountinfo | ✓ | v8.8.2 动态过滤 lxcfs 行 |
-| kKillChain | ✓ 10节点 | 含 tombstone_14 新发现的 4 个节点 |
+| L8 LXC/mountinfo | 部分 | 进程内过滤存在；游戏 namespace/宿主视图待验证 |
+| 高频维护子集 | 6 项 | 来自 75 项 JSON，不是独立写入表 |
 
 ### 4.3 已知问题
 
-1. **游戏闪退（待验证 v8.8.3+kc）**：tombstone_14 显示 TerSafe 在 0x36BC8C 触发 tgkill，kKillChain 已补全，需重新测试
-2. **全局属性未修改**：无 resetprop，libforgehook 只覆盖游戏进程内的属性读取
-3. **forge.log 为空**：forge 未以正确方式启动（`-p2>&1` 无空格的 parse 问题）
-4. **文件清理被禁用**：`clean_all_ac_files` 被游戏标记为 third-party plugin
-5. **L0 IP**：数据中心出口未解决
+1. **宿主事实仍可见**：RK3588S/LXC/SELinux disabled/Root 路径/KGSL 缺失需要镜像层处理。
+2. **namespace 待复测**：Root bind 是否传播到游戏 mount namespace 需云机验证。
+3. **BSS 原值不足**：40 项只有地址约束，尚无逐项 expected 语义。
+4. **直接 syscall**：当前游戏 `Seccomp: 0`，inline SVC 可绕过 libc Hook。
 
 ### 4.4 未来规划（优先级排序）
 
 | 优先级 | 任务 | 预计工作量 |
 |--------|------|-----------|
-| P0 | 重新测试 v8.8.3+kc，确认 kKillChain 修复是否解决闪退 | 立即 |
-| P0 | 确认 build.prop remount 在 LXC 中是否成功（[L2b] 日志） | 立即 |
-| P1 | 部署 resetprop，实现全局属性修改 | deploy_resetprop_pc.bat |
+| P0 | 部署 8.7，验证 75/75、40/40 事务与 Hook 激活 | 立即 |
+| P0 | 确认 resetprop 与 bind overlay 是否传播到游戏 namespace | 立即 |
+| P1 | 验证 standalone resetprop 的全局属性与回滚行为 | 云机复测 |
 | P1 | L0 IP 配置（proxy_pc_setup.bat 或 WireGuard） | 半天 |
 | P2 | tombstone_14 进一步分析（读 tombstone_14 而非 _00）| 1小时 |
 | P2 | 传感器伪造（加速度计/陀螺仪非零）| 较复杂，需 HAL hook |
@@ -296,7 +281,7 @@ DeltaForge-repo/
 ├── cloud-agent/
 │   ├── native/                  核心 C 代码（ARM64 编译目标）
 │   │   ├── forge.c              主控守护进程（1915 行）
-│   │   ├── libforgehook.c       LD_PRELOAD 注入库（2527 行）
+│   │   ├── libforgehook.c       进程内 Hook（默认由 injector 加载）
 │   │   ├── injector.c           ptrace 注入器（625 行）
 │   │   ├── forge_monitor.c      行为监控守护（325 行）
 │   │   ├── touch_injector.c     触控注入辅助（153 行）
@@ -373,9 +358,9 @@ git push origin master
 
 ```bash
 # PC 上修改 runner/config/tersafe_patches.json
-# 添加新的 kKillChain 节点或更新偏移
+# 在当前 Build ID 下更新带 expected 的验证条目
 git add runner/config/tersafe_patches.json
-git commit -m "fix: kKillChain +N — 新检测路径"
+git commit -m "fix: update guarded patch table"
 git push origin master
 
 # 云机上

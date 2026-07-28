@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 法器: DeltaForge/runner/bot_runner.py (v7 — 崩溃恢复 + forge 重打 patch)
+# 法器: DeltaForge/runner/bot_runner.py (v8.7 — 崩溃恢复 + forge 重打 patch)
 # 改进: [v7.0] 崩溃后自动调用 ForgeController.launch() 重新 patch
 #       [v7.0] 区分 tersafe_kill / native_crash / oom_kill / normal_exit
 #       [v7.0] 连续崩溃≥3次采集 tombstone+forge log
@@ -20,7 +20,7 @@ except ImportError:
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "forge_config.json")
 ROUTES_FILE = os.path.join(CONFIG_DIR, "map_routes.json")
-SCREEN_W, SCREEN_H = 1080, 2400
+SCREEN_W, SCREEN_H = 1080, 2280
 
 DEFAULT_CFG = {
     "game_package": "com.tencent.tmgp.dfm",
@@ -28,6 +28,7 @@ DEFAULT_CFG = {
     "rest_min": 15, "rest_max": 45,
     "match_timeout": 600, "raid_timeout": 1200,
     "retry_limit": 3,
+    "screen_width": SCREEN_W, "screen_height": SCREEN_H,
 }
 
 
@@ -99,7 +100,7 @@ class BotRunner:
         self._running = False
         self._touch = TouchInjector()
         self._rng = Randomizer()
-        self._forge_ctrl = None         # 由外部注入，崩溃后调 launch()
+        self._forge_ctrl = ForgeController() if _HAS_CTRL else None
 
     def set_forge_controller(self, ctrl):
         """注入 ForgeController，崩溃后自动重打 patch"""
@@ -108,13 +109,20 @@ class BotRunner:
     def _load_cfg(self):
         c = dict(DEFAULT_CFG)
         if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE) as f:
-                c.update(json.load(f))
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+                c.update(raw.get("bot", {}))
+                game = raw.get("game", {})
+                cloud = raw.get("cloud_phone", {})
+                if game.get("package"): c["game_package"] = game["package"]
+                resolution = cloud.get("resolution", [])
+                if len(resolution) == 2:
+                    c["screen_width"], c["screen_height"] = resolution
         return c
 
     def _load_routes(self):
         if os.path.exists(ROUTES_FILE):
-            with open(ROUTES_FILE) as f:
+            with open(ROUTES_FILE, encoding="utf-8") as f:
                 return json.load(f)
         return {"routes": [{
             "name": "default",
@@ -219,7 +227,8 @@ class BotRunner:
             if not self._running:
                 return False
             px, py = self._rng.jitter((wp["x"], wp["y"]), sigma=0.025)
-            sx, sy = int(px * SCREEN_W), int(py * SCREEN_H)
+            sx = int(px * self.cfg["screen_width"])
+            sy = int(py * self.cfg["screen_height"])
             self._touch.swipe(jx, jy, sx, sy,
                               duration_ms=random.randint(180, 450), curve=True)
             time.sleep(self._rng.gauss(0.5, 0.2))
@@ -267,7 +276,9 @@ class BotRunner:
 
     def run(self):
         self._running = True
-        # [TASK-03] 启动 forge watchdog（需先通过 set_forge_ctrl 注入 ctrl）
+        if self._forge_ctrl is not None and not self._forge_ctrl.connect():
+            self._forge_ctrl = None
+        # [TASK-03] 启动 forge watchdog
         _watchdog = None
         if _HAS_CTRL and self._forge_ctrl is not None:
             _watchdog = WatchdogThread(self._forge_ctrl, interval=10)

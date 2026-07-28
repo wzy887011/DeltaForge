@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/touch_injector.c v5.8
+// 法器: DeltaForge/cloud-agent/native/touch_injector.c v8.7
 // 描述: /dev/uinput 底层触摸注入 — 模拟 "fts_ts" I2C 触摸屏
 //       绕开 InputDispatcher 检测层（adb input 在 InputReader 层可见）
 // 编译: aarch64-linux-android21-clang -static -Os -o touch_injector touch_injector.c
@@ -16,6 +16,7 @@
 #include <sys/time.h>
 #include <math.h>
 #include <time.h>
+#include <errno.h>
 
 static int ufd = -1;
 static int sw = 1080, sh = 2400;
@@ -58,7 +59,9 @@ static void ev_send(int type, int code, int value) {
     struct input_event e = {0};
     gettimeofday(&e.time, NULL);
     e.type = type; e.code = code; e.value = value;
-    write(ufd, &e, sizeof(e));
+    ssize_t n;
+    do { n = write(ufd, &e, sizeof(e)); } while (n < 0 && errno == EINTR);
+    if (n != (ssize_t)sizeof(e)) perror("uinput write");
 }
 
 static void syn(void) { ev_send(EV_SYN, SYN_REPORT, 0); }

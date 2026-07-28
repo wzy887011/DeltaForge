@@ -1,6 +1,7 @@
 # DeltaForge — AI 执行简报 v1.0
 
 > 本文档面向接手此项目的 AI 执行代理。阅读完整后再动手。
+> 当前 8.7 架构、真源和联动关系以 `KNOWLEDGE.md` 为最高优先级；本文后续 TASK 表为历史执行记录。
 
 ---
 
@@ -385,4 +386,4 @@ def send_forge_command_with_retry(cmd: str, timeout: float = 30.0,
 
 ---
 
-*文档版本: v1.0 | 项目: DeltaForge v8.5 | 维护者: 主控 AI*
+*文档版本: v1.0 | 项目: DeltaForge v8.7 | 维护者: 主控 AI*

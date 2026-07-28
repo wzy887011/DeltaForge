@@ -1,0 +1,45 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  source-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Python tests
+        run: python -m unittest discover -s tests -v
+      - name: Native patch loader test
+        run: >-
+          gcc -std=c11 -Wall -Wextra -Werror
+          tests/test_patch_loader.c cloud-agent/native/patch_loader.c
+          -o /tmp/test_patch_loader &&
+          /tmp/test_patch_loader runner/config/tersafe_patches.json
+      - name: ARM64 native syntax
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cd cloud-agent/native
+          for source in forge.c patch_loader.c injector.c forge_monitor.c touch_injector.c; do
+            aarch64-linux-gnu-gcc -std=gnu11 -Os -Wall -Wextra -Werror -fsyntax-only "$source"
+          done
+          aarch64-linux-gnu-gcc -std=gnu11 -Os -Wall -Wextra -Werror -fPIC \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            -fsyntax-only libforgehook.c
+      - name: Shell syntax
+        run: >-
+          bash -n
+          cloud-agent/deploy.sh
+          cloud-agent/system_identity_overlay.sh
+          cloud-agent/verify_identity.sh
+          cloud-agent/magisk/service.sh
+          cloud-agent/magisk/system/bin/propspoof.sh

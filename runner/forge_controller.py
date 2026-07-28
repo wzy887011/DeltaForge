@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# runner/forge_controller.py v7.0
+# runner/forge_controller.py v8.7
 # 改进: [v7.0 P2-2] SipHash-2-4 命令认证，配合 forge.c v7.0 TCP 认证
 # ============================================================
 
@@ -69,10 +69,12 @@ def load_session_key() -> bool:
     return False
 
 
-def build_auth_header(cmd: str) -> str:
+def build_auth_header(body) -> str:
     if not _session_key: return ""
+    if isinstance(body, str):
+        body = body.encode('utf-8', errors='replace')
     nonce = secrets.token_bytes(8)
-    combined = nonce + cmd.encode('utf-8', errors='replace')[:256]
+    combined = nonce + body[:256]
     mac = siphash24(_session_key, combined)
     return f"AUTH:{nonce.hex()}:{mac:016x}\n"
 
@@ -96,10 +98,10 @@ def _expand_resp(d: dict) -> dict:
 def send_forge_command(cmd: str, timeout: float = 30.0) -> dict:
     load_session_key()
     op = _OPCODE.get(cmd)
-    # AUTH header 使用 text 命令（保持 MAC 可验证性）
-    auth = build_auth_header(cmd).encode()
     # 命令体: opcode 优先，fallback text
     body = op + b"\n" if op else (cmd + "\n").encode()
+    # 服务端对换行后的实际 body 做 MAC，opcode/text 两种模式保持一致。
+    auth = build_auth_header(body).encode()
     payload = auth + body
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -258,7 +260,7 @@ class WatchdogThread(threading.Thread):
 
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="DeltaForge Controller v7.0")
+    p = argparse.ArgumentParser(description="DeltaForge Controller v8.7")
     p.add_argument("action", nargs="?", default="full",
                    choices=["full","prepare","launch","patch","stop","status","clean","adapt","restart"])
     p.add_argument("--serial","-s", help="adb device serial")

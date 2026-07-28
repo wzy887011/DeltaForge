@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/forge_monitor.c v5.8
+// 法器: DeltaForge/cloud-agent/native/forge_monitor.c v8.7
 // 描述: 文件行为监控器 — 捕获游戏读了哪些文件/属性，分析运行限制逻辑
 //   1. inotify 监听游戏数据目录
 //   2. /proc/[pid]/fd 枚举已打开文件
@@ -104,11 +104,15 @@ static pid_t find_pid(void) {
     DIR *d = opendir("/proc"); if (!d) return 0;
     struct dirent *e; pid_t r = 0;
     while ((e = readdir(d))) {
-        if (e->d_name[0]<'0'||e->d_name[0]>'9') continue;
-        char p[64]; snprintf(p,sizeof(p),"/proc/%s/cmdline",e->d_name);
+        size_t pid_len = strlen(e->d_name);
+        if (pid_len == 0 || pid_len > 20 || strspn(e->d_name,"0123456789") != pid_len)
+            continue;
+        char p[64];
+        if (snprintf(p,sizeof(p),"/proc/%s/cmdline",e->d_name) >= (int)sizeof(p))
+            continue;
         int fd = open(p,O_RDONLY); if (fd<0) continue;
-        char buf[256]={0}; read(fd,buf,sizeof(buf)-1); close(fd);
-        if (strstr(buf,TARGET_PKG)) { r=(pid_t)atoi(e->d_name); break; }
+        char buf[256]={0}; ssize_t n=read(fd,buf,sizeof(buf)-1); close(fd);
+        if (n>0 && strstr(buf,TARGET_PKG)) { r=(pid_t)atoi(e->d_name); break; }
     }
     closedir(d); return r;
 }
@@ -134,8 +138,12 @@ static void scan_fds(pid_t pid) {
     DIR *d = opendir(dir); if (!d) return;
     struct dirent *e;
     while ((e=readdir(d))) {
-        if (e->d_name[0]=='.') continue;
-        char fp[128],tgt[512]={0}; snprintf(fp,sizeof(fp),"%s/%s",dir,e->d_name);
+        size_t fd_len = strlen(e->d_name);
+        if (fd_len == 0 || fd_len > 20 || strspn(e->d_name,"0123456789") != fd_len)
+            continue;
+        char fp[128],tgt[512]={0};
+        if (snprintf(fp,sizeof(fp),"%s/%s",dir,e->d_name) >= (int)sizeof(fp))
+            continue;
         ssize_t n = readlink(fp,tgt,sizeof(tgt)-1); if (n<=0) continue; tgt[n]='\0';
         if (tgt[0]!='/') continue;
         if (seen(tgt)) continue;
@@ -293,7 +301,7 @@ int main(int argc, char **argv) {
     }
     g_log=fopen(logpath,"a"); if (!g_log){perror("log");return 1;}
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
-    INFO("forge_monitor v5.8 start, log=%s",logpath);
+    INFO("forge_monitor v8.7 start, log=%s",logpath);
 
     int ifd=setup_inotify();
     if (ifd<0) INFO("inotify unavailable — fd-only mode");

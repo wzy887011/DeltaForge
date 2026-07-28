@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# DeltaForge v6.1 — 诊断脚本 (自动判断崩溃阶段)
+# DeltaForge v8.7 — 诊断脚本 (自动判断崩溃阶段)
 # 用法: su -c 'sh /data/local/tmp/check.sh'
 
 PKG="com.tencent.tmgp.dfm"
@@ -7,7 +7,7 @@ TMP="/data/local/tmp"
 APP="/data/data/$PKG"
 
 echo "=========================================="
-echo " DeltaForge v6.1 诊断"
+echo " DeltaForge v8.7 诊断"
 echo " $(date)"
 echo "=========================================="
 

@@ -1,5 +1,5 @@
 // ============================================================
-// 法器: DeltaForge/cloud-agent/native/injector.c v8.5
+// 法器: DeltaForge/cloud-agent/native/injector.c v8.7
 // 描述: ptrace 注入器 — 自动解析 dlopen 所在库，正确计算目标地址
 //   ARM64 W^X 严格 — 栈不可执行, 改用 ptrace+mmap 分配 RWX 内存
 // 编译: clang -Os -Wall injector.c -o injector -ldl
@@ -151,23 +151,11 @@ static int get_all_tids(pid_t pid, pid_t *out, int max) {
     return n;
 }
 
-/* kKillChain — patched while target is ptrace-paused, tersafe threads also paused */
-static const struct { uint64_t off; uint32_t val; } kKillPatches[] = {
-    {0x419fdcu, 0xD65F03C0u}, {0x419fe0u, 0xD65F03C0u},
-    {0x2e7810u, 0xD65F03C0u}, {0x2f29d0u, 0xD65F03C0u},
-    {0x320d78u, 0xD65F03C0u}, {0x3233b8u, 0xD65F03C0u},
-};
-static void patch_kill_chain_while_paused(pid_t pid) {
-    uint64_t ts = find_lib_base(pid, "libtersafe.so");
-    if (!ts) { printf("[*] libtersafe not in maps — skipping pre-patch\n"); return; }
-    char mp[64]; snprintf(mp, sizeof(mp), "/proc/%d/mem", pid);
-    int fd = open(mp, O_RDWR);
-    if (fd < 0) { perror("[!] /proc/pid/mem"); return; }
-    int ok = 0;
-    for (int i = 0; i < 6; i++)
-        if (pwrite(fd, &kKillPatches[i].val, 4, (off_t)(ts + kKillPatches[i].off)) == 4) ok++;
-    close(fd);
-    printf("[+] kKillChain pre-patch: %d/6 (ts=0x%llx, paused)\n", ok, (unsigned long long)ts);
+static void detach_all(pid_t pid, const pid_t *tids, int ntids) {
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    for (int i = 0; i < ntids; i++) {
+        if (tids[i] != pid) ptrace(PTRACE_DETACH, tids[i], NULL, NULL);
+    }
 }
 
 /* ── 在目标进程中搜索 SVC #0 指令 ──
@@ -291,9 +279,9 @@ int main(int argc, char **argv) {
 
     printf("[*] PID=%d SO=%s\n", pid, so);
 
-    /* 检查目标是否已加载该 so（避免重复注入导致问题）
-     * hijack 模式下 libforgehook.so 被重命名为 libtdmqimei.so 放到游戏目录,
-     * 仅按参数 basename 搜会漏掉, 需同时搜 "forgehook" 和 hijack 副本 */
+    /* Check the actual hook name/path only.  A normal process always maps the
+     * original libtdmqimei.so, so treating that name as the hook causes a false
+     * "already loaded" result in the default no-hijack flow. */
     {
         char maps_path[64];
         snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -305,10 +293,7 @@ int main(int argc, char **argv) {
             int already = 0;
             while (fgets(line, sizeof(line), mf)) {
                 if (strstr(line, basename)) { already = 1; break; }
-                /* hijack 模式: libforgehook.so 以 libtdmqimei.so 名字加载,
-                 * 但 /proc/pid/maps 中路径包含 "libtdmqimei" 且不是 _real 副本 */
-                if (strstr(line, "libtdmqimei") && !strstr(line, "libtdmqimei_real")) { already = 1; break; }
-                /* 兜底: 任何路径含 forgehook 即认为已加载 */
+                /* Staged and direct injection paths both retain this marker. */
                 if (strstr(line, "forgehook")) { already = 1; break; }
             }
             fclose(mf);
@@ -326,10 +311,8 @@ int main(int argc, char **argv) {
     int s; waitpid(pid, &s, 0);
     printf("[+] attached (main thread)\n");
 
-    /* [v8.3] Attach ALL other threads to keep tersafe's integrity thread paused during dlopen.
-     * PTRACE_ATTACH only stops one thread; other threads (including tersafe's integrity check)
-     * keep running and will restore kKillChain + send SIGKILL during our dlopen → EINTR.
-     * Fix: attach all threads, run dlopen with only main thread active. */
+    /* Attach all threads so the target cannot mutate validated code entries or
+     * interrupt the remote dlopen while the main thread executes the call stub. */
     pid_t tids[512]; int ntids = get_all_tids(pid, tids, 512);
     int nother = 0;
     for (int i = 0; i < ntids; i++) {
@@ -349,14 +332,11 @@ int main(int argc, char **argv) {
     }
     printf("[+] frozen %d additional threads\n", nother);
 
-    /* Patch kKillChain now that ALL threads are paused */
-    patch_kill_chain_while_paused(pid);
-
     /* 保存寄存器 */
     struct user_pt_regs saved;
     if (ptrace_getregs(pid, &saved) != 0) {
         perror("getregs");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
 
@@ -368,7 +348,7 @@ int main(int argc, char **argv) {
     void *local_dlopen = dlsym(RTLD_DEFAULT, "dlopen");
     if (!local_dlopen) {
         fprintf(stderr, "[-] dlsym(dlopen) 本地失败\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
     printf("[*] 本地 dlopen=0x%llx\n", (unsigned long long)local_dlopen);
@@ -379,7 +359,7 @@ int main(int argc, char **argv) {
                                                   owner_full, sizeof(owner_full));
     if (!local_base || !owner_full[0]) {
         fprintf(stderr, "[-] 无法在 /proc/self/maps 定位 dlopen 所在库\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
     printf("[*] dlopen 在: %s (本地 base=0x%llx)\n",
@@ -392,7 +372,7 @@ int main(int argc, char **argv) {
     uint64_t target_base = find_lib_base(pid, lib_name);
     if (!target_base) {
         fprintf(stderr, "[-] 在 /proc/%d/maps 找不到 %s\n", pid, lib_name);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
     printf("[*] 目标 %s base=0x%llx\n", lib_name, (unsigned long long)target_base);
@@ -412,7 +392,7 @@ int main(int argc, char **argv) {
     uint64_t svc_addr = find_svc_gadget(pid);
     if (!svc_addr) {
         fprintf(stderr, "[-] 在目标进程中找不到 SVC #0 指令\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
     printf("[*] SVC #0 gadget @ 0x%llx\n", (unsigned long long)svc_addr);
@@ -433,7 +413,7 @@ int main(int argc, char **argv) {
                                   0x22, (uint64_t)-1, 0);
         if (rwx_base < 0 || (uint64_t)rwx_base > 0xfffffffffffff000ULL) {
             fprintf(stderr, "[-] mmap 失败 — 无法分配内存\n");
-            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            detach_all(pid, tids, ntids);
             return 1;
         }
         need_mprotect = 1;
@@ -458,7 +438,7 @@ int main(int argc, char **argv) {
 
     if (pv_writev(pid, str_addr, so, slen) != (ssize_t)slen) {
         fprintf(stderr, "[-] 写路径失败\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
 
@@ -485,7 +465,7 @@ int main(int argc, char **argv) {
 
     if (pv_writev(pid, sc_addr, code, clen) != (ssize_t)clen) {
         fprintf(stderr, "[-] shellcode write failed\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        detach_all(pid, tids, ntids);
         return 1;
     }
 
@@ -500,7 +480,7 @@ int main(int argc, char **argv) {
                     (unsigned long long)mpret,
                     (uint64_t)mpret > 0xfffffffffffff000ULL ?
                     strerror((int)-(int64_t)mpret) : "OK");
-            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            detach_all(pid, tids, ntids);
             return 1;
         }
         printf("[+] mprotect→RX OK\n");
@@ -514,8 +494,13 @@ int main(int argc, char **argv) {
         regs.sp = sp_addr;
         regs.regs[30] = 0;
 
-        if (ptrace_setregs(pid, &regs) != 0) { perror("setregs"); return 1; }
-        if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) { perror("cont"); return 1; }
+        if (ptrace_setregs(pid, &regs) != 0) { perror("setregs"); detach_all(pid,tids,ntids); return 1; }
+        if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
+            perror("cont");
+            ptrace_setregs(pid, &saved);
+            detach_all(pid,tids,ntids);
+            return 1;
+        }
     }
 
     /* ── 信号感知等待循环 (v8.4) ──
@@ -607,18 +592,32 @@ int main(int argc, char **argv) {
                 retries, (unsigned long long)handle);
     }
 
+    /* Release the remote call area before resuming the target.  This removes
+     * both RWX and RW->RX fallback mappings from the final process state. */
+    int cleanup_ok = 1;
+    if (done && handle && (int64_t)handle > 0) {
+        int64_t unmap_rc = remote_syscall(pid, svc_addr,
+                                          215, /* __NR_munmap */
+                                          rw_base, 0x2000, 0, 0, 0, 0);
+        if (unmap_rc != 0) {
+            fprintf(stderr, "[-] remote munmap failed: 0x%llx\n",
+                    (unsigned long long)unmap_rc);
+            cleanup_ok = 0;
+        }
+    }
+
     /* 6. 恢复寄存器, detach 所有线程 */
     ptrace_setregs(pid, &saved);
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
-    for (int i = 0; i < ntids; i++) {
-        if (tids[i] == pid) continue;
-        ptrace(PTRACE_DETACH, tids[i], NULL, (void*)0);
-    }
+    detach_all(pid, tids, ntids);
 
     if (!handle || (int64_t)handle < 0) {
         fprintf(stderr, "[-] dlopen 失败 (handle=0x%llx, %s)\n",
                 (unsigned long long)handle,
                 handle ? strerror((int)-(int64_t)handle) : "NULL");
+        return 1;
+    }
+    if (!cleanup_ok) {
+        fprintf(stderr, "[-] injection cleanup failed after dlopen\n");
         return 1;
     }
 

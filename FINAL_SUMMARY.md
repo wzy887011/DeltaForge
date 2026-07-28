@@ -1,8 +1,8 @@
-# DeltaForge v7.1 — 完整项目总结文档
+# DeltaForge v8.7 — 完整项目总结文档
 
 > 文档位置: `DeltaForge/FINAL_SUMMARY.md`
 > 生成时间: 2026-07-25
-> 当前版本: v7.1 (最新 commit: cc92a65)
+> 当前版本: v8.7
 
 ---
 
@@ -18,11 +18,11 @@ DeltaForge 是针对 Android ARM64 云手机的**运行时环境管理工具集*
 ┌────────────────────────── Android 云手机 ─────────────────────────┐
 │                                                                    │
 │  forge.c (守护进程)          libforgehook.so (进程内注入)           │
-│  ├─ 代码 patch (67处)        ├─ libc hook (30+ 函数)               │
+│  ├─ 代码 patch (75处)        ├─ libc hook (30+ 函数)               │
 │  ├─ BSS 清零 (40处)          ├─ 文件系统伪造 (/proc /sys)           │
-│  ├─ UE4 引擎 patch (6处)     ├─ 属性查询伪造 (ro.build.*)          │
+│  ├─ UE4 引擎 patch (0处)     ├─ 属性查询伪造 (ro.build.*)          │
 │  ├─ SipHash TCP 认证         ├─ 网络过滤 (AC 上报域名/IP)           │
-│  ├─ BSS 自动扫描             └─ tgkill/exit_group 拦截              │
+│  ├─ 全表预检/fail-closed      └─ QIMEI chainload/模块范围发现        │
 │  └─ 分层守护轮询                                                    │
 │              ↑                        ↑                            │
 │       ptrace 注入 ──────────────────────┘                          │
@@ -80,7 +80,7 @@ DeltaForge 是针对 Android ARM64 云手机的**运行时环境管理工具集*
 - 防静态特征码匹配
 
 #### P3 — mremap 匿名重映射
-- constructor(50) 对 RW 数据段 mremap → 匿名页
+- constructor(104) 对 RW 数据段 mremap → 匿名页
 - `/proc/self/maps` 中路径变为 `[anon]`
 - RX 代码段保留 MADV_DONTDUMP（避免 SIGBUS）
 - mremap 失败时 fallback DONTDUMP
@@ -135,7 +135,10 @@ cat /sdcard/forge_hook.log | grep "v7.1"   # fallback
 
 ---
 
-## 四、后续提升方案
+## 四、历史提升方案（已由 8.7 硬化计划取代）
+
+> 当前任务、风险和验收标准以 `HARDENING_PLAN_8.7.md` 与 `KNOWLEDGE.md` 为准；
+> 下列条目保留作历史追溯，不代表当前实现状态。
 
 ### 短期（1-2周可实施）
 
@@ -311,4 +314,4 @@ fff5a5a  feat: v7.0 — 全面安全与稳定性升级
 
 > 仓库: https://github.com/wzy887011/DeltaForge
 > 最新 commit: cc92a65
-> 版本: v7.1
+> 当前版本: v8.7

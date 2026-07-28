@@ -1,12 +1,12 @@
 // ============================================================
-// cloud-agent/native/forge.c v6.0
+// cloud-agent/native/forge.c v8.7
 // DeltaForge — 游戏运行环境管理主控
-// 编译: clang -pie -Os -Wall forge.c -o forge
+// 编译: clang -pie -Os -Wall forge.c patch_loader.c -o forge
 // 关键修复 (v6.0):
 //   - safe_verify_and_write: 写入前读原始指令校验
 //   - libtersafe.so 不存在时拒绝写入 (防向 0 偏移写内存)
 //   - BSS 段范围验证 (0xC00000 保守上界)
-//   - WRITE_FAIL_ABORT_THRESHOLD 8: 失败过多则 abort
+//   - WRITE_FAIL_ABORT_THRESHOLD 0: any write failure aborts the transaction
 //   - 渐进退避轮询 (100ms→2000ms)
 //   - inject_hook 失败检查 + signal handlers
 // ============================================================
@@ -16,14 +16,12 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
 #ifndef __NR_pread64
 #define __NR_pread64  67
-#endif
-#ifndef __NR_pwrite64
-#define __NR_pwrite64 68
 #endif
 #include <dirent.h>
 #include <errno.h>
@@ -42,24 +40,20 @@
 #include <sys/un.h>
 #include <sys/mount.h>
 
-/* ============= TASK-06: 动态 patch 表 (启动时从 JSON 加载，失败回退静态) ===== */
+/* ============= TASK-06: validated patch table loaded from JSON ============= */
 #define FORGE_PATCH_JSON "/data/local/tmp/forge_patches.json"
 static patch_table_t g_dyn_table;   /* 动态加载结果 */
 static int           g_dyn_loaded = 0;
 
-/* 宏：透明访问 — 优先动态表，fallback 静态表 */
-#define DYN_TERSAFE_PATCHES (g_dyn_loaded && g_dyn_table.tersafe_count > 0 \
-    ? g_dyn_table.tersafe_patches : kTersafePatches)
-#define DYN_TERSAFE_COUNT   (g_dyn_loaded && g_dyn_table.tersafe_count > 0 \
-    ? (size_t)g_dyn_table.tersafe_count : TERSAFE_PATCH_COUNT)
-#define DYN_BSS_OFFSETS     (g_dyn_loaded && g_dyn_table.bss_count > 0 \
-    ? g_dyn_table.tersafe_bss : kTersafeBssOffsets)
-#define DYN_BSS_COUNT       (g_dyn_loaded && g_dyn_table.bss_count > 0 \
-    ? (size_t)g_dyn_table.bss_count : TERSAFE_BSS_COUNT)
-#define DYN_UE4_PATCHES     (g_dyn_loaded && g_dyn_table.ue4_count > 0 \
-    ? g_dyn_table.ue4_patches : kUE4Patches)
-#define DYN_UE4_COUNT       (g_dyn_loaded && g_dyn_table.ue4_count > 0 \
-    ? (size_t)g_dyn_table.ue4_count : UE4_PATCH_COUNT)
+/* JSON is the only runtime source; no compiled offset fallback. */
+#define EXPECTED_TERSAFE_PATCH_COUNT 75
+#define EXPECTED_TERSAFE_BSS_COUNT   40
+#define DYN_TERSAFE_PATCHES (g_dyn_table.tersafe_patches)
+#define DYN_TERSAFE_COUNT   ((size_t)g_dyn_table.tersafe_count)
+#define DYN_BSS_OFFSETS     (g_dyn_table.tersafe_bss)
+#define DYN_BSS_COUNT       ((size_t)g_dyn_table.bss_count)
+#define DYN_UE4_PATCHES     (g_dyn_table.ue4_patches)
+#define DYN_UE4_COUNT       ((size_t)g_dyn_table.ue4_count)
 
 static void load_dyn_table(void);
 
@@ -76,13 +70,13 @@ static void load_dyn_table(void);
 /* 控制服务器地址 (手机 app 通过 adb forward 连接) */
 #define CTRL_HOST           "127.0.0.1"
 #define CTRL_PORT           9510
-#define FORGE_VERSION       "7.1"
-#define FORGE_VERSION_STR  "DeltaForge forge v7.1"
+#define FORGE_VERSION       "8.7"
+#define FORGE_VERSION_STR  "DeltaForge forge v8.7"
 #define FORGE_LOG           "/data/local/tmp/forge.log"
 #define DETECT_LOG          "/data/local/tmp/detect_now.log"
 
 /* 安全阈值 */
-#define WRITE_FAIL_ABORT_THRESHOLD 8   /* 超过此数量 patch 失败则 abort */
+#define WRITE_FAIL_ABORT_THRESHOLD 0   /* fail closed on any guarded write error */
 #define BACKOFF_BASE_MS    100
 #define BACKOFF_MAX_MS     2000
 
@@ -114,7 +108,8 @@ static void start_logcat(void) {
     if (p == 0) {
         int out = open(DETECT_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (out >= 0) { dup2(out, 1); dup2(out, 2); close(out); }
-        int pfd[2]; pipe(pfd);
+        int pfd[2];
+        if (pipe(pfd) != 0) _exit(1);
         pid_t lc = fork();
         if (lc == 0) {
             close(pfd[0]); dup2(pfd[1], 1); close(pfd[1]);
@@ -156,15 +151,84 @@ static FILE *g_logfile = NULL;
 /* 后段函数实现 — 依赖上方的日志宏和静态表，放在此处避免前向引用 OK/WARN/ERR     */
 /* ========================================================================== */
 
-/* TASK-06: 启动时从 JSON 加载偏移表，失败回退内置静态表 */
+static int valid_build_id(const char *value) {
+    if (!value || strlen(value) != 40) return 0;
+    for (size_t i = 0; i < 40; i++) {
+        if (!isxdigit((unsigned char)value[i])) return 0;
+    }
+    return 1;
+}
+
+static int validate_code_entries(const char *name, const patch_entry_t *entries,
+                                 int count, uint64_t max_offset) {
+    for (int i = 0; i < count; i++) {
+        if (!entries[i].has_expected || entries[i].offset == 0
+            || (entries[i].offset & 3U) != 0 || entries[i].offset > max_offset) {
+            ERR("[patch_loader] %s[%d] invalid guard/alignment/range", name, i);
+            return 0;
+        }
+        for (int j = 0; j < i; j++) {
+            if (entries[i].offset == entries[j].offset) {
+                ERR("[patch_loader] %s duplicate offset 0x%llx", name,
+                    (unsigned long long)entries[i].offset);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int validate_bss_entries(const uint64_t *entries, int count) {
+    for (int i = 0; i < count; i++) {
+        if (entries[i] == 0 || (entries[i] & 3U) != 0 || entries[i] > 0xC00000) {
+            ERR("[patch_loader] bss[%d] invalid alignment/range", i);
+            return 0;
+        }
+        for (int j = 0; j < i; j++) {
+            if (entries[i] == entries[j]) {
+                ERR("[patch_loader] duplicate bss offset 0x%llx",
+                    (unsigned long long)entries[i]);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* TASK-06: load a guarded JSON table; any failure disables memory writes. */
 static void load_dyn_table(void) {
+    patch_loader_free(&g_dyn_table);
+    g_dyn_loaded = 0;
     if (patch_loader_load(FORGE_PATCH_JSON, &g_dyn_table)) {
+        int guarded = valid_build_id(g_dyn_table.build_id)
+            && g_dyn_table.tersafe_count == EXPECTED_TERSAFE_PATCH_COUNT
+            && g_dyn_table.bss_count == EXPECTED_TERSAFE_BSS_COUNT;
+        if (!guarded) {
+            ERR("[patch_loader] unexpected table shape: tersafe=%d/%d bss=%d/%d build_id=%s",
+                g_dyn_table.tersafe_count, EXPECTED_TERSAFE_PATCH_COUNT,
+                g_dyn_table.bss_count, EXPECTED_TERSAFE_BSS_COUNT,
+                valid_build_id(g_dyn_table.build_id) ? "valid" : "invalid");
+        }
+        guarded = guarded && validate_code_entries("tersafe",
+            g_dyn_table.tersafe_patches, g_dyn_table.tersafe_count, 0xC00000);
+        guarded = guarded && validate_bss_entries(
+            g_dyn_table.tersafe_bss, g_dyn_table.bss_count);
+        if (g_dyn_table.ue4_count > 0) {
+            guarded = guarded && valid_build_id(g_dyn_table.ue4_build_id)
+                && validate_code_entries("ue4", g_dyn_table.ue4_patches,
+                    g_dyn_table.ue4_count, 0x40000000);
+        }
+        if (!guarded) {
+            ERR("[patch_loader] rejected unguarded patch table");
+            patch_loader_free(&g_dyn_table);
+            return;
+        }
         g_dyn_loaded = 1;
         OK("[patch_loader] JSON 加载成功: tersafe=%d bss=%d ue4=%d build_id=%s",
            g_dyn_table.tersafe_count, g_dyn_table.bss_count, g_dyn_table.ue4_count,
            g_dyn_table.build_id[0] ? g_dyn_table.build_id : "(empty)");
     } else {
-        WARN("[patch_loader] 未找到 %s 或解析失败，使用内置静态偏移表", FORGE_PATCH_JSON);
+        ERR("[patch_loader] 未找到 %s 或解析失败，内存 patch 将保持禁用", FORGE_PATCH_JSON);
     }
 }
 
@@ -249,28 +313,32 @@ static int get_so_disk_path(pid_t pid, const char *soname,
     fclose(f); return found;
 }
 
-static int verify_tersafe_version(pid_t pid) {
-    const char *expected = g_dyn_loaded && g_dyn_table.build_id[0]
-        ? g_dyn_table.build_id : EXPECTED_TERSAFE_BUILD_ID;
-    if (expected[0]=='\0') return 1;
+static int verify_module_version(pid_t pid, const char *soname,
+                                 const char *expected) {
+    if (!valid_build_id(expected)) return 0;
     char so_path[512]={0};
-    if (!get_so_disk_path(pid,"libtersafe.so",so_path,sizeof(so_path))) {
-        WARN("[version] 无法定位 libtersafe.so 磁盘路径，跳过校验继续执行");
-        return 1;
+    if (!get_so_disk_path(pid,soname,so_path,sizeof(so_path))) {
+        ERR("[version] cannot locate %s disk path", soname);
+        return 0;
     }
     char build_id[128]={0};
     if (elf_get_build_id(so_path,build_id,sizeof(build_id))==0) {
-        WARN("[version] 无法读取 ELF build-id: %s，跳过校验继续执行",so_path);
-        return 1;
-    }
-    OK("[version] libtersafe build-id: %s (expect: %s)", build_id, expected);
-    if (strcmp(build_id,expected)!=0) {
-        ERR("[version] build-id 不匹配! 游戏已更新 — 跳过内存 patch");
-        ERR("[version] 请更新偏移表 JSON 或重新逆向新版 libtersafe.so");
+        ERR("[version] cannot read ELF build-id: %s", so_path);
         return 0;
     }
-    OK("[version] build-id 验证通过");
+    OK("[version] %s build-id: %s (expect: %s)", soname, build_id, expected);
+    if (strcmp(build_id,expected)!=0) {
+        ERR("[version] %s build-id mismatch; patch table rejected", soname);
+        return 0;
+    }
+    OK("[version] %s build-id verified", soname);
     return 1;
+}
+
+static int verify_tersafe_version(pid_t pid) {
+    const char *expected = g_dyn_loaded && g_dyn_table.build_id[0]
+        ? g_dyn_table.build_id : EXPECTED_TERSAFE_BUILD_ID;
+    return verify_module_version(pid, "libtersafe.so", expected);
 }
 
 /* ============= 内存调整条目 ============= */
@@ -283,6 +351,8 @@ static int verify_tersafe_version(pid_t pid) {
  * 0x1400000X = B #offset → 无条件跳转
  * 0x38400XXX = LDRB Wx, [Xsp, #N] → 改为读取栈偏移(值趋于0), 原指令读取文件/proc节点
  */
+/* Historical tables are retained only as review notes. They are never compiled. */
+#if 0
 static const patch_entry_t kTersafePatches[] = {
     {0x5137C0, 0x2A1F03FF}, {0x516640, 0x2A1F03FF}, {0x526ED0, 0x2A1F03FF},
     {0x4CDB04, 0x14000009}, {0x4CDB34, 0x14000008}, {0x50E380, 0xD61F03C0},
@@ -329,14 +399,13 @@ static const uint64_t kTersafeBssOffsets[] = {
 };
 #define TERSAFE_BSS_COUNT (sizeof(kTersafeBssOffsets)/sizeof(kTersafeBssOffsets[0]))
 
-/* --- libUE4.so 引擎内置检测调整，6 处 ---
- * 全部使用 0xD65F03C0 (RET) 安全返回，不触发 SIGILL
- */static const patch_entry_t kUE4Patches[] = {
-    {0x1347F7F0, 0xD65F03C0}, {0x1347F7F4, 0xD65F03C0},
-    {0x13537034, 0xD65F03C0}, {0x13537038, 0xD65F03C0},
-    {0x13567E38, 0xD65F03C0}, {0x13567E3C, 0xD65F03C0},
-};
-#define UE4_PATCH_COUNT (sizeof(kUE4Patches)/sizeof(kUE4Patches[0]))
+/* Collector-r2 proved the former six UE4 RVAs do not match Build ID
+ * 8187ddb9edbc9d5201201ffd7b008df3bfe533db. Keep the fallback table empty
+ * until the current binary is re-analysed; writing stale RVAs is worse than
+ * skipping this optional layer. */
+static const patch_entry_t kUE4Patches[] = {{0, 0, 0, 0}};
+#define UE4_PATCH_COUNT 0
+#endif
 
 /* ============= Telemetry directories for cleanup ============= */
 static const char *kPurgeDirs[] = {
@@ -376,24 +445,39 @@ static const prop_adapt_t kAdaptProps[] = {
     {"qemu.hw.mainkeys", NULL},
     {"qemu.sf.lcd_density", NULL},
     /* --- Platform markers: clear --- */
-    {"ro.hardware.gralloc", NULL},
-    {"ro.hardware.egl", NULL},
+    {"ro.hardware.gralloc", "adreno"},
+    {"ro.hardware.egl", "adreno"},
     {"ro.product.base_version", NULL},
-    {"ro.product.odm.brand", NULL},
-    {"ro.product.odm.device", NULL},
-    {"ro.product.odm.manufacturer", NULL},
-    {"ro.product.odm.model", NULL},
-    {"ro.product.odm.name", NULL},
+    {"ro.product.odm.brand", "samsung"},
+    {"ro.product.odm.device", "beyond1q"},
+    {"ro.product.odm.manufacturer", "samsung"},
+    {"ro.product.odm.model", "SM-G9730"},
+    {"ro.product.odm.name", "beyond1qltezc"},
     {"ro.product.odm_dlkm.brand", NULL},
     {"ro.product.odm_dlkm.device", NULL},
     {"ro.product.odm_dlkm.manufacturer", NULL},
     {"ro.product.odm_dlkm.model", NULL},
     {"ro.product.odm_dlkm.name", NULL},
-    {"ro.product.product.brand", NULL},
-    {"ro.product.product.device", NULL},
-    {"ro.product.product.manufacturer", NULL},
-    {"ro.product.product.model", NULL},
-    {"ro.product.product.name", NULL},
+    {"ro.product.product.brand", "samsung"},
+    {"ro.product.product.device", "beyond1q"},
+    {"ro.product.product.manufacturer", "samsung"},
+    {"ro.product.product.model", "SM-G9730"},
+    {"ro.product.product.name", "beyond1qltezc"},
+    {"ro.product.system.brand", "samsung"},
+    {"ro.product.system.device", "beyond1q"},
+    {"ro.product.system.manufacturer", "samsung"},
+    {"ro.product.system.model", "SM-G9730"},
+    {"ro.product.system.name", "beyond1qltezc"},
+    {"ro.product.system_ext.brand", "samsung"},
+    {"ro.product.system_ext.device", "beyond1q"},
+    {"ro.product.system_ext.manufacturer", "samsung"},
+    {"ro.product.system_ext.model", "SM-G9730"},
+    {"ro.product.system_ext.name", "beyond1qltezc"},
+    {"ro.product.vendor.brand", "samsung"},
+    {"ro.product.vendor.device", "beyond1q"},
+    {"ro.product.vendor.manufacturer", "samsung"},
+    {"ro.product.vendor.model", "SM-G9730"},
+    {"ro.product.vendor.name", "beyond1qltezc"},
     {"ro.product.ota.host", NULL},
     {"ro.build.characteristics", NULL},
     /* --- Reference device profile (SM-G9730 beyond1q) --- */
@@ -406,6 +490,10 @@ static const prop_adapt_t kAdaptProps[] = {
     {"ro.hardware", "qcom"},
     {"ro.board.platform", "msmnile"},
     {"ro.product.board", "msmnile"},
+    {"ro.soc.manufacturer", "QUALCOMM"},
+    {"ro.soc.model", "SM8150"},
+    {"ro.opengles.version", "196610"},
+    {"ro.sf.lcd_density", "420"},
     {"ro.build.fingerprint", "samsung/beyond1qltezc/beyond1q:11/RP1A.200720.012/G9730ZCS6FULZ:user/release-keys"},
     {"ro.build.version.sdk", "30"},
     {"ro.build.version.release", "11"},
@@ -434,8 +522,6 @@ static const prop_adapt_t kAdaptProps[] = {
 static int  g_mem_fd = -1;
 static pid_t g_mem_pid = 0;
 static int  g_mem_mode = -1;
-
-static void close_mem(int fd);
 
 static int open_mem(pid_t pid, int mode) {
     if (g_mem_fd >= 0 && g_mem_pid == pid && g_mem_mode == mode)
@@ -480,12 +566,61 @@ static int safe_write32(pid_t pid, uint64_t addr, uint32_t val, int max_retries)
 }
 
 /* 写时校验: patch 前先读原始指令，避免写到错误偏移 */
-static int safe_verify_and_write(pid_t pid, uint64_t addr, uint32_t patch_val) {
+static int safe_verify_and_write(pid_t pid, uint64_t addr, const patch_entry_t *patch) {
     JUNK_INSN();
+    if (!patch) return -1;
     uint32_t before = 0;
     if (mem_read32(pid, addr, &before) != 0) return -1;
-    if (before == patch_val) return 0;  /* 已在目标值，跳过 */
-    return safe_write32(pid, addr, patch_val, 3);
+    if (before == patch->value) return 0;  /* 已在目标值，跳过 */
+    if (patch->has_expected && before != patch->expected) {
+        WARN("[verify] 0x%llx original=0x%08x expected=0x%08x, skip",
+             (unsigned long long)addr, before, patch->expected);
+        return -1;
+    }
+    return safe_write32(pid, addr, patch->value, 3);
+}
+
+static const patch_entry_t *find_validated_patch(uint64_t offset) {
+    if (!g_dyn_loaded) return NULL;
+    for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
+        if (DYN_TERSAFE_PATCHES[i].offset == offset)
+            return &DYN_TERSAFE_PATCHES[i];
+    }
+    return NULL;
+}
+
+static int preflight_code_table(pid_t pid, uint64_t base,
+                                const patch_entry_t *entries, size_t count,
+                                const char *name) {
+    for (size_t i = 0; i < count; i++) {
+        uint32_t current = 0;
+        if (!entries[i].has_expected
+            || mem_read32(pid, base + entries[i].offset, &current) != 0
+            || (current != entries[i].expected && current != entries[i].value)) {
+            ERR("[preflight] %s[%zu] rejected off=0x%llx current=0x%08x expected=0x%08x patch=0x%08x",
+                name, i, (unsigned long long)entries[i].offset, current,
+                entries[i].expected, entries[i].value);
+            return 0;
+        }
+    }
+    OK("[preflight] %s table accepted: %zu/%zu", name, count, count);
+    return 1;
+}
+
+static int preflight_bss_table(pid_t pid, uint64_t bss_base,
+                               uint64_t module_limit) {
+    for (size_t i = 0; i < DYN_BSS_COUNT; i++) {
+        uint64_t addr = bss_base + DYN_BSS_OFFSETS[i];
+        uint32_t current = 0;
+        if (DYN_BSS_OFFSETS[i] > 0xC00000 || addr >= module_limit
+            || mem_read32(pid, addr, &current) != 0) {
+            ERR("[preflight] bss[%zu] unreadable/out-of-range off=0x%llx",
+                i, (unsigned long long)DYN_BSS_OFFSETS[i]);
+            return 0;
+        }
+    }
+    OK("[preflight] bss table readable: %zu/%zu", DYN_BSS_COUNT, DYN_BSS_COUNT);
+    return 1;
 }
 
 /* ============= /proc/[pid]/maps 解析 ============= */
@@ -545,15 +680,18 @@ static pid_t get_pid_by_name(const char *name) {
     struct dirent *ent;
     pid_t r = 0;
     while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
-        char p[256];
-        snprintf(p, sizeof(p), "/proc/%s/cmdline", ent->d_name);
+        size_t pid_len = strlen(ent->d_name);
+        if (pid_len == 0 || pid_len > 20 || strspn(ent->d_name, "0123456789") != pid_len)
+            continue;
+        char p[64];
+        if (snprintf(p, sizeof(p), "/proc/%s/cmdline", ent->d_name) >= (int)sizeof(p))
+            continue;
         int fd = open(p, O_RDONLY);
         if (fd < 0) continue;
         char buf[256] = {0};
-        read(fd, buf, sizeof(buf)-1);
+        ssize_t n = read(fd, buf, sizeof(buf)-1);
         close(fd);
-        if (strstr(buf, name)) { r = (pid_t)atoi(ent->d_name); break; }
+        if (n > 0 && strstr(buf, name)) { r = (pid_t)atoi(ent->d_name); break; }
     }
     closedir(d);
     return r;
@@ -605,6 +743,24 @@ static int run_cmd(const char *argv[]) {
     int st;
     waitpid(p, &st, 0);
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+static int run_shell_best_effort(const char *cmd) {
+    int rc = system(cmd);
+    if (rc != 0) WARN("shell command failed rc=%d: %.120s", rc, cmd);
+    return rc;
+}
+
+static int write_all_fd(int fd, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        p += (size_t)n;
+        len -= (size_t)n;
+    }
+    return 0;
 }
 
 /* ============= 系统属性适配 ============= */
@@ -740,10 +896,10 @@ static void disguise_self(void) {
 
 /* ============= 保护 ADB / 开发者模式 ============= */
 static void protect_devmode(void) {
-    system("settings put global adb_enabled 1 2>/dev/null");
-    system("settings put global development_settings_enabled 1 2>/dev/null");
-    system("setprop persist.sys.usb.config adb 2>/dev/null");
-    system("setprop persist.sys.vold_app_data_isolation_enabled 0 2>/dev/null");
+    run_shell_best_effort("settings put global adb_enabled 1 2>/dev/null");
+    run_shell_best_effort("settings put global development_settings_enabled 1 2>/dev/null");
+    run_shell_best_effort("setprop persist.sys.usb.config adb 2>/dev/null");
+    run_shell_best_effort("setprop persist.sys.vold_app_data_isolation_enabled 0 2>/dev/null");
 }
 
 /* ============= iptables 清理 =============
@@ -767,7 +923,7 @@ static void block_tdm_reporting(void) {
             "iptables -D OUTPUT -m owner --uid-owner %s -p udp --dport 53 -j ACCEPT 2>/dev/null; "
             "iptables -D OUTPUT -m owner --uid-owner %s -p tcp --dport 443 -j ACCEPT 2>/dev/null",
             uid_buf, uid_buf, uid_buf);
-        system(cmd);
+        run_shell_best_effort(cmd);
     }
     /* string 匹配规则清理 */
     static const char *OLD_STRINGS[] = {
@@ -779,60 +935,20 @@ static void block_tdm_reporting(void) {
         snprintf(cmd, sizeof(cmd),
             "iptables -D OUTPUT -m string --algo bm --string '%s' -j DROP 2>/dev/null",
             *s);
-        system(cmd);
+        run_shell_best_effort(cmd);
     }
     OK("iptables 旧规则已清理，游戏网络不受影响 (uid=%s)", uid_buf[0] ? uid_buf : "N/A");
 }
 
-/* ============= /proc/self/maps 注入行隐藏 =============
- * 在游戏进程启动后，写 /proc/self/mem 将 maps 中 libforgehook.so 行覆盖为空
- * 注意: 此操作由 libforgehook.so 的 .init 构造函数自动执行，
- * 但也可以通过 forge.c 的 ptrace 方式从外部注入隐藏。
- *
- * 当前采用两重防护:
- *   1. libforgehook.so init: madvise(MADV_DONTDUMP) 标记自己的映射区域
- *   2. forge.c 外部: 写 /proc/PID/mem 中 maps 行内容为零字节
- */
+/* Mapping normalization is process-local.  The external controller must not
+ * attempt to edit kernel-generated maps text or mapped ELF headers. */
 static void hide_injection_from_maps(pid_t pid) {
-    if (pid <= 0) return;
-
-    char map_path[64];
-    snprintf(map_path, sizeof(map_path), "/proc/%d/maps", pid);
-    FILE *maps = fopen(map_path, "r");
-    if (!maps) return;
-
-    char line[2048];
-    int fd_mem = open_mem(pid, O_RDWR);
-    if (fd_mem < 0) { fclose(maps); return; }
-
-    while (fgets(line, sizeof(line), maps)) {
-        if (strstr(line, C_forgehook) || strstr(line, "libforge")) {
-            /* 解析起始地址 */
-            uint64_t addr = strtoull(line, NULL, 16);
-            uint64_t end = 0;
-            char *dash = strchr(line, '-');
-            if (dash) end = strtoull(dash + 1, NULL, 16);
-
-            size_t len = end - addr;
-            if (len > 0 && len < 1024 * 1024) {
-                /* 用零覆盖映射区域中 so 的标识特征 */
-                /* 只覆盖 ELF header magic + section name table */
-                char zero[16] = {0};
-                lseek(fd_mem, addr, SEEK_SET);
-                write(fd_mem, zero, sizeof(zero) > len ? len : sizeof(zero));
-                WARN("已隐藏 maps 注入行: 0x%llx-0x%llx", (unsigned long long)addr, (unsigned long long)end);
-            }
-        }
-    }
-    fclose(maps);
-    close_mem(fd_mem);
-}
-
-static void close_mem(int fd) {
-    if (fd >= 0) {
-        close(fd);
-        if (g_mem_fd == fd) g_mem_fd = -1;
-    }
+    (void)pid;
+    /* /proc/PID/maps is kernel-generated text, not writable process memory.
+     * The old implementation corrupted the first 16 bytes of the mapped ELF.
+     * Mapping normalization now lives in libforgehook constructor(104), with
+     * filtered maps/smaps reads as the second layer. */
+    OK("maps concealment delegated to in-process mapping normalization");
 }
 
 /* ============= 杀死可疑检测进程 ============= */
@@ -865,9 +981,9 @@ static void kill_suspicious_procs(void) {
 static void stop_game(void) {
     char buf[256];
     snprintf(buf, sizeof(buf), "am force-stop %s 2>/dev/null", TARGET_PKG);
-    system(buf);
+    run_shell_best_effort(buf);
     snprintf(buf, sizeof(buf), "killall -9 %s 2>/dev/null", TARGET_PKG);
-    system(buf);
+    run_shell_best_effort(buf);
 }
 
 static void start_game(void) {
@@ -880,7 +996,7 @@ static void start_game(void) {
     snprintf(buf, sizeof(buf),
         "am start -n %s/com.epicgames.ue4.SplashActivity 2>/dev/null",
         TARGET_PKG);
-    system(buf);
+    run_shell_best_effort(buf);
     OK("游戏已启动，等待进程出现后注入...");
 }
 
@@ -917,10 +1033,10 @@ static void stage_hook_so(pid_t pid, char *out_path, size_t out_sz) {
     fclose(f);
     if (!dst[0]) return;
 
-    char cmd[1600];
+    char cmd[4096];
     snprintf(cmd, sizeof(cmd),
         "cp /data/local/tmp/libforgehook.so '%s' && chmod 755 '%s' && "
-        "restorecon '%s' 2>/dev/null; true",
+        "(restorecon '%s' 2>/dev/null || true)",
         dst, dst, dst);
     if (system(cmd) == 0) {
         strncpy(out_path, dst, out_sz - 1);
@@ -983,22 +1099,25 @@ static int patch_game_process(void) {
     if (!pid) { WARN("未找到游戏进程"); return -1; }
     OK("游戏 PID: %d", pid);
 
+    if (!g_dyn_loaded) {
+        ERR("validated patch table not loaded: %s", FORGE_PATCH_JSON);
+        return -2;
+    }
+
     int total_ok = 0, total_fail = 0;
     int tersafe_ok = 0, tersafe_fail = 0;
     int bss_ok = 0, bss_fail = 0;
-    int ue4_ok = 0;
+    int ue4_ok = 0, ue4_fail = 0;
 
-    /* 0. [TASK-01] ELF build-id 版本校验 — 防止写入已更新版本的错误偏移 */
-    if (verify_tersafe_version(pid) == 0) {
-        WARN("版本校验失败，跳过所有内存 patch（游戏可运行，但无反作弊覆盖）");
-        return -2;  /* 区别于 -1 错误，-2 = 版本不符 */
-    }
-
-    /* 1. libtersafe.so — 带退避等待加载 */
+    /* 0. 等待模块后再做 fail-closed Build ID 校验。 */
     uint64_t ts_base = wait_for_module(pid, C_tersafe, 30000);
     if (ts_base == 0) {
         ERR("libtersafe.so 未加载 — ABORT，拒绝在不存在模块上写内存");
         return -1;
+    }
+    if (verify_tersafe_version(pid) == 0) {
+        WARN("版本校验失败，跳过所有内存 patch");
+        return -2;
     }
 
     /* 验证基址有效性: 读已知偏移确认可读 */
@@ -1013,21 +1132,29 @@ static int patch_game_process(void) {
     }
     OK("libtersafe.so base=0x%lx", (unsigned long)ts_base);
 
-    /* 2. tersafe 代码补丁 61 处 (verify-before-patch) */
+    uint64_t bss_base = get_module_base(pid, "libtersafe.so:bss");
+    uint64_t bss_limit = ts_base + 0xC00000;
+    if (!preflight_code_table(pid, ts_base, DYN_TERSAFE_PATCHES,
+            DYN_TERSAFE_COUNT, "tersafe")
+        || bss_base == 0
+        || !preflight_bss_table(pid, bss_base, bss_limit)) {
+        ERR("patch transaction preflight failed; no target writes performed");
+        return -2;
+    }
+
+    /* 2. tersafe 代码补丁 75 处 (verify-before-patch) */
     for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
         uint64_t addr = ts_base + DYN_TERSAFE_PATCHES[i].offset;
-        if (safe_verify_and_write(pid, addr, DYN_TERSAFE_PATCHES[i].value) == 0) tersafe_ok++;
+        if (safe_verify_and_write(pid, addr, &DYN_TERSAFE_PATCHES[i]) == 0) tersafe_ok++;
         else tersafe_fail++;
     }
     OK("tersafe code: %d ok / %d fail", tersafe_ok, tersafe_fail);
     total_ok += tersafe_ok; total_fail += tersafe_fail;
 
     /* 3. tersafe BSS 段清零 */
-    uint64_t bss_base = get_module_base(pid, "libtersafe.so:bss");
     if (bss_base > 0) {
-        uint64_t bss_limit = ts_base + 0xC00000;
-
-        /* 3a. 精确偏移清零 (硬编码，当前版本有效) */
+        /* 3a. Only clear the explicit JSON offsets.  There is intentionally no
+         * low-value sweep: guessing counters can corrupt unrelated state. */
         for (size_t i = 0; i < DYN_BSS_COUNT; i++) {
             uint64_t addr = bss_base + DYN_BSS_OFFSETS[i];
             if (DYN_BSS_OFFSETS[i] > 0xC00000 || addr >= bss_limit) {
@@ -1037,52 +1164,33 @@ static int patch_game_process(void) {
             else bss_fail++;
         }
 
-        /* 3b. [v8.3] 动态补扫: 扫描 BSS 段首 0x10000 字节
-         * 值为 1~0xFF 的 dword 视为检测计数器，清零
-         * 兜底硬编码偏移表版本失效后的遗漏偏移 */
-        {
-            char mempath[32];
-            snprintf(mempath, sizeof(mempath), "/proc/%d/mem", pid);
-            int fd_mem = open(mempath, O_RDWR);
-            if (fd_mem >= 0) {
-                int sweep_ok = 0;
-                for (uint64_t off = 0; off < 0x10000; off += 4) {
-                    uint64_t addr = bss_base + off;
-                    if (addr >= bss_limit) break;
-                    uint32_t val = 0;
-                    /* 用 syscall 保持与其余内存访问一致，避免 pread off_t 截断 */
-                    if (syscall(__NR_pread64, fd_mem, &val, 4,
-                                (uint64_t)addr) != 4) continue;
-                    if (val >= 1u && val <= 0xFFu) {
-                        uint32_t zero = 0;
-                        if (syscall(__NR_pwrite64, fd_mem, &zero, 4,
-                                    (uint64_t)addr) == 4) sweep_ok++;
-                    }
-                }
-                close(fd_mem);
-                if (sweep_ok > 0)
-                    OK("bss sweep zeroed %d suspicious counters", sweep_ok);
-            }
-        }
-
         OK("tersafe bss: %d ok / %d fail", bss_ok, bss_fail);
         total_ok += bss_ok; total_fail += bss_fail;
     } else {
         WARN("tersafe BSS 段未找到 (跳过)");
     }
 
-    /* 4. libUE4.so 引擎检测 6 处 */
-    uint64_t ue4_base = wait_for_module(pid, C_ue4, 20000);
-    if (ue4_base) {
+    /* 4. UE4 table is optional and currently quarantined for this Build ID. */
+    uint64_t ue4_base = DYN_UE4_COUNT ? wait_for_module(pid, C_ue4, 20000) : 0;
+    if (ue4_base && DYN_UE4_COUNT
+        && verify_module_version(pid, "libUE4.so", g_dyn_table.ue4_build_id)) {
+        if (!preflight_code_table(pid, ue4_base, DYN_UE4_PATCHES,
+                DYN_UE4_COUNT, "ue4")) {
+            ERR("UE4 transaction preflight failed");
+            return -2;
+        }
         usleep(500000);
         for (size_t i = 0; i < DYN_UE4_COUNT; i++) {
             uint64_t addr = ue4_base + DYN_UE4_PATCHES[i].offset;
-            if (safe_verify_and_write(pid, addr, DYN_UE4_PATCHES[i].value) == 0) ue4_ok++;
+            if (safe_verify_and_write(pid, addr, &DYN_UE4_PATCHES[i]) == 0) ue4_ok++;
+            else ue4_fail++;
         }
-        OK("UE4: %d ok", ue4_ok);
-        total_ok += ue4_ok;
+        OK("UE4: %d ok / %d fail", ue4_ok, ue4_fail);
+        total_ok += ue4_ok; total_fail += ue4_fail;
+    } else if (DYN_UE4_COUNT) {
+        WARN("libUE4.so missing or Build ID rejected (skip engine table)");
     } else {
-        WARN("libUE4.so 未加载 (跳过引擎补丁)");
+        WARN("UE4 patch table quarantined for Build ID 8187ddb9edbc9d5201201ffd7b008df3bfe533db");
     }
 
     OK("内存调整完成: %d ok / %d fail", total_ok, total_fail);
@@ -1095,22 +1203,19 @@ static int patch_game_process(void) {
     /* 立即验证 检测链 — tersafe 可能在补丁后几十毫秒内恢复 */
     if (ts_base) {
         usleep(50000); /* 等 50ms 让 tersafe 的恢复线程跑完 */
-        static const struct { uint64_t off; uint32_t exp; } kChk[] = {
-            {0x419FDC, 0xD65F03C0}, {0x419FE0, 0xD65F03C0},
-            {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
-            {0x320D78, 0xD65F03C0}, {0x3233B8, 0xD65F03C0},
-        };
         int reverted = 0;
-        for (int ci = 0; ci < 6; ci++) {
+        for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
             uint32_t cur = 0;
-            if (mem_read32(pid, ts_base + kChk[ci].off, &cur) == 0
-                && cur != kChk[ci].exp) {
-                safe_write32(pid, ts_base + kChk[ci].off, kChk[ci].exp, 3);
-                reverted++;
+            if (mem_read32(pid, ts_base + DYN_TERSAFE_PATCHES[i].offset, &cur) == 0
+                && cur != DYN_TERSAFE_PATCHES[i].value) {
+                if (safe_verify_and_write(pid,
+                        ts_base + DYN_TERSAFE_PATCHES[i].offset,
+                        &DYN_TERSAFE_PATCHES[i]) == 0)
+                    reverted++;
             }
         }
         if (reverted > 0)
-            WARN("检测链 立即验证: %d/6 处已被恢复并重打", reverted);
+            WARN("validated code table: %d entries reverted and restored", reverted);
     }
     return 0;
 }
@@ -1120,7 +1225,7 @@ static volatile sig_atomic_t g_stop = 0;
 static void sig_handler(int sig) { (void)sig; g_stop = 1; }
 
 /* ================================================================
- * v8.8 深层设备环境重建 — 整合神念/时间刺客技术
+ * v8.7 深层设备环境重建 — 整合神念/时间刺客技术
  *
  * 云机伪装真手机的7个层次：
  * L0: IP/ASN      — WireGuard 出口 (见 runner/setup_network.sh)
@@ -1205,7 +1310,11 @@ static void spoof_serial_bind(void) {
     char serial[16]; hwid_samsung_serial(serial, sizeof(serial));
     int fd = open(SERIAL_BIND_TMP, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { WARN("[L1] serial tmp: %s", strerror(errno)); return; }
-    write(fd, serial, strlen(serial));
+    if (write_all_fd(fd, serial, strlen(serial)) != 0) {
+        WARN("[L1] serial tmp write: %s", strerror(errno));
+        close(fd);
+        return;
+    }
     close(fd);
     umount2(target, MNT_DETACH);
     if (mount(SERIAL_BIND_TMP, target, NULL, MS_BIND | MS_RDONLY, NULL) == 0)
@@ -1216,8 +1325,7 @@ static void spoof_serial_bind(void) {
 
 /* L2: resetprop 全局覆写 IMEI 与序列号
  * 优先 Magisk/KernelSU 内置，回退到用户手动部署的 standalone resetprop
- * 若均不可用，LXC 容器中改用 build.prop 直写（见 modify_props_lxc） */
-static void modify_props_lxc(void);   /* forward declaration */
+ * 若均不可用则保持 fail-closed，由进程 Hook 兜底，不持久化修改系统分区。 */
 static void resetprop_identity(void) {
     static const char * const rp_locs[] = {
         "/system/bin/resetprop",
@@ -1231,8 +1339,7 @@ static void resetprop_identity(void) {
     for (int i = 0; rp_locs[i]; i++)
         if (access(rp_locs[i], X_OK) == 0) { rp = rp_locs[i]; break; }
     if (!rp) {
-        WARN("[L2] resetprop not found, falling back to build.prop (LXC)");
-        modify_props_lxc();
+        WARN("[L2] resetprop not found; skip global identity mutation, process hook only");
         return;
     }
 
@@ -1241,7 +1348,7 @@ static void resetprop_identity(void) {
     hwid_samsung_serial(serial, sizeof(serial));
 
     char cmd[320];
-#define RP(k, v) do { snprintf(cmd,sizeof(cmd),"%s %s %s 2>/dev/null",rp,(k),(v)); system(cmd); } while(0)
+#define RP(k, v) do { snprintf(cmd,sizeof(cmd),"%s %s %s 2>/dev/null",rp,(k),(v)); run_shell_best_effort(cmd); } while(0)
     RP("ro.serialno",        serial);
     RP("ro.boot.serialno",   serial);
     RP("sys.serialno",       serial);
@@ -1258,57 +1365,28 @@ static void resetprop_identity(void) {
         "  v=$(getprop \"$k\"); "
         "  [ \"${#v}\" -ge 14 ] && %s \"$k\" '%s' 2>/dev/null; "
         "done", rp, imei);
-    system(cmd);
+    run_shell_best_effort(cmd);
     OK("[L2] resetprop done (IMEI=%s serial=%s)", imei, serial);
 }
 
-/* L2b: LXC 容器中无 resetprop 时，直接 remount + 修改 build.prop
- * 让 getprop 全局可见正确值（重启后生效，需在游戏启动前执行）*/
-static void modify_props_lxc(void) {
-    char serial[16]; hwid_samsung_serial(serial, sizeof(serial));
-    char imei[16];   hwid_gen_imei(imei);
-
-    /* 尝试以 rw 挂载根/system 分区 */
-    int rw_ok = (system("mount -o remount,rw / 2>/dev/null") == 0) ||
-                (system("mount -o remount,rw /system 2>/dev/null") == 0);
-    if (!rw_ok) { WARN("[L2b] remount rw 失败，build.prop 修改跳过"); return; }
-
-    char cmd[640];
-    /* 修改所有分区的 build.prop */
-    snprintf(cmd, sizeof(cmd),
-        "for f in /system/build.prop /vendor/build.prop /product/build.prop "
-        "         /system/system/build.prop /odm/build.prop; do "
-        "  [ -f \"$f\" ] || continue; "
-        "  sed -i "
-        "    -e 's/ro\\.serialno=.*/ro.serialno=%s/g' "
-        "    -e 's/ro\\.boot\\.serialno=.*/ro.boot.serialno=%s/g' "
-        "    \"$f\" 2>/dev/null; "
-        "done", serial, serial);
-    system(cmd);
-
-    /* 注入 IMEI（追加，因大多数 build.prop 不含 ril.imei）*/
-    snprintf(cmd, sizeof(cmd),
-        "f=/system/build.prop; "
-        "grep -q 'ro.ril.imei' \"$f\" 2>/dev/null && "
-        "  sed -i 's/ro\\.ril\\.imei=.*/ro.ril.imei=%s/g' \"$f\" 2>/dev/null || "
-        "  echo 'ro.ril.imei=%s' >> \"$f\" 2>/dev/null",
-        imei, imei);
-    system(cmd);
-
-    OK("[L2b] build.prop patched (serial=%s imei=%s)", serial, imei);
-    /* 恢复只读挂载 */
-    system("mount -o remount,ro / 2>/dev/null || mount -o remount,ro /system 2>/dev/null");
-}
 static void spoof_oaid_vaid(void) {
     char hex[17]; int fd;
     hwid_rand_hex(hex, 16);
     fd = open(OAID_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd >= 0) { write(fd, hex, 16); close(fd); OK("[L3] OAID → %s", hex); }
+    if (fd >= 0) {
+        if (write_all_fd(fd, hex, 16) == 0) OK("[L3] OAID → %s", hex);
+        else WARN("[L3] OAID short write: %s", strerror(errno));
+        close(fd);
+    }
     else WARN("[L3] OAID write: %s", strerror(errno));
 
     hwid_rand_hex(hex, 16);
     fd = open(VAID_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd >= 0) { write(fd, hex, 16); close(fd); OK("[L3] VAID → %s", hex); }
+    if (fd >= 0) {
+        if (write_all_fd(fd, hex, 16) == 0) OK("[L3] VAID → %s", hex);
+        else WARN("[L3] VAID short write: %s", strerror(errno));
+        close(fd);
+    }
     else WARN("[L3] VAID write: %s", strerror(errno));
 }
 
@@ -1409,7 +1487,7 @@ static int do_prepare(void) {
     signal(SIGHUP, sig_handler);
     /* Normalize forge process name for discretion */
     prctl(PR_SET_NAME, "[kworker/u:0]", 0, 0, 0);
-    /* [TASK-06] 启动时加载外置偏移表，失败回退内置静态表 */
+    /* [TASK-06] 启动时加载并验证外置偏移表；失败时保持写入禁用。 */
     load_dyn_table();
     protect_devmode();
     kill_suspicious_procs();
@@ -1417,39 +1495,45 @@ static int do_prepare(void) {
     clean_virt_traces();
     stop_game();
     sleep(2);
-    /* [v8.8 L5] DFM 指纹缓存清理 — 在游戏停止后立即执行，消除跨会话设备关联 */
+    /* [v8.7 L5] DFM 指纹缓存清理 — 在游戏停止后立即执行，消除跨会话设备关联 */
     clean_dfm_fingerprints();
     int n = clean_all_ac_files();
     OK("清理文件: %d 个", n);
     restore_dirs();
     adapt_properties();
-    /* [v8.8] 深层设备标识重建 (L1–L4) */
+    /* [v8.7] 深层设备标识重建 (L1–L4) */
     spoof_serial_bind();    /* L1: 内核级 serial mount --bind */
     resetprop_identity();   /* L2: 全局 IMEI/Serial resetprop */
     spoof_oaid_vaid();      /* L3: OAID/VAID 文件替换 */
     spoof_ssaid();          /* L4: SSAID XML 轮换 */
-    /* [v8.6/v8.8] Android ID — settings put 全局写入 */
+    /* [v8.7] Android ID — settings put 全局写入 */
     {
         /* settings put 在所有 Android 版本均可用，无需 sqlite3 CLI */
-        system("settings put secure android_id 7a3f9b2c1d4e8f06 2>/dev/null || true");
+        run_shell_best_effort("settings put secure android_id 7a3f9b2c1d4e8f06 2>/dev/null || true");
         OK("[hwid] Android ID 已固定");
     }
-    /* [v8.9] LD_PRELOAD 预加载 — wrap.PKG 属性让 zygote 在 app 启动前自动注入
-     * 优先于 ptrace 注入，彻底绕过 Android 12+ linker namespace 隔离
-     * resetprop -n 绕过 property_service 直写，无视 ro.* 限制 */
+    /* v8.7 single-writer order: clear stale wrap preload before launch.
+     * forge validates and writes the JSON table first; injector only performs
+     * dlopen after that transaction completes. */
     {
         const char *rp = find_resetprop();
         if (rp) {
             char cmd[256];
             snprintf(cmd, sizeof(cmd),
-                "%s wrap.%s 'LD_PRELOAD=/data/local/tmp/libforgehook.so' 2>/dev/null",
-                rp, TARGET_PKG);
+                "%s -d wrap.%s 2>/dev/null || setprop wrap.%s '' 2>/dev/null",
+                rp, TARGET_PKG, TARGET_PKG);
             if (system(cmd) == 0)
-                OK("[hook] wrap.%s LD_PRELOAD 已设置 — 系统级注入就绪", TARGET_PKG);
+                OK("[hook] stale wrap.%s preload cleared", TARGET_PKG);
             else
-                WARN("[hook] wrap 属性设置失败，将回退 ptrace 注入");
+                WARN("[hook] failed to clear stale wrap.%s preload", TARGET_PKG);
         } else {
-            WARN("[hook] resetprop 不可用，wrap 属性无法设置");
+            char cmd[192];
+            snprintf(cmd, sizeof(cmd),
+                "setprop wrap.%s '' 2>/dev/null", TARGET_PKG);
+            if (system(cmd) == 0)
+                OK("[hook] stale wrap.%s preload cleared via setprop", TARGET_PKG);
+            else
+                WARN("[hook] stale wrap.%s preload could not be cleared", TARGET_PKG);
         }
     }
     protect_devmode();
@@ -1461,7 +1545,7 @@ static int do_launch(void) {
     do_prepare();
     start_logcat();
     /* Start background behavior monitor (append-only log) */
-    system("pkill -f forge_monitor 2>/dev/null; "
+    run_shell_best_effort("pkill -f forge_monitor 2>/dev/null; "
            "/data/local/tmp/forge_monitor -v >> /data/local/tmp/forge_monitor.log 2>&1 &");
     OK("forge_monitor 已启动");
     start_game();
@@ -1474,18 +1558,23 @@ static int do_launch(void) {
     if (pid) {
         usleep(500000);
     }
-    /* [v8.3] 顺序: patch tersafe → inject libforgehook.so
-     * injector 会在 ptrace 暂停期间再 patch 一次 kKillChain（双重保障）*/
+    /* v8.7 顺序: validated table write -> inject libforgehook.so.
+     * injector only performs dlopen and owns no independent offset table. */
     int rc = patch_game_process();
-    if (pid) {
-        if (inject_hook(pid) != 0) {
-            WARN("hook 库加载失败 — 仅靠外部 patch 守护");
-        }
+    if (rc != 0) {
+        ERR("validated patch transaction failed; hook injection cancelled");
+        stop_game();
+        run_shell_best_effort("pkill -f forge_monitor 2>/dev/null");
+        return rc;
     }
-    if (rc == 0) {
-        pid = get_pid_by_name(TARGET_PKG);
-        if (pid) hide_injection_from_maps(pid);
+    pid = get_pid_by_name(TARGET_PKG);
+    if (!pid || inject_hook(pid) != 0) {
+        ERR("hook library load failed; stopping inconsistent launch");
+        stop_game();
+        run_shell_best_effort("pkill -f forge_monitor 2>/dev/null");
+        return -1;
     }
+    hide_injection_from_maps(pid);
     if (pid) {
         safe_trunc(APP_DATA "/files/GPMSDK.mmap3");
         safe_trunc(APP_DATA "/shared_prefs/GCloudCoreSP.xml");
@@ -1547,27 +1636,31 @@ static int do_launch(void) {
                 {
                     pid_t vp2 = cp;
                     uint64_t ts2  = get_module_base(vp2, C_tersafe);
-                    uint64_t ue4b = get_module_base(vp2, C_ue4);
+                    uint64_t ue4b = DYN_UE4_COUNT ? get_module_base(vp2, C_ue4) : 0;
+                    if (ue4b && !verify_module_version(vp2, "libUE4.so",
+                            g_dyn_table.ue4_build_id))
+                        ue4b = 0;
 
-                    /* kKillChain: 每 1s (维护) 或 每周期 (注入窗口) */
+                    /* Validated fast subset: every 1s in maintenance, every loop during injection. */
                     long kchain_interval = maintain ? 1000 : 100;
                     if (ts2 && MS_SINCE(ts_kchain) >= kchain_interval) {
                         clock_gettime(CLOCK_MONOTONIC, &ts_kchain);
-                        static const struct { uint64_t off; uint32_t exp; } kChk[] = {
+                        static const uint64_t kFastOffsets[] = {
                             /* 0x419FDC: 接受tersafe的RET(0xD65F03C0)，停止翻转
                              * MOV X0,#0 和 RET 功能等价(均立即返回截断检测链)
                              * 高频翻转本身是GTI签名，用RET消除写入噪声 */
-                            {0x419FDC, 0xD65F03C0}, {0x419FE0, 0xD65F03C0},
-                            {0x2E7810, 0xD65F03C0}, {0x2F29D0, 0xD65F03C0},
-                            {0x320D78, 0xD65F03C0}, {0x3233B8, 0xD65F03C0},
+                            0x419FDC, 0x419FE0, 0x2E7810,
+                            0x2F29D0, 0x320D78, 0x3233B8,
                         };
-                        for (int ci = 0; ci < 6; ci++) {
+                        for (size_t ci = 0; ci < sizeof(kFastOffsets) / sizeof(kFastOffsets[0]); ci++) {
+                            const patch_entry_t *patch = find_validated_patch(kFastOffsets[ci]);
+                            if (!patch) continue;
                             uint32_t cur = 0;
-                            if (mem_read32(vp2, ts2 + kChk[ci].off, &cur) == 0
-                                && cur != kChk[ci].exp) {
+                            if (mem_read32(vp2, ts2 + patch->offset, &cur) == 0
+                                && cur != patch->value) {
                                 WARN("patch reverted off=0x%llx cur=0x%08x — repatch",
-                                     (unsigned long long)kChk[ci].off, cur);
-                                safe_write32(vp2, ts2 + kChk[ci].off, kChk[ci].exp, 3);
+                                     (unsigned long long)patch->offset, cur);
+                                safe_verify_and_write(vp2, ts2 + patch->offset, patch);
                             }
                         }
                     }
@@ -1582,8 +1675,9 @@ static int do_launch(void) {
                                 && cur != DYN_TERSAFE_PATCHES[i].value) {
                                 WARN("code patch reverted off=0x%llx — repatch",
                                      (unsigned long long)DYN_TERSAFE_PATCHES[i].offset);
-                                safe_write32(vp2, ts2 + DYN_TERSAFE_PATCHES[i].offset,
-                                             DYN_TERSAFE_PATCHES[i].value, 3);
+                                safe_verify_and_write(vp2,
+                                    ts2 + DYN_TERSAFE_PATCHES[i].offset,
+                                    &DYN_TERSAFE_PATCHES[i]);
                             }
                         }
                     }
@@ -1612,8 +1706,9 @@ static int do_launch(void) {
                             uint32_t cur = 0;
                             if (mem_read32(vp2, ue4b + DYN_UE4_PATCHES[i].offset, &cur) == 0
                                 && cur != DYN_UE4_PATCHES[i].value) {
-                                safe_write32(vp2, ue4b + DYN_UE4_PATCHES[i].offset,
-                                             DYN_UE4_PATCHES[i].value, 3);
+                                safe_verify_and_write(vp2,
+                                    ue4b + DYN_UE4_PATCHES[i].offset,
+                                    &DYN_UE4_PATCHES[i]);
                             }
                         }
                     }
@@ -1670,7 +1765,13 @@ static void init_session_key(void) {
     ssize_t n = read(fd, g_session_key, SESSION_KEY_LEN); close(fd);
     if (n != SESSION_KEY_LEN) return;
     fd = open(SESSION_KEY_FILE, O_WRONLY|O_CREAT|O_TRUNC, 0600);
-    if (fd >= 0) { write(fd, g_session_key, SESSION_KEY_LEN); close(fd); }
+    if (fd < 0 || write_all_fd(fd, g_session_key, SESSION_KEY_LEN) != 0) {
+        if (fd >= 0) close(fd);
+        WARN("session key cannot be persisted; authentication disabled");
+        memset(g_session_key, 0, sizeof(g_session_key));
+        return;
+    }
+    close(fd);
     g_auth_enabled = 1;
     OK("session key 生成: %s", SESSION_KEY_FILE);
 }
@@ -1700,7 +1801,7 @@ static const char *verify_auth(char *buf) {
  * 防: TCP 流量分析 — 原来的命令名 "ping"/"launch" 明文可见。
  * 协议 v2 (opcode-based):
  *   客户端: [AUTH_HEADER\n] <1-byte opcode> \n
- *   服务端: {"s":"ok","v":"7.1"} (缩短字段名)
+ *   服务端: {"s":"ok","v":"8.7"} (缩短字段名)
  *
  * Opcode 表:
  *   0x01 ping    0x02 prepare  0x03 launch  0x04 patch
@@ -1835,22 +1936,24 @@ static int run_tcp_server(void) {
                 ssize_t in = recv(ucfd, ibuf, sizeof(ibuf)-1, 0);
                 if (in > 0) {
                     OK("[IPC] alert from monitor: %.120s", ibuf);
-                    /* 收到告警，立即触发一次 kKillChain 重推 */
+                /* An alert triggers one validated code-table restore. */
                     pid_t vp = get_pid_by_name(TARGET_PKG);
                     if (vp > 0) {
                         uint64_t ts2 = get_module_base(vp, C_tersafe);
                         if (ts2) {
-                            static const struct { uint64_t off; uint32_t exp; } kChk[] = {
-                                {0x419FDC,0xD2800000},{0x419FE0,0xD65F03C0},
-                                {0x2E7810,0xD65F03C0},{0x2F29D0,0xD65F03C0},
-                                {0x320D78,0xD65F03C0},{0x3233B8,0xD65F03C0},
+                            static const uint64_t kFastOffsets[] = {
+                                0x419FDC, 0x419FE0, 0x2E7810,
+                                0x2F29D0, 0x320D78, 0x3233B8,
                             };
                             int repatch = 0;
-                            for (int ci = 0; ci < 6; ci++) {
+                            for (size_t ci = 0; ci < sizeof(kFastOffsets) / sizeof(kFastOffsets[0]); ci++) {
+                                const patch_entry_t *patch = find_validated_patch(kFastOffsets[ci]);
+                                if (!patch) continue;
                                 uint32_t cur = 0;
-                                if (mem_read32(vp, ts2+kChk[ci].off, &cur)==0 && cur!=kChk[ci].exp) {
-                                    safe_write32(vp, ts2+kChk[ci].off, kChk[ci].exp, 3);
-                                    repatch++;
+                                if (mem_read32(vp, ts2 + patch->offset, &cur) == 0
+                                    && cur != patch->value) {
+                                    if (safe_verify_and_write(vp, ts2 + patch->offset, patch) == 0)
+                                        repatch++;
                                 }
                             }
                             if (repatch > 0)
@@ -1936,6 +2039,7 @@ int main(int argc, char **argv) {
     if (daemon_mode) {
         if (getuid() != 0) { ERR("daemon 模式需要 root 权限"); return 1; }
         g_logfile = fopen(FORGE_LOG, "a");
+        load_dyn_table();
         OK("DeltaForge daemon v" FORGE_VERSION " 启动");
         return run_tcp_server();
     }
@@ -1946,7 +2050,7 @@ int main(int argc, char **argv) {
 
     if (flag_launch) { return do_launch(); }
     if (flag_prep)   { do_prepare(); return 0; }
-    if (flag_patch)  { return patch_game_process(); }
+    if (flag_patch)  { load_dyn_table(); return patch_game_process(); }
     if (flag_status) {
         int r = target_is_running();
         printf("game_running=%d pid=%d\n", r, r ? get_pid_by_name(TARGET_PKG) : 0);

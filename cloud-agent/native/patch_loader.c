@@ -1,5 +1,5 @@
 // patch_loader.c — TASK-06: 极简 JSON 解析，无外部依赖
-// 格式: { "build_id":"hex", "tersafe_patches":[{"offset":"0xN","value":"0xN"},...],
+// 格式: { "build_id":"hex", "tersafe_patches":[{"offset":"0xN","value":"0xN","expected":"0xN"},...],
 //          "tersafe_bss":["0xN",...], "ue4_patches":[...] }
 #include "patch_loader.h"
 #include <stdio.h>
@@ -70,8 +70,8 @@ static int parse_patch_array(const char *start,
         if (*p == ']') break;
         if (*p != '{') { p++; continue; }
         p++;
-        uint64_t off = 0, val = 0;
-        int got_off = 0, got_val = 0;
+        uint64_t off = 0, val = 0, expected = 0;
+        int got_off = 0, got_val = 0, got_expected = 0;
         while (*p && *p != '}') {
             p = skip_ws(p);
             if (*p == '"') {
@@ -85,6 +85,8 @@ static int parse_patch_array(const char *start,
                     if (parse_hex64(p, &off)) got_off = 1;
                 } else if (kl == 5 && memcmp(key_start, "value", 5) == 0) {
                     if (parse_hex64(p, &val)) got_val = 1;
+                } else if (kl == 8 && memcmp(key_start, "expected", 8) == 0) {
+                    if (parse_hex64(p, &expected)) got_expected = 1;
                 }
                 /* skip to next , or } */
                 while (*p && *p != ',' && *p != '}') p++;
@@ -93,9 +95,11 @@ static int parse_patch_array(const char *start,
                 p++;
             }
         }
-        if (got_off && got_val) {
+        if (got_off && got_val && val <= UINT32_MAX) {
             out[count].offset = off;
             out[count].value  = (uint32_t)val;
+            out[count].expected = (uint32_t)expected;
+            out[count].has_expected = got_expected && expected <= UINT32_MAX;
             count++;
         }
         p = skip_ws(p);
@@ -140,6 +144,8 @@ int patch_loader_load(const char *json_path, patch_table_t *out) {
     /* build_id */
     const char *p = find_key(buf, "build_id");
     if (p) read_str_value(p, out->build_id, sizeof(out->build_id));
+    p = find_key(buf, "ue4_build_id");
+    if (p) read_str_value(p, out->ue4_build_id, sizeof(out->ue4_build_id));
 
     /* tersafe_patches */
     p = find_key(buf, "tersafe_patches");
@@ -168,7 +174,9 @@ int patch_loader_load(const char *json_path, patch_table_t *out) {
     }
 
     free(buf);
-    return (out->tersafe_count > 0 || out->bss_count > 0 || out->ue4_count > 0);
+    int ok = out->tersafe_count > 0 || out->bss_count > 0 || out->ue4_count > 0;
+    if (!ok) patch_loader_free(out);
+    return ok;
 }
 
 void patch_loader_free(patch_table_t *t) {
@@ -177,4 +185,6 @@ void patch_loader_free(patch_table_t *t) {
     free(t->tersafe_bss);     t->tersafe_bss     = NULL;
     free(t->ue4_patches);     t->ue4_patches     = NULL;
     t->tersafe_count = t->bss_count = t->ue4_count = 0;
+    t->build_id[0] = '\0';
+    t->ue4_build_id[0] = '\0';
 }

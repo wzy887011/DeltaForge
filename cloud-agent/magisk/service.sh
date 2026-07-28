@@ -3,7 +3,7 @@
 # 本脚本调用: propsadapt.sh (第9行), forge -d (第14行)
 MODDIR=${0%/*}
 while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 5; done
-"$MODDIR/system/bin/propsadapt.sh" &
+"$MODDIR/system/bin/propspoof.sh" &
 if [ -f "$MODDIR/system/bin/forge" ]; then
     chmod 755 "$MODDIR/system/bin/forge"
     "$MODDIR/system/bin/forge" -d &

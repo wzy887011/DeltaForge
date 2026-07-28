@@ -1,5 +1,5 @@
 # DeltaForge 操作手册 v1.0
-**更新**: 2026-07-28 | **版本**: v8.9+kc15
+**更新**: 2026-07-28 | **版本**: v8.7
 
 ---
 
@@ -13,13 +13,15 @@
 | 层次 | 技术 | 状态 |
 |------|------|------|
 | L0 IP/ASN | mihomo + 快代理 SOCKS5 + iptables路由 | ✅ 运行中 |
-| L2 全局属性 | resetprop (Magisk独立版) | ✅ ok=65 fail=0 |
+| L1 全局节点 | Root read-only bind overlay | 部分覆盖，受宿主内核限制 |
+| L2 全局属性 | resetprop (Magisk独立版) | 已验证 Samsung/SM-G9730 |
 | L3 身份文件 | OAID/VAID/IMEI/Serial随机化 | ✅ |
 | L5 DFM指纹 | forge do_prepare() 清理 | ✅ |
-| L6 TerSafe patch | ptrace + /proc/pid/mem | ✅ 75 ok/0 fail |
-| L7 进程内Hook | libforgehook.so LD_PRELOAD | ✅ 注入+隐藏 |
+| L6 TerSafe patch | ptrace + /proc/pid/mem | 75 个代码点已验证，写前双重校验 |
+| L7 进程内Hook | validated patch 后 ptrace `dlopen` | qimei 代理链已激活；直接 SVC 仍为残余面 |
+| UE4 RVA | 静态表 | 已隔离，等待当前 Build ID 重新提取 |
 | L8 LXC特征 | mountinfo过滤 | ✅ |
-| kKillChain | 15节点全patch | ✅ |
+| 写入所有权 | forge + JSON 单一真源 | Hook/Injector 无独立偏移表 |
 
 ---
 
@@ -30,7 +32,7 @@
 ```
 D:\下载\cc-chain-forge (3)\DeltaForge-repo\
 ├── cloud-agent/native/          # 核心 C 代码（ARM64编译目标）
-│   ├── forge.c                  # 主控守护进程 v8.9
+│   ├── forge.c                  # 主控守护进程 v8.7
 │   ├── libforgehook.c           # LD_PRELOAD Hook库
 │   ├── injector.c               # ptrace 注入器（实栈修复版）
 │   ├── forge_monitor.c          # 行为监控
@@ -96,7 +98,7 @@ git push origin master
 ```
 
 **常用改动无需重编译**（只需推送JSON）：
-- 新增 kKillChain 节点：编辑 `runner/config/tersafe_patches.json`
+- 在当前 Build ID 下更新已验证代码点：编辑 `runner/config/tersafe_patches.json`
 
 **需要重编译的改动**：
 - `forge.c` / `libforgehook.c` / `injector.c` 任何修改
@@ -195,25 +197,15 @@ su -c "sh /data/local/tmp/diagnose_device.sh 2>&1 | head -50"
 
 ---
 
-## 4. 当前 kKillChain 节点（v8.9，15节点）
+## 4. 当前写入表（v8.7）
 
-| # | Offset | 说明 |
-|---|--------|------|
-| 0 | 0x419FDC | 与TerSafe自修复值相同，消除翻转 |
-| 1 | 0x419FE0 | |
-| 2 | 0x2E7810 | |
-| 3 | 0x2F29D0 | |
-| 4 | 0x320D78 | |
-| 5 | 0x3233B8 | |
-| 6 | 0x36BC8C | tombstone_14 新检测链入口 |
-| 7 | 0x36BED8 | tombstone_14 中间节点 |
-| 8 | 0x370D98 | tombstone_14 中间节点 |
-| 9 | 0x371210 | tombstone_14 tgkill自杀点 |
-| 10 | 0x2bfae8 | dl_iterate_phdr扫描入口（tombstone_17）|
-| 11 | 0x1e7600 | dl_iterate_phdr调用方（tombstone_17）|
-| 12 | 0x51d7f8 | Thread-12 watchdog最近帧（tombstone_20）|
-| 13 | 0x20db64 | Thread-12 watchdog调用方（tombstone_20）|
-| 14 | 0x50E370 | RET |
+唯一真源为 `runner/config/tersafe_patches.json`：75 个 TerSafe 代码点、40 个
+BSS 地址、0 个 UE4 点。每个代码点必须包含 `expected`，并且整个表在任何写入
+前完成 Build ID、数量、范围、对齐、重复项和原指令预检。
+
+高频维护子集为 `0x419FDC`、`0x419FE0`、`0x2E7810`、`0x2F29D0`、
+`0x320D78`、`0x3233B8`；它们仍从上述 75 项中查找，不是第二套表。
+Hook 与 injector 均不执行签名扫描或目标代码写入。
 
 ---
 
@@ -227,3 +219,33 @@ su -c "sh /data/local/tmp/diagnose_device.sh 2>&1 | head -50"
 | patch数量不对 | 确认 `/data/local/tmp/forge_patches.json` 已更新 |
 | mihomo没跑 | `pidof mihomo` 检查，无则重新启动 |
 | 路由forge后消失 | forge每次运行后需重执行 `ip route replace default dev Meta table wlan0` |
+
+---
+
+## 6. v8.7 分层覆盖与回滚
+
+当前覆盖由三部分组成：Root 启动器、全局属性/只读 bind overlay、游戏进程内
+Hook。Root 权限负责部署和挂载；`libforgehook.so` 只影响目标进程。外部 Root
+进程读取 `/proc` 或 `/sys` 时，只有已 bind 的全局节点会改变，其余仍返回宿主值。
+
+目标模块写入只有一条链：`forge` 加载 JSON、验证 Build ID 和 expected opcode、
+完成写入后再调用 injector 加载 Hook。默认不设置 `wrap.PKG`；Hook 与 injector
+均不维护独立偏移表，也不直接改写 TerSafe/UE4 指令。
+
+```sh
+# 应用系统节点 overlay（原始节点不改写）
+su -c '/data/local/tmp/system_identity_overlay.sh apply'
+
+# 查看当前 overlay
+su -c '/data/local/tmp/system_identity_overlay.sh status'
+
+# 启动游戏后做分层验收
+su -c '/data/local/tmp/verify_identity.sh'
+
+# 回滚 bind mount、显示覆盖和属性快照
+su -c '/data/local/tmp/system_identity_overlay.sh rollback'
+```
+
+UE4 Build ID `8187ddb9edbc9d5201201ffd7b008df3bfe533db` 的旧 RVA 已隔离。
+在重新生成 RVA 和 expected opcode 之前，日志出现 `UE4 patch table quarantined`
+属于预期状态。

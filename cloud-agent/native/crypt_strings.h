@@ -1,5 +1,5 @@
 // ============================================================
-// crypt_strings.h — DeltaForge v7.1 自动生成
+// crypt_strings.h — DeltaForge v8.7 自动生成
 // 生成工具: tools/crypt_gen.py
 // XOR key: 0x73
 // 警告: 此文件为自动生成，不要手动编辑
@@ -14,7 +14,7 @@
 // 在栈上解密，返回临时指针。调用方应在使用后立即消耗。
 // 对于需要持久化的字符串，使用 CRYPT_STR_INIT 变体。
 static inline const char *xstr(const unsigned char *e, int n) {
-    static char _xb[256];
+    static __thread char _xb[256];
     if (n > 255) n = 255;
     for (int i = 0; i < n; i++) _xb[i] = (char)(e[i] ^ CRYPT_KEY);
     _xb[n] = 0;

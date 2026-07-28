@@ -1,10 +1,10 @@
 // ============================================================
-// libforgehook.c v8.0 — LD_PRELOAD 注入库
+// libforgehook.c v8.7 — LD_PRELOAD 注入库
 // Android syscall 拦截 + 属性模拟 + GPU 适配 + 文件伪造
 // 编译: clang -shared -fPIC -Os -Wall libforgehook.c -o libforgehook.so -ldl -lpthread
 // v7.1 新增: CRYPT_STR 加密宏 (P0) / 标识符随机化 (P1) / JUNK_INSN (P2)
 //           mremap 匿名重映射 (P3) / 属性流量混淆 (P4)
-// v8.0 新增: FIX-A ACQUIRE原子读 / FIX-B constructor(50)动态扩容
+// v8.0 新增: FIX-A ACQUIRE原子读 / FIX-B constructor 动态扩容
 //           FIX-C maps无上限缓冲 / NEW-1 statx+faccessat2 hook
 //           NEW-2 getdents64 memfd过滤 / NEW-3 smaps_rollup+numa_maps
 //           NEW-4 pattern_scan_seq多指令扫描 / NEW-5 chainload后删磁盘so
@@ -36,6 +36,15 @@
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <ifaddrs.h>
+#include <netpacket/packet.h>
+#include <linux/stat.h>
+#include <sys/utsname.h>
+
+#ifdef __clang__
+#define FORGE_OVERLOADABLE __attribute__((overloadable))
+#else
+#define FORGE_OVERLOADABLE
+#endif
 
 /* [v7.1 P0] 字符串常量加密 — 防 strings/IDA 检索 */
 #include "crypt_strings.h"
@@ -58,7 +67,6 @@
 /* forward declarations — 函数定义在后，但前向构造函数中需要引用 */
 static uintptr_t get_module_base(const char *so_name);
 static void hook_log(const char *msg);
-static int patch_insn(uintptr_t addr, uint32_t insn);
 
 /* seccomp-bpf constants */
 #ifndef SECCOMP_SET_MODE_FILTER
@@ -88,6 +96,9 @@ static int patch_insn(uintptr_t addr, uint32_t insn);
 #define ARM64_NR_PROCESS_VM_WRITEV 271
 #define ARM64_NR_OPENAT2     437
 #define ARM64_NR_FACCESSAT2  439
+#ifndef SYS_newfstatat
+#define SYS_newfstatat        79
+#endif
 
 struct sock_filter { uint16_t code; uint8_t jt,jf; uint32_t k; };
 struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
@@ -113,7 +124,7 @@ struct sock_fprog   { uint16_t len; struct sock_filter *filter; };
 /* ============================================================
  * [v7.1 P1] 每次启动随机化标识符
  * 防: 多次运行的二进制被 memfd 名/日志文件名指纹识别。
- * 方案: constructor(48) 生成 6 位 hex 随机后缀，所有 memfd/shm 名
+ * 方案: early constructor 生成 6 位 hex 随机后缀，所有 memfd/shm 名
  * 均附加后缀; /data/local/tmp 固定路径保持不变 (deploy.sh 依赖)。
  * ============================================================ */
 static char g_rand_sfx[8] = {0};   /* "XXXXXX\0" — 6 hex chars */
@@ -142,10 +153,10 @@ static void _gen_rand_suffix(void) {
 }
 
 /* 辅助: 将后缀拼到 base 后，写入 out_buf */
-/* [v7.1 Fix 2] constructor(48) — 双路径日志 + P1 随机后缀生成
+/* [v7.1 Fix 2] constructor(103) — 双路径日志 + P1 随机后缀生成
  * v7.0 问题: 仅写 /data/local/tmp/forge_hook.log (权限 0600)。
  * 修复: 双路径 (主+fallback)，权限 0666; 同时初始化随机后缀。 */
-__attribute__((constructor(48)))
+__attribute__((constructor(103)))
 static void _probe_loaded(void) {
     /* P1: 首先生成随机后缀（其他所有构造函数依赖此值）*/
     _gen_rand_suffix();
@@ -155,7 +166,7 @@ static void _probe_loaded(void) {
         C_forgehook_log,                                          /* 第二: /data/local/tmp/ */
         "/sdcard/forge_hook.log"                                  /* fallback: sdcard */
     };
-    const char *msg = "[CTOR] 48 probe v7.1 enter\n";
+    const char *msg = "[CTOR] 48 probe v8.7 enter\n";
     size_t mlen = 0; while (msg[mlen]) mlen++;
 
     for (int lp = 0; lp < 3; lp++) {
@@ -166,7 +177,7 @@ static void _probe_loaded(void) {
             syscall(SYS_close, fd);
         }
     }
-    msg = "[CTOR] 48 probe v7.1 done\n";
+    msg = "[CTOR] 48 probe v8.7 done\n";
     mlen = 0; while (msg[mlen]) mlen++;
     for (int lp = 0; lp < 3; lp++) {
         int fd = (int)syscall(SYS_openat, AT_FDCWD, log_paths[lp],
@@ -178,7 +189,7 @@ static void _probe_loaded(void) {
     }
 }
 
-/* [v7.1 P3] constructor(50) — mremap 匿名重映射
+/* [v7.1 P3] constructor(104) — mremap 匿名重映射
  * 防: /proc/self/maps 扫描 — madvise(DONTDUMP) 不改变 maps 路径条目，
  *     任何读 maps 的检测仍能看到 "libforgehook" 字样(在我们的过滤器之外的地方)。
  * 方案: 对每个包含 libforgehook 的 RW/RX 段:
@@ -188,7 +199,7 @@ static void _probe_loaded(void) {
  *   → maps 中该条目变为 "[anon]"，再加上 make_filtered_maps_fd() 作双重防护
  * 注: 仅在 inject 模式下安全(游戏已初始化)；对 .text 段只做 MADV_DONTDUMP
  *     不做 mremap(重映射可执行段可能触发 SIGBUS)。 */
-__attribute__((constructor(50)))
+__attribute__((constructor(104)))
 static void _hide_self_from_maps(void) {
     hook_log("[CTOR] 50 _hide_self_from_maps enter\n");
     srand(time(NULL)^getpid()^(long)pthread_self());
@@ -219,7 +230,8 @@ static void _hide_self_from_maps(void) {
     char *line = buf;
     while (line && *line) {
         char *eol = __builtin_strchr(line, '\n');
-        if (!eol) break; *eol = '\0';
+        if (!eol) break;
+        *eol = '\0';
 
         if (strstr(line, C_forgehook) || strstr(line, C_qimei_underscore)) {
             uintptr_t start = (uintptr_t)strtoul(line, NULL, 16);
@@ -396,14 +408,14 @@ static int find_self_from_maps(char *out, size_t out_sz) {
     return found;
 }
 
-/* CRITICAL: constructor(47) — MUST be earliest constructor.
+/* CRITICAL: constructor(102) — resolve the chainload path before later hooks.
  * Android linker ALWAYS uses BIND_NOW (RTLD_NOW), resolving all symbols
  * during link_image() Phase 2 BEFORE constructors run in Phase 3.
  * Any library that DT_NEEDED-depends on libtdmqimei.so will have its
  * symbols resolved from OUR so (since we replaced the original).
- * RTLD_GLOBAL chainload of libtdmqimei_real.so in constructor(47)
+ * RTLD_GLOBAL chainload of libtdmqimei_real.so after constructor(102)
  * ensures qimei symbols are available for all subsequent loads. */
-/* [v7.0 P1-1] constructor(47) 只解析路径，不调 dlopen
+/* [v7.0 P1-1] constructor(102) 只解析路径，不调 dlopen
  * 修复: 原版在 constructor 内直接 dlopen，Android 10+ linker 的
  * g_dl_mutex 不可重入，constructor 持锁期间再 dlopen → 死锁。
  * dlopen 推迟到后台线程 (_do_chainload)，通过 pthread_once 单次执行。*/
@@ -430,9 +442,9 @@ static void _do_chainload(void) {
     }
 }
 
-/* [sensor] constructor(46) — 创建 SM-G9730 伪传感器目录供 opendir 重定向使用
+/* [sensor] constructor(101) — 创建 SM-G9730 伪传感器目录供 opendir 重定向使用
  * 运行时机：g_hooks_ready=0，所有 syscall 直接透传内核，无递归风险。 */
-__attribute__((constructor(46)))
+__attribute__((constructor(101)))
 static void _create_fake_sensor_dir(void) {
     static const struct { const char *sub; const char *name_v; const char *vendor_v; } kS[] = {
         {"accelerometer_sensor","K6DS3TR Acceleration\n","STMicro\n"},
@@ -446,7 +458,7 @@ static void _create_fake_sensor_dir(void) {
     const char *base = "/data/local/tmp/.forge_s";
     mkdir(base, 0755);
     for (int i = 0; kS[i].sub; i++) {
-        char d[256], f[256]; int fd;
+        char d[256], f[512]; int fd;
         snprintf(d, sizeof(d), "%s/%s", base, kS[i].sub);
         mkdir(d, 0755);
         snprintf(f, sizeof(f), "%s/name", d);
@@ -461,7 +473,7 @@ static void _create_fake_sensor_dir(void) {
     }
 }
 
-__attribute__((constructor(47)))
+__attribute__((constructor(102)))
 static void _resolve_qimei_path(void) {
     hook_log("[CTOR] 47 enter\n");
     char self_path[1024] = {0};
@@ -479,17 +491,17 @@ static void _resolve_qimei_path(void) {
 }
 
 /* ---- override data tables ---- */
-/* Snapdragon 8+ Gen1 (SM8475): 1xX2(0xd48)+3xA710(0xd47)+4xA510(0xd46) */
+/* Snapdragon 855 (SM8150): Qualcomm Kryo 485 Silver/Gold, Adreno 640. */
 static const char OVERRIDE_CPUINFO[]=
-"processor\t: 0\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
-"processor\t: 1\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
-"processor\t: 2\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
-"processor\t: 3\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x2\nCPU part\t: 0xd46\nCPU revision\t: 0\n\n"
-"processor\t: 4\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd47\nCPU revision\t: 0\n\n"
-"processor\t: 5\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd47\nCPU revision\t: 0\n\n"
-"processor\t: 6\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd47\nCPU revision\t: 0\n\n"
-"processor\t: 7\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd48\nCPU revision\t: 0\n\n"
-"Hardware\t: Qualcomm Technologies, Inc Kailua\n";
+"processor\t: 0\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x805\nCPU revision\t: 14\n\n"
+"processor\t: 1\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x805\nCPU revision\t: 14\n\n"
+"processor\t: 2\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x805\nCPU revision\t: 14\n\n"
+"processor\t: 3\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x805\nCPU revision\t: 14\n\n"
+"processor\t: 4\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0x804\nCPU revision\t: 14\n\n"
+"processor\t: 5\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0x804\nCPU revision\t: 14\n\n"
+"processor\t: 6\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0x804\nCPU revision\t: 14\n\n"
+"processor\t: 7\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x51\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0x804\nCPU revision\t: 14\n\n"
+"Hardware\t: Qualcomm Technologies, Inc SM8150\n";
 
 static const char OVERRIDE_STAT[]=
 "cpu  1567890 45678 890123 45678901 23456 0 12345 0 0 0\n"
@@ -505,10 +517,9 @@ static const char OVERRIDE_STAT[]=
 "ctxt 12345678901\nbtime 1700000000\nprocesses 456789\nprocs_running 3\nprocs_blocked 0\n";
 
 static const char OVERRIDE_VERSION[]=
-"Linux version 5.15.74-android13-8-25801347 (Android (9915937, based on r49823797) "
-"clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project "
-"d8a40ab03cb5e4c0bba11ef115e93c2574e55a1b), "
-"LLD 17.0.2) #1 SMP PREEMPT Wed Feb 14 08:22:10 UTC 2024\n";
+"Linux version 4.14.190-perf+ (dpi@SWDD6847) "
+"(Android clang version 9.0.8) #1 SMP PREEMPT Tue Jun 15 10:30:00 KST 2021\n";
+static const char OVERRIDE_OSRELEASE[]="4.14.190-perf+\n";
 
 static const char OVERRIDE_CMDLINE[]=
 "androidboot.hardware=qcom androidboot.bootloader=unknown "
@@ -534,11 +545,16 @@ static const char OVERRIDE_THERMAL[]="38000\n";
 static const char OVERRIDE_CPU_PRES[]="0-7\n";
 static const char OVERRIDE_CPU_ONLINE[]="0-7\n";
 static const char OVERRIDE_CPU_GOV[]="schedutil\n";
-static const char OVERRIDE_GPU_NAME[]="Adreno (TM) 740\n";
+static const char OVERRIDE_GPU_NAME[]="Adreno (TM) 640\n";
 static const char OVERRIDE_GPU_GOV[]="msm-adreno-tz\n";
-static const char OVERRIDE_GPU_MAX[]="680000000\n";
-static const char OVERRIDE_HARDWARE[]="Qualcomm Technologies, Inc Kailua\n";
-static const char OVERRIDE_MACHINE[]="Snapdragon 8+ Gen1\n";
+static const char OVERRIDE_GPU_MAX[]="585000000\n";
+static const char OVERRIDE_GPU_MIN[]="257000000\n";
+static const char OVERRIDE_GPU_CUR[]="427000000\n";
+static const char OVERRIDE_GPU_BUSY[]="12\n";
+static const char OVERRIDE_HARDWARE[]="Qualcomm Technologies, Inc SM8150\n";
+static const char OVERRIDE_MACHINE[]="Samsung SM-G9730\n";
+static const char OVERRIDE_DT_MODEL[]="Samsung Galaxy S10 (SM-G9730)\0";
+static const char OVERRIDE_DT_COMPATIBLE[]="samsung,beyond1q\0qcom,sm8150\0";
 
 /* [v7.0 P2-1] /proc/self/status — 动态 PID，消除硬编码 12345 被识别风险 */
 #define PROC_STATUS_FMT \
@@ -694,6 +710,7 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/proc/stat",OVERRIDE_STAT,sizeof(OVERRIDE_STAT)-1},
     {"/proc/bus/input/devices",OVERRIDE_INPUT_DEVS,sizeof(OVERRIDE_INPUT_DEVS)-1},
     {"/proc/version",OVERRIDE_VERSION,sizeof(OVERRIDE_VERSION)-1},
+    {"/proc/sys/kernel/osrelease",OVERRIDE_OSRELEASE,sizeof(OVERRIDE_OSRELEASE)-1},
     {"/proc/cmdline",OVERRIDE_CMDLINE,sizeof(OVERRIDE_CMDLINE)-1},
     {"/proc/modules",OVERRIDE_MODULES,1},
     {"/proc/devices",OVERRIDE_DEVICES,sizeof(OVERRIDE_DEVICES)-1},
@@ -702,7 +719,7 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/sys/devices/system/cpu/kernel_max","7\n",2},
     {"/sys/devices/system/cpu/offline","\n",1},
     {"/sys/devices/system/cpu/online",OVERRIDE_CPU_ONLINE,4},
-    {"/sys/devices/system/cpu/cpu",OVERRIDE_CPU_GOV,10},
+    {"/cpufreq/scaling_governor",OVERRIDE_CPU_GOV,sizeof(OVERRIDE_CPU_GOV)-1},
     {"/sys/class/power_supply/battery/capacity",OVERRIDE_BATTERY,9},
     {"/sys/class/power_supply/battery/status",OVERRIDE_BAT_STAT,sizeof(OVERRIDE_BAT_STAT)-1},
     {"/sys/class/power_supply/battery/temp",OVERRIDE_BAT_TEMP,5},
@@ -712,10 +729,21 @@ static const override_file_t OVERRIDE_FILES[]={
     {"/sys/class/kgsl/kgsl-3d0/devfreq/governor",OVERRIDE_GPU_GOV,sizeof(OVERRIDE_GPU_GOV)-1},
     {"/sys/class/kgsl/kgsl-3d0/max_gpuclk",OVERRIDE_GPU_MAX,sizeof(OVERRIDE_GPU_MAX)-1},
     {"/sys/class/kgsl/kgsl-3d0/gpuclk",OVERRIDE_GPU_MAX,sizeof(OVERRIDE_GPU_MAX)-1},
+    {"/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",OVERRIDE_GPU_BUSY,sizeof(OVERRIDE_GPU_BUSY)-1},
+    {"/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",OVERRIDE_GPU_CUR,sizeof(OVERRIDE_GPU_CUR)-1},
+    {"/sys/class/kgsl/kgsl-3d0/devfreq/max_freq",OVERRIDE_GPU_MAX,sizeof(OVERRIDE_GPU_MAX)-1},
+    {"/sys/class/kgsl/kgsl-3d0/devfreq/min_freq",OVERRIDE_GPU_MIN,sizeof(OVERRIDE_GPU_MIN)-1},
     {"/sys/devices/soc0/hardware",OVERRIDE_HARDWARE,sizeof(OVERRIDE_HARDWARE)-1},
-    {"/sys/devices/soc0/soc_id","500\n",4},
+    {"/sys/devices/soc0/soc_id","339\n",4},
     {"/sys/devices/soc0/machine",OVERRIDE_MACHINE,sizeof(OVERRIDE_MACHINE)-1},
     {"/sys/devices/soc0/family","Snapdragon\n",11},
+    {"/sys/devices/soc0/revision","2.1\n",4},
+    {"/sys/devices/soc0/serial_number","R58M74JXMWP\n",12},
+    {"/sys/firmware/devicetree/base/model",OVERRIDE_DT_MODEL,sizeof(OVERRIDE_DT_MODEL)-1},
+    {"/proc/device-tree/model",OVERRIDE_DT_MODEL,sizeof(OVERRIDE_DT_MODEL)-1},
+    {"/sys/firmware/devicetree/base/compatible",OVERRIDE_DT_COMPATIBLE,sizeof(OVERRIDE_DT_COMPATIBLE)-1},
+    {"/proc/device-tree/compatible",OVERRIDE_DT_COMPATIBLE,sizeof(OVERRIDE_DT_COMPATIBLE)-1},
+    {"/sys/fs/selinux/enforce","1\n",2},
     /* SM-G9730 (beyond1q / Snapdragon 855) sensor attribute files
      * 对游戏直接读取 sysfs sensor 属性的探测点提供真实设备数据 */
     {"/sys/class/sensors/accelerometer_sensor/name",
@@ -791,7 +819,9 @@ static const char *HIDDEN[]={
     "/data/local/tmp/gdbserver","/data/local/tmp/re.frida.server",
     "/data/local/tmp/re.frida.gadget","/data/local/tmp/frida",
     "/system/bin/magisk","/system/bin/supersu",
-    "/sbin/su","/system/xbin/su",
+    "/sbin/su","/system/xbin/su","/system/xbin/s9su",
+    "/system/xbin/script_guard","/data/adb/magisk","/data/adb/ksu",
+    "/data/adb/modules","/dev/.magisk","/debug_ramdisk/.magisk",
     "/system/bin/failsafe/su","/system/app/Superuser",
     "/system/app/SuperSU","/sbin/magisk",
     "/sbin/.magisk","/system/framework/XposedBridge.jar",
@@ -799,6 +829,7 @@ static const char *HIDDEN[]={
     "/data/data/org.lsposed.manager",
     "/data/local/tmp/x8","/data/local/tmp/sandbox",
     "/data/local/tmp/inject",
+    "/vendor/bin/hw/rockchip.hardware.rockit",
     NULL
 };
 
@@ -861,6 +892,7 @@ typedef int (*openat_t)(int,const char*,int,...);
 typedef FILE* (*fopen_t)(const char*,const char*);
 typedef int (*acc_t)(const char*,int);
 typedef int (*stat_t)(const char*,struct stat*);
+typedef int (*fstatat_t)(int,const char*,struct stat*,int);
 typedef ssize_t (*readlink_t)(const char*,char*,size_t);
 typedef ssize_t (*readlinkat_t)(int,const char*,char*,size_t);
 
@@ -870,6 +902,7 @@ static fopen_t _fopen=NULL;
 static acc_t _access=NULL;
 static stat_t _stat=NULL;
 static stat_t _lstat=NULL;
+static fstatat_t _fstatat=NULL;
 static readlink_t _readlink=NULL;
 static readlinkat_t _readlinkat=NULL;
 
@@ -940,7 +973,7 @@ static int make_filtered_maps_fd(void) {
     return mfd;
 }
 
-/* [v8.8.2] LXC 容器痕迹过滤
+/* [v8.7] LXC 容器痕迹过滤
  * 从 /proc/self/mountinfo 移除 lxcfs/docker 行，避免暴露容器底座 */
 static int make_filtered_mountinfo_fd(void) {
     int rfd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/mountinfo", O_RDONLY, 0);
@@ -977,9 +1010,19 @@ static int make_filtered_mountinfo_fd(void) {
         *eol = '\n'; line = eol + 1;
     }
     if (out_len > 0) {
-        ftruncate(mfd, (off_t)out_len);
+        if (ftruncate(mfd, (off_t)out_len) != 0) {
+            syscall(SYS_close, mfd);
+            munmap(raw, 65537);
+            return -1;
+        }
         void *a = mmap(NULL, out_len, PROT_WRITE, MAP_SHARED, mfd, 0);
-        if (a != MAP_FAILED) { memcpy(a, out, out_len); munmap(a, out_len); }
+        if (a == MAP_FAILED) {
+            syscall(SYS_close, mfd);
+            munmap(raw, 65537);
+            return -1;
+        }
+        memcpy(a, out, out_len);
+        munmap(a, out_len);
         lseek(mfd, 0, SEEK_SET);
     }
     munmap(raw, 65537);
@@ -1035,9 +1078,17 @@ static int make_filtered_cgroup_fd(void) {
         *eol = '\n'; line = eol + 1;
     }
     if (out_len > 0) {
-        ftruncate(mfd, (off_t)out_len);
+        if (ftruncate(mfd, (off_t)out_len) != 0) {
+            syscall(SYS_close, mfd);
+            return -1;
+        }
         void *a = mmap(NULL, (size_t)out_len, PROT_WRITE, MAP_SHARED, mfd, 0);
-        if (a != MAP_FAILED) { memcpy(a, out, (size_t)out_len); munmap(a, (size_t)out_len); }
+        if (a == MAP_FAILED) {
+            syscall(SYS_close, mfd);
+            return -1;
+        }
+        memcpy(a, out, (size_t)out_len);
+        munmap(a, (size_t)out_len);
         lseek(mfd, 0, SEEK_SET);
     }
     return mfd;
@@ -1052,7 +1103,7 @@ static int make_filtered_cgroup_fd(void) {
  *           初始化之前就拦截了所有系统调用 → 进程静默死亡
  *   inject: so 在游戏完全初始化后 ptrace 注入 → hook 不影响初始化
  *
- * FIX: g_hooks_ready 初始为 0，constructor(150) 完成后设为 1。
+ * FIX: g_hooks_ready 初始为 0，constructor(200) 完成后设为 1。
  *      所有 hook 在 g_hooks_ready=0 期间透传原始调用，不做任何拦截。
  *      这样 hijack 和 inject 两种模式都安全——hijack 的 hook 在游戏
  *      初始化完成后才生效。
@@ -1074,6 +1125,7 @@ static volatile int g_hooks_ready = 0;
     if(!_access)_access=(acc_t)dlsym(RTLD_NEXT,"access"); \
     if(!_stat)_stat=(stat_t)dlsym(RTLD_NEXT,"stat"); \
     if(!_lstat)_lstat=(stat_t)dlsym(RTLD_NEXT,"lstat"); \
+    if(!_fstatat)_fstatat=(fstatat_t)dlsym(RTLD_NEXT,"fstatat"); \
     if(!_readlink)_readlink=(readlink_t)dlsym(RTLD_NEXT,"readlink"); \
     if(!_readlinkat)_readlinkat=(readlinkat_t)dlsym(RTLD_NEXT,"readlinkat"); \
 }while(0)
@@ -1083,7 +1135,7 @@ int open(const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(!HOOKS_READY()) return _open(p,flags,m);
-    if(hidden(p)){errno=ENOENT;return -1;}
+    if(hidden(p) && !match(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     /* [v7.0 P0-2] smaps 动态过滤 (同 maps 逻辑) */
     if(p && strstr(p,"smaps") && strstr(p,"/proc/")){
@@ -1093,7 +1145,7 @@ int open(const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
-    /* [v8.8.2] mountinfo/cgroup LXC 容器痕迹过滤 */
+    /* [v8.7] mountinfo/cgroup LXC 容器痕迹过滤 */
     if(p && strstr(p,"mountinfo") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
         int mfd=make_filtered_mountinfo_fd(); if(mfd>=0)return mfd;
     }
@@ -1131,7 +1183,7 @@ int openat(int dir,const char *p,int flags,...){
     INIT();mode_t m=0;
     if(flags&O_CREAT){va_list a;va_start(a,flags);m=(mode_t)va_arg(a,int);va_end(a);}
     if(!HOOKS_READY()) return _openat(dir,p,flags,m);
-    if(hidden(p)){errno=ENOENT;return -1;}
+    if(hidden(p) && !match(p)){errno=ENOENT;return -1;}
     if(null_redir(p)){int mfd=memfd_anon();if(mfd>=0)return mfd;return _open("/dev/null",O_RDWR,0);}
     if(p && strstr(p,"smaps") && strstr(p,"/proc/")){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
@@ -1139,7 +1191,7 @@ int openat(int dir,const char *p,int flags,...){
     if(p && strstr(p,"maps") && (strstr(p,"/proc/self/")||(strstr(p,"/proc/") && strstr(p,"/task/")))){
         int mfd=make_filtered_maps_fd(); if(mfd>=0)return mfd;
     }
-    /* [v8.8.2] mountinfo/cgroup LXC 容器痕迹过滤 (openat) */
+    /* [v8.7] mountinfo/cgroup LXC 容器痕迹过滤 (openat) */
     if(p && strstr(p,"mountinfo") && strstr(p,"/proc/") && !(flags&O_WRONLY)){
         int mfd=make_filtered_mountinfo_fd(); if(mfd>=0)return mfd;
     }
@@ -1159,7 +1211,7 @@ int openat(int dir,const char *p,int flags,...){
 FILE *fopen(const char *p,const char *m){
     INIT();
     if(!HOOKS_READY()) return _fopen(p,m);
-    if(hidden(p)){errno=ENOENT;return NULL;}
+    if(hidden(p) && !match(p)){errno=ENOENT;return NULL;}
     if(null_redir(p)){
         /* 写入模式 → /dev/null；读取模式 → 空内存 */
         if(m[0]=='w'||m[0]=='a') return _fopen("/dev/null",m);
@@ -1171,9 +1223,43 @@ FILE *fopen(const char *p,const char *m){
     return _fopen(p,m);
 }
 
-int access(const char *p,int m){INIT();if(!HOOKS_READY()) return _access(p,m);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("access",p);return _access(p,m);}
-int stat(const char *p,struct stat *b){INIT();if(!HOOKS_READY()) return _stat(p,b);if(hidden(p)){errno=ENOENT;return -1;}forge_audit("stat",p);return _stat(p,b);}
-int lstat(const char *p,struct stat *b){INIT();if(!HOOKS_READY()) return _lstat(p,b);if(hidden(p)){errno=ENOENT;return -1;}return _lstat(p,b);}
+static int fake_access_result(const override_file_t *f, int mode) {
+    if (!f) return -1;
+    if (mode & (W_OK | X_OK)) { errno = EACCES; return -1; }
+    return 0;
+}
+
+static int fill_fake_stat(const override_file_t *f, struct stat *b) {
+    if (!f || !b) { errno = EFAULT; return -1; }
+    memset(b, 0, sizeof(*b));
+    b->st_mode = S_IFREG | 0444;
+    b->st_nlink = 1;
+    b->st_uid = 0;
+    b->st_gid = 0;
+    b->st_size = (off_t)f->len;
+    b->st_blksize = 4096;
+    b->st_blocks = (blkcnt_t)((f->len + 511) / 512);
+    b->st_ino = (ino_t)(0xDF870000u ^ (uint32_t)f->len);
+    return 0;
+}
+
+static int fill_fake_statx(const override_file_t *f, struct statx *b) {
+    if (!f || !b) { errno = EFAULT; return -1; }
+    memset(b, 0, sizeof(*b));
+    b->stx_mask = STATX_BASIC_STATS;
+    b->stx_blksize = 4096;
+    b->stx_nlink = 1;
+    b->stx_mode = S_IFREG | 0444;
+    b->stx_size = f->len;
+    b->stx_blocks = (f->len + 511) / 512;
+    b->stx_ino = 0xDF870000u ^ (uint32_t)f->len;
+    return 0;
+}
+
+int access(const char *p,int m){INIT();if(!HOOKS_READY()) return _access(p,m);const override_file_t *f=match(p);if(hidden(p)&&!f){errno=ENOENT;return -1;}if(f)return fake_access_result(f,m);forge_audit("access",p);return _access(p,m);}
+int stat(const char *p,struct stat *b){INIT();if(!HOOKS_READY()) return _stat(p,b);const override_file_t *f=match(p);if(hidden(p)&&!f){errno=ENOENT;return -1;}if(f)return fill_fake_stat(f,b);forge_audit("stat",p);return _stat(p,b);}
+int lstat(const char *p,struct stat *b){INIT();if(!HOOKS_READY()) return _lstat(p,b);const override_file_t *f=match(p);if(hidden(p)&&!f){errno=ENOENT;return -1;}if(f)return fill_fake_stat(f,b);return _lstat(p,b);}
+int fstatat(int dirfd,const char *p,struct stat *b,int flags){INIT();if(!HOOKS_READY())return _fstatat?_fstatat(dirfd,p,b,flags):(int)syscall(SYS_newfstatat,dirfd,p,b,flags);const override_file_t *f=match(p);if(hidden(p)&&!f){errno=ENOENT;return -1;}if(f)return fill_fake_stat(f,b);return _fstatat?_fstatat(dirfd,p,b,flags):(int)syscall(SYS_newfstatat,dirfd,p,b,flags);}
 ssize_t readlink(const char *p,char *buf,size_t sz){INIT();if(!HOOKS_READY()) return _readlink(p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlink(p,buf,sz);}
 ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(!HOOKS_READY()) return _readlinkat(dir,p,buf,sz);if(hidden(p)){errno=ENOENT;return -1;}return _readlinkat(dir,p,buf,sz);}
 
@@ -1183,12 +1269,14 @@ ssize_t readlinkat(int dir,const char *p,char *buf,size_t sz){INIT();if(!HOOKS_R
 #ifndef SYS_statx
 #define SYS_statx 291
 #endif
-long statx(int dirfd, const char *path, int flags,
-           unsigned int mask, void *statxbuf) {
+int statx(int dirfd, const char *path, int flags,
+          unsigned int mask, struct statx *statxbuf) {
     if (!HOOKS_READY())
         return syscall(SYS_statx, dirfd, path, flags, mask, statxbuf);
-    if (path && hidden(path)) { errno = ENOENT; return -1; }
-    return syscall(SYS_statx, dirfd, path, flags, mask, statxbuf);
+    const override_file_t *f = match(path);
+    if (path && hidden(path) && !f) { errno = ENOENT; return -1; }
+    if (f) return fill_fake_statx(f, statxbuf);
+    return (int)syscall(SYS_statx, dirfd, path, flags, mask, statxbuf);
 }
 
 /* [v8 NEW-1] faccessat2 syscall hook
@@ -1197,8 +1285,18 @@ long statx(int dirfd, const char *path, int flags,
 long faccessat2(int dirfd, const char *path, int mode, int flags) {
     if (!HOOKS_READY())
         return syscall(ARM64_NR_FACCESSAT2, dirfd, path, mode, flags);
-    if (path && hidden(path)) { errno = ENOENT; return -1; }
+    const override_file_t *f = match(path);
+    if (path && hidden(path) && !f) { errno = ENOENT; return -1; }
+    if (f) return fake_access_result(f, mode);
     return syscall(ARM64_NR_FACCESSAT2, dirfd, path, mode, flags);
+}
+
+int faccessat(int dirfd, const char *path, int mode, int flags) {
+    if (!HOOKS_READY()) return (int)syscall(ARM64_NR_FACCESSAT2, dirfd, path, mode, flags);
+    const override_file_t *f = match(path);
+    if (path && hidden(path) && !f) { errno = ENOENT; return -1; }
+    if (f) return fake_access_result(f, mode);
+    return (int)syscall(ARM64_NR_FACCESSAT2, dirfd, path, mode, flags);
 }
 
 /* [v8 NEW-2] getdents64 syscall hook
@@ -1445,6 +1543,7 @@ static const char *FILT_NAMES[] = {
     "qemu", "vbox", "vhost", "goldfish", "libdroid4x",
     "nox", "ttVM", "androVM", "microvirt", "droid4x",
     "nemud", "genymotion", "windroye", "bluestacks",
+    "rockchip", "s9su", "script_guard",
     NULL
 };
 
@@ -1508,12 +1607,12 @@ struct my_r_debug {
     struct my_link_map *r_map;
 };
 
-__attribute__((constructor(101)))
+__attribute__((constructor(150)))
 static void _hide_from_linker_list(void) {
-    hook_log("[CTOR] 101 _hide_from_linker_list enter\n");
+    hook_log("[CTOR] 150 _hide_from_linker_list enter\n");
     struct my_r_debug *dbg = (struct my_r_debug *)dlsym(RTLD_DEFAULT, "_r_debug");
     if (!dbg) dbg = (struct my_r_debug *)dlsym(RTLD_DEFAULT, "__r_debug");
-    if (!dbg || !dbg->r_map) { hook_log("[CTOR] 101 no r_debug found\n"); return; }
+    if (!dbg || !dbg->r_map) { hook_log("[CTOR] 150 no r_debug found\n"); return; }
 
     struct my_link_map *prev = NULL, *cur = dbg->r_map;
     int removed = 0;
@@ -1572,11 +1671,11 @@ static connect_t _connect_orig = NULL;
 static int is_ac_ip(const struct sockaddr *addr) {
     if (!addr || addr->sa_family != AF_INET)
         return 0;
-    uint32_t ip = ((const struct sockaddr_in *)addr)->sin_addr.s_addr;
+    uint32_t ip = ntohl(((const struct sockaddr_in *)addr)->sin_addr.s_addr);
     static const uint32_t kACNets[] = {
-        0x6DEF7700u, /* 118.239.119.x */
+        0x76EF7700u, /* 118.239.119.x */
         0x3BA8A800u, /* 59.168.168.x */
-        0x197B1900u, /* 123.25.25.x */
+        0x7B191900u, /* 123.25.25.x */
         0x2D760B00u, /* 45.118.11.x */
         0x6BEF7100u, /* 107.239.113.x */
         0
@@ -1627,12 +1726,14 @@ static void _gpu_ensure_range(void) {
     char *p = buf;
     while (*p) {
         char *eol = p; while (*eol && *eol != '\n') eol++;
+        char saved = *eol;
         *eol = '\0';
         if (strstr(p, "libtersafe.so") && strstr(p, "r-xp")) {
             sscanf(p, "%lx-%lx", &g_ts_code_start, &g_ts_code_end);
             break;
         }
-        p = (*eol == '\n') ? eol + 1 : eol;
+        *eol = saved;
+        p = (saved == '\n') ? eol + 1 : eol;
     }
 }
 
@@ -1642,10 +1743,9 @@ static int _in_tersafe(uintptr_t ra) {
     return ra >= g_ts_code_start && ra < g_ts_code_end;
 }
 
-/* PLT interposition: inject 模式下 GPU hook 不起作用 (PLT 已固化)
- * 但全局可见符号会与 libGLESv2/libvulkan 冲突 → dlopen 失败
- * 改为 hidden: 不导出，不冲突，inject 正常加载 */
-__attribute__((visibility("hidden")))
+/* Exported for wrap/hijack mode PLT interposition. Inject mode still depends on
+ * callers resolving these symbols after the hook library is loaded. */
+__attribute__((visibility("default")))
 const unsigned char *glGetString(unsigned int name) {
     /* 懒初始化: 用 RTLD_NEXT 找后继实现，跳过本库自身 */
     if (!real_glGetString)
@@ -1654,16 +1754,16 @@ const unsigned char *glGetString(unsigned int name) {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     if (_in_tersafe(caller)) {
         switch (name) {
-            case 0x1F01: return (const unsigned char *)"Adreno (TM) 740";
+            case 0x1F01: return (const unsigned char *)"Adreno (TM) 640";
             case 0x1F00: return (const unsigned char *)"Qualcomm";
-            case 0x1F02: return (const unsigned char *)"OpenGL ES 3.2 V@0730.0 (GIT@676873)";
+            case 0x1F02: return (const unsigned char *)"OpenGL ES 3.2 V@415.0 (GIT@8f1f5ca)";
         }
     }
     if (!real_glGetString) return (const unsigned char *)""; /* 极端兜底 */
     return real_glGetString(name);
 }
 
-__attribute__((visibility("hidden")))
+__attribute__((visibility("default")))
 const char *eglQueryString(void *dpy, int name) {
     if (!real_eglQueryString)
         real_eglQueryString = (eglQueryString_t)dlsym(RTLD_NEXT, "eglQueryString");
@@ -1671,7 +1771,7 @@ const char *eglQueryString(void *dpy, int name) {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     if (_in_tersafe(caller)) {
         if (name == 0x3053) return "Qualcomm";
-        if (name == 0x3054) return "1.5 Qualcomm Adreno (TM) 740";
+        if (name == 0x3054) return "1.5 Qualcomm Adreno (TM) 640";
     }
     if (!real_eglQueryString) return "";
     return real_eglQueryString(dpy, name);
@@ -1691,17 +1791,17 @@ static vkGetPhysicalDeviceProperties_t  real_vkGetPDProps  = NULL;
 static vkGetPhysicalDeviceProperties2_t real_vkGetPDProps2 = NULL;
 
 static void _vk_fake_props(VkPhysDevProps *p) {
-    /* 伪造 Adreno 740 (Qualcomm) 特征 */
+    /* Samsung SM-G9730 Snapdragon profile: Adreno 640. */
     p->vendorID  = 0x5143; /* Qualcomm */
-    p->deviceID  = 0x43050a01;
+    p->deviceID  = 0x06040001;
     p->deviceType = 2;    /* VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU */
-    const char *name = "Adreno (TM) 740";
+    const char *name = "Adreno (TM) 640";
     for (int i = 0; i < 256; i++)
         p->deviceName[i] = name[i] ? name[i] : '\0';
     if (!p->deviceName[0]) return; /* silence clang */
 }
 
-__attribute__((visibility("hidden")))
+__attribute__((visibility("default")))
 void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
     if (!real_vkGetPDProps)
         real_vkGetPDProps = (vkGetPhysicalDeviceProperties_t)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties");
@@ -1711,7 +1811,7 @@ void vkGetPhysicalDeviceProperties(void *physDev, VkPhysDevProps *props) {
     if (_in_tersafe(caller)) _vk_fake_props(props);
 }
 
-__attribute__((visibility("hidden")))
+__attribute__((visibility("default")))
 void vkGetPhysicalDeviceProperties2(void *physDev, VkPhysDevProps2 *props2) {
     if (!real_vkGetPDProps2)
         real_vkGetPDProps2 = (vkGetPhysicalDeviceProperties2_t)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties2");
@@ -1721,7 +1821,7 @@ void vkGetPhysicalDeviceProperties2(void *physDev, VkPhysDevProps2 *props2) {
     if (_in_tersafe(caller)) _vk_fake_props(&props2->properties);
 }
 
-__attribute__((constructor(120)))
+__attribute__((constructor(170)))
 static void _patch_gpu_driver(void) {
     _gpu_ensure_range();
 
@@ -1746,7 +1846,7 @@ static void _patch_gpu_driver(void) {
 }
 
 /* ============================================================
- * Target module runtime patching - constructor(150)
+ * Target module runtime patching - constructor(200)
  *
  * Process termination chain interception (based on crash analysis):
  *   entry -> 0x419fdc -> 0x2e7810(dispatch) -> 0x2f29d0(router) ->
@@ -1805,6 +1905,10 @@ static uintptr_t get_module_base(const char *so_name) {
     return result;
 }
 
+/* v8.7: forge is the only owner of target-module writes.  The legacy in-hook
+ * patch table is retained as disabled reference while offsets migrate to the
+ * validated JSON table consumed by forge. */
+#if 0
 /* AArch64 single-instruction patch
  * Method 1: mprotect RWX (Android <=9 or permissive SELinux)
  * Method 2: pwrite64 via /proc/self/mem (runtime code update, Android 10+ preferred) */
@@ -2021,14 +2125,14 @@ static void *_adjust_code_thread(void *unused) {
         /* [v7.1 Fix 1] 超时看门狗: 30s 未找到 tersafe 也激活 hook */
         if (retry >= 150 && !HOOKS_READY() && time(NULL) - g_watchdog_start > 30) {
             __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-            hook_log("[hooks] v7.1 activated (30s watchdog)\n");
+                hook_log("[hooks] v8.7 activated (30s watchdog)\n");
         }
     }
     if (!base) {
         hook_log("[patch] TIMEOUT: target module not loaded after 60s\n");
         /* 超时兜底激活 */
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7.1 activated (60s timeout)\n");
+                hook_log("[hooks] v8.7 activated (60s timeout)\n");
         return NULL;
     }
     /* [v7.0 P0-1] 先缓存 tersafe 代码段范围供 tgkill/exit_group 使用 */
@@ -2075,12 +2179,12 @@ static void *_adjust_code_thread(void *unused) {
     /* 路径 A: patch 成功 */
     if (ok >= need_ok) {
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7.1 activated (patch ok=");
+        hook_log("[hooks] v8.7 activated (patch ok=");
     }
     /* 路径 B: inject 模式 — tersafe 已加载说明游戏初始化完成 */
     else if (base != 0) {
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7.1 activated (inject mode, tersafe loaded) ok=");
+        hook_log("[hooks] v8.7 activated (inject mode, tersafe loaded) ok=");
     }
     /* 路径 C: 补丁全部失败 — 等 2s 重试一次，再失败也激活 */
     else {
@@ -2096,7 +2200,7 @@ static void *_adjust_code_thread(void *unused) {
         }
         (void)ok2;
         __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
-        hook_log("[hooks] v7.1 activated (retry) ok2=");
+        hook_log("[hooks] v8.7 activated (retry) ok2=");
     }
     /* 记录最终 ok 数 */
     {
@@ -2113,9 +2217,9 @@ static void *_adjust_code_thread(void *unused) {
     return NULL;
 }
 
-__attribute__((constructor(150)))
+__attribute__((constructor(200)))
 static void _adjust_code(void) {
-    hook_log("[CTOR] 150 _adjust_code enter\n");
+    hook_log("[CTOR] 200 _adjust_code enter\n");
 
     /* [v8.3] 同步立即尝试 — 如果 libtersafe.so 在注入时已加载，直接在构造函数里 patch
      * 之前只用背景线程轮询 (200ms间隔)，tersafe 在1秒内 kill 游戏，线程来不及激活
@@ -2147,6 +2251,50 @@ static void _adjust_code(void) {
     pthread_attr_destroy(&attr);
     hook_log("[CTOR] 150 _adjust_code done\n");
 }
+#endif
+
+/* Chainloading must run outside a dlopen constructor because Android's linker
+ * lock is not reentrant.  This worker never writes target code; it only loads
+ * the real QIMEI library and records the target module range used by caller
+ * filtering in the libc hooks. */
+static void *_activate_hooks_thread(void *unused) {
+    (void)unused;
+    pthread_once(&g_chainload_once, _do_chainload);
+
+    for (int retry = 0; retry < 300; retry++) {
+        uintptr_t base = get_module_base(C_tersafe);
+        if (base) {
+            g_ts_text_start = base;
+            g_ts_text_end = base + 0x600000;
+            hook_log("[hooks] target range discovered; code writes owned by forge\n");
+            break;
+        }
+        usleep(retry < 10 ? 10000 : 200000);
+    }
+    return NULL;
+}
+
+__attribute__((constructor(200)))
+static void _activate_hooks(void) {
+    hook_log("[CTOR] 200 _activate_hooks enter\n");
+
+    uintptr_t base = get_module_base(C_tersafe);
+    if (base) {
+        g_ts_text_start = base;
+        g_ts_text_end = base + 0x600000;
+    }
+
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&tid, &attr, _activate_hooks_thread, NULL) != 0)
+        hook_log("[hooks] chainload worker creation failed\n");
+    pthread_attr_destroy(&attr);
+
+    __atomic_store_n(&g_hooks_ready, 1, __ATOMIC_RELEASE);
+    hook_log("[hooks] v8.7 activated; patch ownership=forge\n");
+}
 
 /* ---- seccomp-bpf SIGSYS handler ---- */
 static volatile int g_bpf_active=0;
@@ -2164,6 +2312,8 @@ static void set_sigsys_x0(ucontext_t *uc,uint64_t val){
 }
 
 static void sigsys_handler(int sig,siginfo_t *info,void *ucontext){
+    (void)sig;
+    (void)info;
     g_sigsys_total++;
     ucontext_t *uc=(ucontext_t*)ucontext;
     uint64_t x0,x1,x2;
@@ -2264,6 +2414,31 @@ static const hook_prop_t HOOK_PROPS[]={
     PROFILE_ENTRY("ro.product.name","beyond1qltezc"),
     PROFILE_ENTRY("ro.build.product","beyond1q"),
     PROFILE_ENTRY("ro.product.brand","samsung"),
+    PROFILE_ENTRY("ro.product.odm.brand","samsung"),
+    PROFILE_ENTRY("ro.product.odm.device","beyond1q"),
+    PROFILE_ENTRY("ro.product.odm.manufacturer","samsung"),
+    PROFILE_ENTRY("ro.product.odm.model","SM-G9730"),
+    PROFILE_ENTRY("ro.product.odm.name","beyond1qltezc"),
+    PROFILE_ENTRY("ro.product.product.brand","samsung"),
+    PROFILE_ENTRY("ro.product.product.device","beyond1q"),
+    PROFILE_ENTRY("ro.product.product.manufacturer","samsung"),
+    PROFILE_ENTRY("ro.product.product.model","SM-G9730"),
+    PROFILE_ENTRY("ro.product.product.name","beyond1qltezc"),
+    PROFILE_ENTRY("ro.product.system.brand","samsung"),
+    PROFILE_ENTRY("ro.product.system.device","beyond1q"),
+    PROFILE_ENTRY("ro.product.system.manufacturer","samsung"),
+    PROFILE_ENTRY("ro.product.system.model","SM-G9730"),
+    PROFILE_ENTRY("ro.product.system.name","beyond1qltezc"),
+    PROFILE_ENTRY("ro.product.system_ext.brand","samsung"),
+    PROFILE_ENTRY("ro.product.system_ext.device","beyond1q"),
+    PROFILE_ENTRY("ro.product.system_ext.manufacturer","samsung"),
+    PROFILE_ENTRY("ro.product.system_ext.model","SM-G9730"),
+    PROFILE_ENTRY("ro.product.system_ext.name","beyond1qltezc"),
+    PROFILE_ENTRY("ro.product.vendor.brand","samsung"),
+    PROFILE_ENTRY("ro.product.vendor.device","beyond1q"),
+    PROFILE_ENTRY("ro.product.vendor.manufacturer","samsung"),
+    PROFILE_ENTRY("ro.product.vendor.model","SM-G9730"),
+    PROFILE_ENTRY("ro.product.vendor.name","beyond1qltezc"),
     PROFILE_ENTRY("ro.hardware","qcom"),
     PROFILE_ENTRY("ro.board.platform","msmnile"),
     PROFILE_ENTRY("ro.product.board","msmnile"),
@@ -2461,7 +2636,8 @@ int __system_property_get(const char *name, char *value) {
     }
     /* ro.build.* / ro.product.* 未在白名单 → 返回空 */
     if (name && (strncmp(name,"ro.build.",9)==0 || strncmp(name,"ro.product.",11)==0)) {
-        if (value) value[0] = '\0'; return 0;
+        if (value) value[0] = '\0';
+        return 0;
     }
     /* [P4] 非白名单属性: 缓存 + 频率抖动 */
     prop_cache_t *ce = prop_cache_find(name);
@@ -2485,6 +2661,22 @@ int __system_property_get(const char *name, char *value) {
     }
     if (value) { __builtin_memcpy(value, tmp, (size_t)real_len); value[real_len] = '\0'; }
     return real_len;
+}
+
+typedef int (*uname_t)(struct utsname *);
+static uname_t real_uname = NULL;
+
+int uname(struct utsname *buf) {
+    if (!real_uname) real_uname = (uname_t)dlsym(RTLD_NEXT, "uname");
+    int rc = real_uname ? real_uname(buf) : (int)syscall(SYS_uname, buf);
+    if (rc != 0 || !buf || !g_hooks_ready) return rc;
+    snprintf(buf->sysname, sizeof(buf->sysname), "Linux");
+    snprintf(buf->nodename, sizeof(buf->nodename), "localhost");
+    snprintf(buf->release, sizeof(buf->release), "4.14.190-perf+");
+    snprintf(buf->version, sizeof(buf->version),
+        "#1 SMP PREEMPT Tue Jun 15 10:30:00 KST 2021");
+    snprintf(buf->machine, sizeof(buf->machine), "aarch64");
+    return 0;
 }
 
 /* ---- JNI_OnLoad ---- */
@@ -2566,11 +2758,9 @@ int getifaddrs(struct ifaddrs **ifap) {
     /* 遍历所有接口，替换 AF_PACKET (AF_LINK) 的硬件地址 */
     for (struct ifaddrs *ifa = *ifap; ifa; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr) continue;
-        /* AF_PACKET = 17, sockaddr_ll: sll_halen + sll_addr */
-        if (ifa->ifa_addr->sa_family == 17 /* AF_PACKET */) {
-            /* sa_data[0..1] = protocol, sa_data[2..7] = MAC on AF_PACKET */
-            unsigned char *mac = (unsigned char*)ifa->ifa_addr->sa_data + 2;
-            memcpy(mac, FAKE_MAC, 6);
+        if (ifa->ifa_addr->sa_family == AF_PACKET) {
+            struct sockaddr_ll *sll = (struct sockaddr_ll *)ifa->ifa_addr;
+            if (sll->sll_halen >= 6) memcpy(sll->sll_addr, FAKE_MAC, 6);
         }
     }
     return 0;
@@ -2580,7 +2770,7 @@ int getifaddrs(struct ifaddrs **ifap) {
 typedef int (*ioctl_t)(int, unsigned long, ...);
 static ioctl_t _ioctl = NULL;
 
-int __attribute__((overloadable)) ioctl(int fd, unsigned long req, ...) {
+int FORGE_OVERLOADABLE ioctl(int fd, unsigned long req, ...) {
     va_list ap; va_start(ap, req);
     void *arg = va_arg(ap, void *); va_end(ap);
     if (!_ioctl) _ioctl = (ioctl_t)dlsym(RTLD_NEXT, "ioctl");

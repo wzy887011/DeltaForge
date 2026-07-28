@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# DeltaForge 环境检查 v4.1 — P0/P1/P2 全量检测
+# DeltaForge 8.7 环境检查 — P0/P1/P2 全量检测
 # 读取: /proc/[pid]/mem, /proc/[pid]/maps, /proc/cpuinfo, /proc/version, logcat, ss
 # 输出: /data/local/tmp/forge_check_result.txt
 # 修复: 属性/内核检测从游戏进程视角验证, GPMSDK.mmap3 运行时自动清理
@@ -78,10 +78,10 @@ check_prop_hook() {
     fi
 }
 
-check_prop_hook ro.product.manufacturer "Xiaomi"
-check_prop_hook ro.product.model "23049RAD8C"
-check_prop_hook ro.product.device "marble"
-check_prop_hook ro.product.brand "Xiaomi"
+check_prop_hook ro.product.manufacturer "samsung"
+check_prop_hook ro.product.model "SM-G9730"
+check_prop_hook ro.product.device "beyond1q"
+check_prop_hook ro.product.brand "samsung"
 check_prop_hook ro.build.tags "release-keys"
 check_prop_hook ro.build.type "user"
 check_prop_hook ro.debuggable "0"
@@ -185,7 +185,7 @@ if [ -n "$PID" ]; then
     if [ "$SECCOMP" = "2" ]; then
         pass "seccomp filter mode=2 (已安装)"
     elif [ "$HOOK_LOADED" = "1" ]; then
-        pass "seccomp filter 通过注入确认 (status=$SECCOMP, cgroup可能阻断)"
+        warn "hook 已加载但 Seccomp=$SECCOMP，inline SVC 仍是残余路径"
     else
         warn "seccomp: status=$SECCOMP (cgroup 阻断读取或未安装)"
     fi
@@ -194,12 +194,12 @@ if [ -n "$PID" ]; then
         && info "libGPM.so 已加载 — seccomp-bpf 已拦截其内联 svc" \
         || pass "libGPM.so 未加载"
 
-    cat /proc/$PID/root/proc/cpuinfo 2>/dev/null | grep -qE "Kailua|Snapdragon|0x51" \
-        && pass "cpuinfo hook 生效 (Snapdragon 8+ Gen1)" \
+    cat /proc/$PID/root/proc/cpuinfo 2>/dev/null | grep -qE "SM8150|Snapdragon|0x51" \
+        && pass "cpuinfo profile 生效 (Snapdragon 855)" \
         || warn "无法验证 cpuinfo hook"
 
-    cat /proc/$PID/root/proc/version 2>/dev/null | grep -qE "clang|5\.15\.74" \
-        && pass "version hook 生效 (clang 5.15.74)" \
+    cat /proc/$PID/root/proc/version 2>/dev/null | grep -qE "clang|4\.14\.190" \
+        && pass "version profile 生效 (4.14.190-perf+)" \
         || warn "无法验证 /proc/version hook"
 else
     warn "游戏未运行, 跳过 seccomp 验证"
@@ -245,22 +245,13 @@ else
         warn "libtersafe.so 未加载"
     fi
 
-    UE4BASE=$(grep libUE4.so /proc/$PID/maps 2>/dev/null | head -1 | cut -d'-' -f1)
-    if [ -n "$UE4BASE" ]; then
-        UE4BASE=$((16#$UE4BASE))
-        UA=$((UE4BASE + 0x1347F7F4))
-        UV=$(dd if=/proc/$PID/mem bs=4 count=1 skip=$((UA/4)) 2>/dev/null | xxd -p | tr -d '\n')
-        if [ -n "$UV" ]; then
-            [ "$UV" = "c0035fd6" ] && pass "UE4@0x1347F7F4 OK" \
-                || warn "UE4@0x1347F7F4=$UV"
-        fi
-    fi
+    info "UE4 static RVAs quarantined for Build ID 8187ddb9edbc9d5201201ffd7b008df3bfe533db"
 fi
 
 # --- 6. P2: Java 属性 ---
 echo ""; echo "--- 6. P2: Java 属性一致性 ---"
-for pair in "ro.product.manufacturer:Xiaomi" "ro.product.model:23049RAD8C" \
-            "ro.product.brand:Xiaomi" "ro.hardware:qcom"; do
+for pair in "ro.product.manufacturer:samsung" "ro.product.model:SM-G9730" \
+            "ro.product.brand:samsung" "ro.product.device:beyond1q" "ro.hardware:qcom"; do
     key="${pair%%:*}"
     exp="${pair##*:}"
     val=$(getprop "$key" 2>/dev/null)

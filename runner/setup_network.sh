@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================
-# setup_network.sh — DeltaForge v8.8 L0 网络层配置
+# setup_network.sh — DeltaForge v8.7 L0 网络层配置
 # 目标：将云机出口从数据中心 ASN 替换为移动运营商 ASN
 #
 # 使用前提：

@@ -1,273 +1,177 @@
-# DeltaForge 知识图谱
+# DeltaForge 8.7 代码知识图谱
 
-> 维护规则：每次修改代码后同步更新对应章节，不要每次重新扫描代码。
+> 用途：先按图谱定位修改面，再读取具体实现。每次代码、配置、部署路径或云机证据变化后同步更新本文件。
 
----
+## 1. 当前基线
 
-## 1. 项目定位
+| 项 | 当前真值 |
+|---|---|
+| 产品版本 | `8.7` |
+| 目标包名 | `com.tencent.tmgp.dfm` |
+| 设备画像 | Samsung `SM-G9730` / `beyond1q` |
+| OS 画像 | Android 11 / SDK 30 / user / release-keys |
+| SoC/GPU 画像 | Snapdragon 855 (`SM8150`, `msmnile`) / Adreno 640 |
+| TerSafe Build ID | `d70d7926094ae39a46745c12ddcc1877641f82e8` |
+| UE4 Build ID | `8187ddb9edbc9d5201201ffd7b008df3bfe533db` |
+| 代码表 | 75 条，全部要求 `expected` |
+| BSS 表 | 40 条，当前只有地址边界校验 |
+| UE4 表 | 0 条，旧 6 个 RVA 已隔离 |
+| 显示画像 | `1080x2280 @ 420dpi` |
 
-针对 **三角洲行动**（`com.tencent.tmgp.dfm`）的云手机（LXC容器）反检测系统。
-目标：让 LXC 云机通过 **TerSafe + GTI** 双层检测，伪装成真实 Samsung Galaxy S10 SM-G9730。
+`collector-r2`、`diagnostics-v2` 中的 `r2/v2` 是采集器迭代号，不是产品版本。
+历史文档中的 `v8.8.x` 是旧提交标签，只用于追溯；当前运行时、部署脚本和配置统一声明 `8.7`。
 
-- 当前版本：v8.8.3+kc（含 kKillChain tombstone_14 修复）
-- 仓库：`github.com:wzy887011/DeltaForge`
+## 2. 组件图
 
----
-
-## 2. 仓库结构
-
-```
-DeltaForge-repo/
-├── cloud-agent/native/          核心 C 代码（ARM64，Termux 原生编译）
-│   ├── forge.c                  主控守护进程（~1940行）
-│   ├── libforgehook.c           LD_PRELOAD 注入库（~2560行）
-│   ├── injector.c               ptrace 注入器（625行）
-│   ├── forge_monitor.c          行为监控守护（325行）
-│   ├── touch_injector.c         触控注入辅助（153行）
-│   ├── patch_loader.c/.h        JSON 偏移表解析（180+22行）
-│   ├── crypt_strings.h          字符串加密宏（168行）
-│   └── Makefile
-├── runner/
-│   ├── forge_controller.py      Python IPC 控制器
-│   ├── bot_runner.py            自动化运行器
-│   ├── config/
-│   │   ├── tersafe_patches.json 偏移表（不改代码即可热更新）
-│   │   └── forge_config.json
-│   ├── setup_network.sh         WireGuard L0 配置
-│   ├── proxy_pc_setup.bat       PC 端 SOCKS5 代理
-│   ├── proxy_phone.sh           云机端代理
-│   ├── get_resetprop.sh         云机自动下载 resetprop
-│   └── deploy_resetprop_pc.bat  PC 端推送 resetprop
-└── tools/
-    └── crypt_gen.py             加密字符串生成工具
-```
-
----
-
-## 3. 检测对抗层次（当前状态）
-
-| 层 | 名称 | 状态 | 实现位置 |
-|----|------|------|---------|
-| L0 | IP/ASN | ❌ 未配置 | `proxy_phone.sh` / `setup_network.sh` |
-| L1 | 内核 serial sysfs | ⏭ LXC 无此路径，跳过 | `forge.c:spoof_serial_bind()` |
-| L2 | 全局属性 IMEI/Serial | ⚠ 回退 build.prop 直改 | `forge.c:resetprop_identity()` → `modify_props_lxc()` |
-| L3 | OAID/VAID 文件 | ✅ 每次启动随机替换 | `forge.c:spoof_oaid_vaid()` |
-| L4 | SSAID | ⏭ 云机无该文件，跳过 | `forge.c:spoof_ssaid()` |
-| L5 | DFM 指纹缓存 | ✅ 21 项清理 | `forge.c:clean_dfm_fingerprints()` |
-| L6 | TerSafe 运行时 patch | ✅ 113 处（67+40BSS+6UE4） | `forge.c:patch_game_process()` |
-| L7 | 进程内属性 Hook | ✅ HOOK_PROPS 三星画像 | `libforgehook.c:__system_property_get hook` |
-| L8 | LXC/mountinfo 过滤 | ✅ v8.8.2+ 动态过滤 | `libforgehook.c:make_filtered_mountinfo_fd()` |
-| kKC | kKillChain | ✅ 10节点（含 tombstone_14） | `tersafe_patches.json` kKillChain[0-9] |
-| AC | AC 文件截断 | ✅ v8.8.3+ truncate 实现 | `forge.c:clean_all_ac_files()` |
-| Sensor | 传感器伪装 | ✅ v8.8.3+ SM-G9730 画像 | `libforgehook.c:OVERRIDE_FILES + opendir hook` |
-
----
-
-## 4. 核心文件关键函数速查
-
-### forge.c
-
-| 函数 | 行号约 | 作用 |
-|------|--------|------|
-| `do_prepare()` | ~1380 | 入口：L1-L5 全量伪装，启动前调用 |
-| `do_launch()` | ~1411 | 完整启动：do_prepare + 游戏 + patch + inject |
-| `clean_dfm_fingerprints()` | ~1324 | 删除14+项 DFM 指纹缓存文件 |
-| `clean_all_ac_files()` | ~700 | truncate 12项 AC/SDK 文件（不 unlink）|
-| `safe_trunc()` | ~693 | 截断文件到0字节的通用帮助函数 |
-| `patch_game_process()` | 见实现 | ptrace 附加 + 113处内存 patch |
-| `inject_hook()` | 见实现 | ptrace dlopen libforgehook.so |
-| `verify_tersafe_version()` | ~252 | ELF build-id 校验（JSON build_id 字段）|
-| `load_dyn_table()` | ~160 | 启动时从 JSON 加载偏移表 |
-| `resetprop_identity()` | ~659 | L2：resetprop 全局属性 |
-| `modify_props_lxc()` | 见实现 | L2b：LXC 回退，直改 build.prop |
-| `spoof_oaid_vaid()` | 见实现 | L3：OAID/VAID 随机化 |
-| `block_tdm_reporting()` | ~723 | 清理旧版 iptables 残留规则 |
-| `kill_suspicious_procs()` | 见实现 | 杀掉 frida-server 等可疑进程 |
-
-**do_prepare() 执行顺序**：
-```
-load_dyn_table → protect_devmode → kill_suspicious_procs → block_tdm_reporting
-→ clean_virt_traces → stop_game → sleep(2) → clean_dfm_fingerprints
-→ clean_all_ac_files → restore_dirs → adapt_properties
-→ spoof_serial_bind[L1] → resetprop_identity[L2] → spoof_oaid_vaid[L3]
-→ spoof_ssaid[L4] → settings put android_id
+```mermaid
+flowchart TD
+    D["cloud-agent/deploy.sh"] --> N["native/Makefile"]
+    D --> O["system_identity_overlay.sh"]
+    D --> V["verify_identity.sh"]
+    D --> J["runner/config/tersafe_patches.json"]
+    M["Magisk service.sh"] --> P["propspoof.sh"]
+    M --> F["native/forge"]
+    O --> S["系统状态: resetprop / bind mount / wm"]
+    F --> L["patch_loader.c"]
+    L --> J
+    F --> I["injector"]
+    I --> H["libforgehook.so"]
+    F --> G["目标游戏进程"]
+    H --> G
+    X["forge_monitor"] --> F
+    C["runner/forge_controller.py"] --> F
+    B["runner/bot_runner.py"] --> C
+    R["collect_device_state.sh"] --> A["diagnostics/*.tar.gz"]
+    V --> E["分层验证报告"]
 ```
 
-### libforgehook.c
+## 3. 节点职责
 
-| 组件/函数 | 行号约 | 作用 |
-|-----------|--------|------|
-| `HOOK_PROPS` 表 | 见实现 | SM-G9730 设备画像属性覆盖 |
-| `OVERRIDE_FILES` 表 | ~661 | sysfs/proc 文件内容覆盖表（顺序匹配，第一条命中） |
-| `HIDDEN` 列表 | ~711 | 访问这些路径返回 ENOENT |
-| `NULL_REDIRECT` 列表 | ~620 | 访问这些路径重定向到空 memfd |
-| `open()` hook | ~1019 | 拦截文件打开 |
-| `openat()` hook | ~1067 | 拦截文件打开（含 sensor 目录重定向）|
-| `opendir()` hook | ~1396 | 重定向 `/sys/class/sensors` → 伪传感器目录 |
-| `getdents64()` hook | ~1150 | 过滤 memfd/forgehook 条目 |
-| `tgkill()` hook | ~1182 | 拦截来自 tersafe 的自杀信号 |
-| `exit_group()` hook | ~1210 | 拦截来自 tersafe 的 exit_group |
-| `__system_property_get` hook | ~2173 | 属性欺骗 |
-| `make_filtered_mountinfo_fd()` | ~896 | 过滤 lxcfs/docker 挂载条目 |
-| `make_filtered_maps_fd()` | ~838 | 过滤 libforgehook 映射条目 |
-| `g_hooks_ready` | ~1001 | 0=透传原始调用，1=激活所有 hook |
-| `constructor(46)` `_create_fake_sensor_dir` | ~433 | 创建 `/data/local/tmp/.forge_s/` 假传感器目录 |
-| `constructor(47)` `_resolve_qimei_path` | ~464 | 解析 qimei.so 路径 |
-| `constructor(48)` `_probe_loaded` | ~148 | 随机后缀初始化 + 日志 |
-| `constructor(50)` `_hide_self_from_maps` | ~191 | mremap 隐藏自身映射 |
-| `constructor(150)` `_adjust_code` | ~2047 | 同步/异步 tersafe patch，激活 hooks |
+| 节点 | 入口/真源 | 负责内容 | 不负责内容 |
+|---|---|---|---|
+| 部署 | `cloud-agent/deploy.sh` | 编译、复制 native 产物、JSON、overlay、验证脚本，写 `v8.7` 版本戳 | 不证明游戏 namespace 已看到 overlay |
+| 系统 overlay | `cloud-agent/system_identity_overlay.sh` | Root 下 resetprop、只读 bind `/proc`/DT（含 osrelease/compatible）、显示覆盖，支持快照回滚 | 不改变真实内核、CPU 指令、GPU 驱动 |
+| Magisk 属性 | `cloud-agent/magisk/system/bin/propspoof.sh` | 启动阶段属性画像 | 不覆盖直接读取内核/驱动的路径 |
+| 主控 | `cloud-agent/native/forge.c` | 准备、启动、Build ID 校验、内存写入、注入、IPC | 不替换宿主内核或容器 namespace |
+| 偏移加载 | `patch_loader.c/.h` | 无依赖 JSON 解析 | 不决定 Build ID 是否匹配运行目标 |
+| 偏移真源 | `runner/config/tersafe_patches.json` | Build ID、75 条代码项、40 条 BSS、可选 UE4 项 | 不允许缺失 `expected` 的代码项 |
+| 进程 Hook | `cloud-agent/native/libforgehook.c` | QIMEI chainload；属性、文件、maps、uname、GPU、网络接口、传感器等用户态读取路径 | 不写 TerSafe/UE4 代码；不覆盖 inline `SVC`、真实内核/驱动行为、进程外读取 |
+| 注入器 | `cloud-agent/native/injector.c` | ptrace 附加全部线程并只执行 `dlopen` Hook 库 | 不持有偏移表，不写目标模块代码，不提供系统级覆盖 |
+| 监控器 | `cloud-agent/native/forge_monitor.c` | 运行状态和告警 IPC | 不应维护另一套硬编码 patch 真源 |
+| 控制器 | `runner/forge_controller.py` | SipHash 认证协议和命令调用 | 不直接修改目标进程 |
+| 自动化 | `runner/bot_runner.py` | 读取嵌套配置、创建控制器、编排操作 | 不拥有 native 偏移真源 |
+| 采集器 | `cloud-agent/collect_device_state.sh` | 只读采集云机证据并打包 | `r2/v2` 不参与产品版本统一 |
+| 验证器 | `cloud-agent/verify_identity.sh` | 属性、内核节点、mount、SELinux、KGSL、Hook、Seccomp 分层检查 | WARN 不等价于覆盖成功 |
 
-**HOOKS_READY 激活时机**：constructor(150) 找到 libtersafe.so 后设为1；超时兜底30s/60s。
+## 4. 关键数据流
 
----
+### 启动与写入
 
-## 5. 传感器伪装架构（v8.8.3+）
+`deploy.sh` -> `/data/local/tmp/*` -> `forge -l` -> `load_dyn_table()` -> 等待目标模块 ->
+读取磁盘 ELF Build ID -> 逐条核对 `expected` -> 写入 -> `injector` -> `libforgehook.so`。
 
-```
-游戏访问传感器
-  ├── opendir("/sys/class/sensors")
-  │   └── opendir hook → _opendir("/data/local/tmp/.forge_s")
-  │       └── 真实目录：accelerometer_sensor/ gyro_sensor/ magnetic_sensor/ ...
-  │           （由 constructor(46) 在 SO 加载时创建）
-  │
-  ├── open("/sys/class/sensors/accelerometer_sensor/name")
-  │   └── OVERRIDE_FILES 匹配 → memfd 返回 "K6DS3TR Acceleration\n"
-  │
-  └── open("/sys/class/sensors/*/vendor")
-      └── OVERRIDE_FILES 匹配 → memfd 返回对应厂商名
-```
+写入不变量：
 
-SM-G9730 传感器画像：
-| 传感器 | name | vendor |
-|--------|------|--------|
-| accelerometer_sensor | K6DS3TR Acceleration | STMicro |
-| gyro_sensor | K6DS3TR Gyroscope | STMicro |
-| magnetic_sensor | MMC5633NJ mag | Memsic |
-| proximity_sensor | proximity | Samsung |
-| light_sensor | light | Samsung |
-| pressure_sensor | BARO_PRESSURE_Sensor | STMicro |
+1. JSON 必须存在且解析成功。
+2. `build_id` 必须存在并与磁盘 `libtersafe.so` 一致。
+3. TerSafe 必须正好 75 条，BSS 必须正好 40 条。
+4. 每条 TerSafe/UE4 代码项必须带 `expected`。
+5. 非空 UE4 表必须携带并匹配独立的 `ue4_build_id`。
+6. 首次写入、维护回写、快速链和 IPC 紧急回写都调用 `safe_verify_and_write()`。
+7. 可执行文件内的旧静态表位于 `#if 0`，不参与编译和回退。
+8. UE4 当前为空；完成当前 Build ID 的重新定位前保持隔离。
+9. `forge.c` 是唯一目标模块写入所有者；`injector.c` 与 `libforgehook.c` 的活动代码无硬编码 patch 表或指令写入。
+10. 默认启动不设置 `wrap.PKG`：游戏启动后先完成 validated write，再由 injector `dlopen` Hook；旧 wrap 属性在 prepare 阶段清除。
+11. BSS 只写 JSON 中的 40 个显式地址；不扫描或猜测低值计数器。
+12. 写入前先完整预检 75 个代码点和 40 个 BSS 地址；任一预检/写入失败即取消 Hook 注入并停止该次游戏启动，不进入部分生效状态。
+13. 部署编译前先复制已有 native 产物；`--dry-run` 不写 `/data/local/tmp`，部署元数据只在旧版本备份完成后更新。
+14. injector 成功 `dlopen` 后远程 `munmap` 8 KiB 调用区，并在所有错误路径 detach 全部已附加线程；清理失败视为启动失败。
 
----
+### 身份读取
 
-## 6. TerSafe Patch 体系
+`resetprop` 提供全局 Android 属性；只读 bind 提供当前 mount namespace 的 `/proc`/DT 文本；
+`libforgehook.so` 只在游戏进程内覆盖 libc/JNI/图形接口读取。三条路径必须返回同一画像。
+`ro.product.{odm,product,system,system_ext,vendor}.*` 与基础 `ro.product.*` 使用同一画像。
 
-- **build_id**：`d70d7926094ae39a46745c12ddcc1877641f82e8`（已填入 forge.c 和 JSON）
-- **JSON 路径（云机）**：`/data/local/tmp/forge_patches.json`
-- **结构**：
-  - `tersafe_patches`：67 条（代码段 patch：MOV W0,#0xFF / RET / BR X30）
-  - `tersafe_bss`：40 个 BSS 偏移（清零 DWORD）
-  - `ue4_patches`：6 条（UE4 detect 函数 RET）
-  - `kKillChain[0-9]`：10 节点（含 tombstone_14 的 0x36BC8C-0x371210）
+### 回滚
 
-**更新偏移表流程（无需重编译）**：
+`system_identity_overlay.sh apply` 首次保存属性、显示参数；`rollback` 卸载 bind、恢复显示、恢复或删除原属性。
+原始 `/proc`、sysfs 和设备树节点不被写入。
+
+## 5. 修改联动矩阵
+
+| 修改目标 | 必查/必改文件 |
+|---|---|
+| 产品版本 | `Makefile` 宏、`deploy.sh` 版本戳、Magisk `module.prop`、运行日志、README/指南；不改采集器 r2/v2 |
+| 设备/SoC/GPU 画像 | `system_identity_overlay.sh`、`propspoof.sh`、`libforgehook.c`、`forge.c`、`forge_config.json`、`verify_identity.sh`、相关文档 |
+| TerSafe 版本/偏移 | `tersafe_patches.json`、Build ID 常量、表数量断言、测试；先采集原 opcode |
+| UE4 RVA | 先确认 UE4 Build ID，再填 `expected`；禁止恢复旧 6 项 |
+| IPC 协议 | `forge.c` wire body/MAC 与 `forge_controller.py` 必须成对修改，并运行协议测试 |
+| 部署路径 | `deploy.sh`、Magisk `service.sh`、操作指南、验证脚本 |
+| Hook 文件接口 | `open/fopen/access/stat/lstat/fstatat/statx/faccessat2` 行为必须一致 |
+| constructor 顺序 | `libforgehook.c` 合法优先级区间：101/102/103/104 -> 150 -> 170 -> 200 |
+| 内存写入所有权 | 只修改 `forge.c` + `patch_loader.c/.h` + `tersafe_patches.json`；`injector.c`/`libforgehook.c` 不新增偏移表或目标代码写入 |
+
+## 6. 云机证据
+
+collector-r2 已确认的宿主事实：
+
+- Rockchip RK3588S / AntDock / Cortex-A55+A76。
+- LXC/overlay mount 痕迹。
+- SELinux disabled。
+- `/system/xbin/s9su`、`script_guard`、Rockchip vendor service。
+- 缺少真实 Qualcomm KGSL 和 `soc0` 节点。
+- 物理显示 720x1280；逻辑覆盖设置为 1080x2280。
+- 游戏进程 `Seccomp: 0`，inline `SVC` 可绕过 libc Hook。
+
+尚待云机复测：
+
+- Root 执行的 bind 是否传播到游戏 mount namespace。
+- 75 个 `expected` 在干净冷启动映射上是否全部匹配。
+- GLES/EGL/Vulkan 导出符号是否被目标实际调用。
+- 属性回滚、显示回滚、bind 回滚是否完整。
+
+## 7. 层级与检测面
+
+| 层 | 当前实现 | 检测面 |
+|---|---|---|
+| Root 权限层 | 部署、resetprop、mount、ptrace | Root 工具路径、UID/进程、策略状态仍可暴露 |
+| 系统状态层 | 属性、bind、wm | 只在获得该状态/namespace 的读取者可见 |
+| 游戏进程层 | `libforgehook.so` 用户态 Hook | direct syscall、完整性扫描、进程外采集可绕过 |
+| 宿主内核/驱动层 | 未替换 | CPU 行为、KGSL、SELinux、容器拓扑仍是真实宿主 |
+
+因此当前是 Root 驱动的混合覆盖，不是把云机底层整体变成真机。检测风险仍存在，优先级为：
+宿主镜像/内核事实 > mount namespace 传播 > direct syscall > 进程内一致性。
+
+## 8. 验证入口
+
+本地/CI：
+
 ```bash
-# PC 编辑 runner/config/tersafe_patches.json
-git add runner/config/tersafe_patches.json && git commit -m "fix: offset update"
-git push origin master
-# 云机
-cd ~/DeltaForge && git pull && su -c "cp runner/config/tersafe_patches.json /data/local/tmp/forge_patches.json"
+python -m unittest discover -s tests -v
+python -m py_compile runner/forge_controller.py runner/bot_runner.py
+bash -n cloud-agent/deploy.sh cloud-agent/system_identity_overlay.sh cloud-agent/verify_identity.sh
 ```
 
----
+云机：
 
-## 7. 已知可能的编译问题
-
-| 症状 | 原因 | 修复 |
-|------|------|------|
-| `chmod755` | shell 无空格 | 改 `chmod 755` |
-| `-p2>&1` | 参数解析错误 | 改 `-p 2>&1`（有空格） |
-| `ioctl overloadable` | Bionic 需要 overloadable 属性 | v8.7 已修复 |
-| `modify_props_lxc undeclared` | 前向声明缺失 | v8.8.3 已修复 |
-| `pkill forge` 杀死自身 | 同一命令链 | 分两条 `su -c` |
-
----
-
-## 8. 日常操作速查
-
-### 编译（云机 Termux）
 ```bash
-cd ~/DeltaForge/cloud-agent/native && make termux
+su -c /data/local/tmp/system_identity_overlay.sh apply
+su -c /data/local/tmp/forge -l
+su -c /data/local/tmp/verify_identity.sh
+su -c /data/local/tmp/system_identity_overlay.sh status
 ```
 
-### 部署（云机）
+回滚：
+
 ```bash
-su -c "cp $HOME/DeltaForge/cloud-agent/native/forge /data/local/tmp/forge && chmod 755 /data/local/tmp/forge"
-su -c "cp $HOME/DeltaForge/cloud-agent/native/libforgehook.so /data/local/tmp/libforgehook.so && chmod 755 /data/local/tmp/libforgehook.so"
-su -c "cp $HOME/DeltaForge/runner/config/tersafe_patches.json /data/local/tmp/forge_patches.json"
+su -c /data/local/tmp/system_identity_overlay.sh rollback
 ```
 
-### 启动
-```bash
-su -c "/data/local/tmp/forge -l > /data/local/tmp/forge.log 2>&1 &"
-sleep 3 && su -c "tail -30 /data/local/tmp/forge.log"
-```
+## 9. 图谱维护规则
 
-### 调试
-```bash
-su -c "cat /data/local/tmp/forge.log"          # 完整日志
-su -c "ls -lt /data/tombstones/ | head -5"     # 崩溃 tombstone
-su -c "cat /proc/$(pidof com.tencent.tmgp.dfm)/maps | grep libforgehook"  # hook 注入确认
-su -c "sh /data/local/tmp/diagnose_device.sh 2>&1 | head -50"             # 设备诊断
-```
-
-### forge 参数
-```
--l  launch（最常用）：do_prepare + 启动游戏 + ptrace patch + inject hook
--p  prepare 只：只执行 do_prepare，不启动游戏
--m  patch only：对已运行的游戏进程注入
--s  status：检查游戏是否在运行
--c  clean：清理 AC 文件
--d  daemon：启动 UDS 服务端
-```
-
----
-
-## 9. 云机环境
-
-| 属性 | 值 |
-|------|---|
-| 类型 | LXC 容器 |
-| Android | 12 (SDK 32) |
-| 目标画像 | SM-G9730 beyond1q Android 11 |
-| Root | 天然 UID 0（无 Magisk）|
-| 游戏 UID | 10071 |
-| Termux 用户 | u0_a73 |
-
-**LXC 限制说明**：
-- 无 `/sys/devices/soc0/` → L1 serial sysfs 跳过
-- 无 Magisk → `resetprop` 需手动部署（`get_resetprop.sh`）
-- 无 TEE → Key Attestation bypass 不可行
-- 无真实基带 → SIM 相关检测依赖 Hook 覆盖
-
----
-
-## 10. 核心文件路径（云机）
-
-| 用途 | 路径 |
-|------|------|
-| 主控程序 | `/data/local/tmp/forge` |
-| Hook 库 | `/data/local/tmp/libforgehook.so` |
-| ptrace 注入器 | `/data/local/tmp/injector` |
-| 偏移表 | `/data/local/tmp/forge_patches.json` |
-| 伪传感器目录 | `/data/local/tmp/.forge_s/` |
-| forge 日志 | `/data/local/tmp/forge.log` |
-| hook 日志 | `/data/data/com.tencent.tmgp.dfm/files/forge_hook.log` |
-| resetprop | `/data/local/tmp/resetprop`（需手动部署）|
-| OAID | `/data/system/oaid_persistence_0` |
-| VAID | `/data/system/vaid_persistence_platform` |
-
----
-
-## 11. 版本变更记录（精简）
-
-| 版本 | 关键改动 |
-|------|---------|
-| v8.5 | 全量架构：ELF版本校验、双相轮询、UDS IPC、forge_monitor |
-| v8.6 | MAC/IMEI/Android ID 欺骗 |
-| v8.7 | GPU属性补全（Adreno/SoC/GLES）|
-| v8.8 | L1-L5 深层伪装 + L0 网络脚本 |
-| v8.8.1 | resetprop standalone + PC/Phone 代理链 |
-| v8.8.2 | mountinfo/cgroup LXC 过滤 |
-| v8.8.3 | 编译错误修复 + mountinfo 行终止符 bug |
-| v8.8.3+kc | kKillChain +4（tombstone_14 新路径）|
-| **v8.8.3+** | **build_id 填入 + clean_ac_files truncate 重写 + 传感器伪装** |
+1. 改代码前先查“修改联动矩阵”和对应节点，只读必要文件。
+2. 新增入口、配置真源、跨模块协议或部署路径时，必须新增节点与边。
+3. 云机采集结论分为“已确认”和“待复测”，不以设计推断替代证据。
+4. 版本号只描述产品基线；诊断采集器使用独立 `rN` 标识。
+5. 文件行号易漂移，图谱优先记录函数名、配置键和命令入口。

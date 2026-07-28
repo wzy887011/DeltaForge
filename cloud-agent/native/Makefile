@@ -4,7 +4,7 @@ NDK ?= $(HOME)/Android/Sdk/ndk/26.3.11579264
 TARGET = aarch64-linux-android21
 CC = $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/$(TARGET)-clang
 CFLAGS_STATIC = -static -Os -Wall -fno-stack-protector -fomit-frame-pointer
-CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION=8
+CFLAGS_SHARED = -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION=87
 
 all: forge libforgehook.so touch_injector injector forge_monitor
 
@@ -65,7 +65,7 @@ host:
 # Termux 设备原生编译 — 无独立 libpthread/libc，去掉 -static/-lpthread
 termux:
 	clang -Os -Wall -fno-stack-protector -fomit-frame-pointer forge.c patch_loader.c -o forge
-	clang -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION=8 libforgehook.c -o libforgehook.so -ldl
+	clang -shared -fPIC -Os -Wall -fno-stack-protector -DFORGEHOOK_VERSION=87 libforgehook.c -o libforgehook.so -ldl
 	@if command -v patchelf >/dev/null 2>&1; then \
 		patchelf --remove-rpath libforgehook.so; \
 		echo "[termux] RUNPATH stripped from libforgehook.so"; \

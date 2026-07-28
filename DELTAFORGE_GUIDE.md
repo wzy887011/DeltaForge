@@ -1,6 +1,6 @@
-# DeltaForge v8.5 — 完整技术指南
+# DeltaForge v8.7 — 完整技术指南
 
-> 版本: v8.5 | commit: 70fdcb0 | 最后更新: 2026-07-26
+> 版本: v8.7 | 最后更新: 2026-07-28
 
 ---
 
@@ -64,25 +64,26 @@ DeltaForge 是针对 **Android ARM64 云手机**的运行时环境管理工具�
 |------|------|------|---------|
 | `libforgehook.c` | ~2300 | 进程内注入库，实现L2/L3/L4 | ptrace dlopen 注入 |
 | `forge.c` | ~1300 | 主控守护进程，实现L5 | 独立进程，root 运行 |
-| `injector.c` | 612 | ptrace 注入器 v8.5 | forge 调用 |
+| `injector.c` | ~600 | ptrace `dlopen` 加载器 v8.7 | forge 校验写入成功后调用 |
 | `forge_monitor.c` | ~300 | 行为监控器 | 独立进程 |
 | `touch_injector.c` | ~150 | 虚拟触摸输入 | 可选 |
 | `crypt_strings.h` | ~200 | 加密字符串常量 | 编译期混淆 |
 
-### 2.3 注入流程 (v8.5)
+### 2.3 注入流程 (v8.7)
 
 ```
 forge 启动
     ↓
 等待游戏进程启动 (get_pid_by_name)
     ↓
-外部 patch tersafe 67处代码 + 40处BSS + 6处UE4 (先patch,防注入窗口)
+加载 JSON，校验 Build ID，并预检 75 个代码点 + 40 个BSS地址（UE4为0）
+    ↓
+forge 完成 75/75 + 40/40 validated write；任一失败则停止游戏
     ↓
 stage_hook_so: 复制 libforgehook.so 到游戏 app lib 目录 (绕 Android namespace)
     ↓
 injector fork+execv:
   ├── PTRACE_ATTACH 主线程 + 所有其他线程 (83+ 个)
-  ├── patch_kill_chain_while_paused: 6/6 节点 patch 为 RET
   ├── 解析 dlopen 地址 (dlsym → /proc/self/maps → offset → 目标 maps)
   ├── find_svc_gadget: 搜索目标 libc.so/linker64 中 SVC #0 指令
   ├── remote_syscall(mmap): ptrace 远程调用 mmap 分配 RWX 8KB
@@ -94,16 +95,18 @@ injector fork+execv:
   ├── 恢复寄存器 + PTRACE_DETACH 所有线程
     ↓
 libforgehook.so 构造函数链自动执行:
-  constructor(47)  → chainload 原版 qimei
-  constructor(48)  → 随机后缀生成
-  constructor(50)  → mremap 自隐藏
-  constructor(120) → GPU hook 初始化
-  constructor(150) → kKillChain patch + 激活
+  constructor(101) → 伪传感器目录
+  constructor(102) → 解析原版 qimei 路径
+  constructor(103) → 随机后缀生成
+  constructor(104) → mremap 映射规范化
+  constructor(150) → linker list 处理
+  constructor(170) → GPU hook 初始化
+  constructor(200) → 激活 Hook + 异步 chainload/模块范围发现（不写目标代码）
     ↓
-forge 守护: 每 100ms 轮询重推所有补丁
+forge 守护: 所有代码回写继续走 JSON 条目与 expected 校验
 ```
 
-### 2.4 kKillChain 检测链拦截
+### 2.4 单写入所有权
 
 tersafe 检测到异常后沿固定调用链执行 kill：
 
@@ -116,13 +119,10 @@ detect_entry (0x419fdc)
     → tgkill syscall → SIGKILL
 ```
 
-DeltaForge 将链上 6 个节点全部 patch 为 `RET` (0xD65F03C0)，阻断信号发出。0x419fe0 额外补一个 NOP (0xD2800000)。
-
-**三级回退定位机制（v8.1）**：
-```
-硬编码偏移验证 → 失败 → 多指令序列扫描 (pattern_scan_seq)
-                       → 失败 → 单指令特征扫描 (pattern_scan4)
-```
+这 6 个地址属于 JSON 的 75 项代码表，并作为高频维护子集使用。`forge.c` 是唯一
+目标模块写入所有者；旧 `pattern_scan_seq` / `pattern_scan4` 与 Hook 内置表已置于
+`#if 0`，injector 只负责远程 `dlopen`。运行时不再使用未经 Build ID 和 expected
+opcode 约束的回退定位。
 
 ### 2.5 GPU Hook（v8.2）
 
@@ -131,7 +131,7 @@ caller-aware 实现，只拦截 `libtersafe.so` 发起的调用：
 ```c
 // __builtin_return_address(0) 判断调用方是否在 tersafe 代码段
 if (caller ∈ [g_ts_code_start, g_ts_code_end)):
-    返回假 Adreno 740 信息
+    返回 Adreno 640 / Qualcomm 画像
 else:
     透传真实 GPU 值 (UE4 正常初始化渲染)
 ```
@@ -198,7 +198,7 @@ DeltaForge/
 │   │   ├── libforgehook.c      # 核心注入库 (~2300行, ~99KB)
 │   │   ├── forge.c             # 守护进程主控 (~1300行, ~53KB)
 │   │   ├── forge_monitor.c     # 行为监控器 (~300行, ~11KB)
-│   │   ├── injector.c          # ptrace 注入器 v8.5 (612行, ~24KB)
+│   │   ├── injector.c          # ptrace dlopen 加载器 v8.7
 │   │   ├── touch_injector.c    # 触摸注入（可选,~150行）
 │   │   ├── crypt_strings.h     # 加密字符串常量 (~200行)
 │   │   └── Makefile
@@ -474,6 +474,7 @@ grep "bss" /data/local/tmp/forge_repair.log
 | v8.3 | 代码审查全面清理: 重复include / BSS sweep逻辑 / forge_monitor syscall一致性 / Frida/Xposed检测 / 调换注入顺序 / 冻结所有线程 |
 | v8.4 | injector 信号感知等待循环 — WSTOPSIG 检测 + WIFSIGNALED + EINTR 重试 + SIGSEGV 诊断 |
 | **v8.5** | **ptrace mmap RWX — 根除栈不可执行导致的 SIGSEGV + find_svc_gadget + remote_syscall** |
+| **v8.7** | **JSON 单一真源、全表预检、单写入所有权、身份 overlay 与分层验证** |
 
 ---
 
@@ -481,7 +482,7 @@ grep "bss" /data/local/tmp/forge_repair.log
 
 | 限制 | 说明 | 影响 |
 |------|------|------|
-| BSS 偏移硬编码 | 40 处静态偏移，tersafe 更新后需手动重新分析 | 每次 game 大版本更新需维护 |
+| BSS 仅地址约束 | JSON 中 40 个显式偏移尚无逐项 expected 值 | 大版本更新需重新采集与语义分析 |
 | seccomp-BPF 禁用 | exit_group 拦截导致 ART 崩溃，已禁用 | 由L4代码patch补偿 |
 | SELinux RWX 可能拒绝 | 部分云手机可能不允许匿名 RWX 映射 | v8.5 有 RW→mprotect RX 回退路径 |
 | 云手机后台杀进程 | 切换 Termux 时游戏可能被系统 SIGKILL | 保持游戏前台 + 用 --auto 模式 |
@@ -491,4 +492,4 @@ grep "bss" /data/local/tmp/forge_repair.log
 > 仓库: https://github.com/wzy887011/DeltaForge
 > 本地: `D:\下载\cc-chain-forge (3)\DeltaForge-repo`
 > 云手机: `/data/data/com.termux/files/home/DeltaForge/`
-> 版本: **v8.5** | commit: `70fdcb0`
+> 当前版本: **v8.7**
