@@ -7,7 +7,7 @@ proxies:
   - name: PC-Home
     type: socks5
     server: 183.161.248.96
-    port: 1080
+    port: 19443
     username: forge
     password: Q3DLo_jYvBCAZkJpDCOmdQ
 

@@ -6,7 +6,7 @@ from datetime import datetime
 from collections import defaultdict
 
 HOST     = "0.0.0.0"
-PORT     = 1080
+PORT     = 19443
 USERNAME = "forge"
 PASSWORD = "Q3DLo_jYvBCAZkJpDCOmdQ"   # set once, stable across restarts
 
