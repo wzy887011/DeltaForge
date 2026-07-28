@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-# Read-only DeltaForge device-state collector for Termux.
+# Read-only DeltaForge device-state collector for Termux (v2).
 set +e
 
 TERMUX_PREFIX=/data/data/com.termux/files/usr
@@ -94,6 +94,7 @@ run getprop ro.product.cpu.abi
 run getprop ro.product.cpu.abilist
 run getprop ro.boot.container
 run getprop ro.kernel.qemu
+run getprop "wrap.$PKG"
 getprop >"$OUT/getprop_all.txt" 2>&1
 
 section "ROOT AND SELINUX"
@@ -187,6 +188,15 @@ if [ -f "$REPO/runner/config/forge_config.json" ]; then
     cp -p "$REPO/runner/config/forge_config.json" "$OUT/repo_forge_config.json"
 fi
 
+# Preserve the exact deployed ELF files for offline source/binary comparison.
+mkdir -p "$OUT/deployed_binaries"
+for f in /data/local/tmp/forge /data/local/tmp/libforgehook.so \
+         /data/local/tmp/injector /data/local/tmp/forge_monitor; do
+    if [ -f "$f" ]; then
+        cp -p "$f" "$OUT/deployed_binaries/$(basename "$f")"
+    fi
+done
+
 section "MAGISK OR ROOT MODULE FILES"
 for d in /data/adb/modules/*; do
     [ -d "$d" ] || continue
@@ -231,6 +241,34 @@ while IFS= read -r apk; do
     ls -laZ "$apk"
     sha256sum "$apk"
 done <"$OUT/apk_paths.txt"
+
+APK_PATH="$(head -n 1 "$OUT/apk_paths.txt" 2>/dev/null)"
+APP_ROOT="$(dirname "$APK_PATH" 2>/dev/null)"
+APP_LIB_DIR="$APP_ROOT/lib/arm64"
+echo "app_lib_dir=$APP_LIB_DIR"
+if [ -d "$APP_LIB_DIR" ]; then
+    ls -laZ "$APP_LIB_DIR" >"$OUT/app_lib_dir_listing.txt" 2>&1
+    mkdir -p "$OUT/app_hook_binaries"
+    for f in "$APP_LIB_DIR"/libforgehook.so "$APP_LIB_DIR"/libtdmqimei*.so; do
+        [ -f "$f" ] || continue
+        b="$(basename "$f")"
+        echo "app_hook_candidate=$f"
+        ls -laZ "$f"
+        sha256sum "$f"
+        have file && file "$f"
+        size="$(stat -c %s "$f" 2>/dev/null)"
+        if [ -n "$size" ] && [ "$size" -le 10485760 ]; then
+            cp -p "$f" "$OUT/app_hook_binaries/$b"
+        fi
+        if [ -n "$READELF" ]; then
+            "$READELF" -h -l -d -n "$f" >"$OUT/app_elf_${b}.txt" 2>&1
+            "$READELF" --dyn-syms --wide "$f" >"$OUT/app_dynsym_${b}.txt" 2>&1
+        fi
+    done
+fi
+copy_tail "/data/data/$PKG/files/forge_hook.log" app_forge_hook.log 10000
+copy_tail /sdcard/forge_hook.log sdcard_forge_hook.log 10000
+find /data/local/tmp/.forge_s -maxdepth 3 -type f -exec ls -laZ {} \; >"$OUT/fake_sensor_files.txt" 2>&1
 
 PID="$(pidof "$PKG" 2>/dev/null | awk '{print $1}')"
 echo "game_pid=${PID:-not-running}"
@@ -293,6 +331,63 @@ if [ -n "$PID" ] && [ -r "/proc/$PID/maps" ]; then
         cat "$OUT/tersafe_patch_bytes.txt"
     else
         echo "snapshot skipped: game/libtersafe/patch JSON not available"
+    fi
+
+    section "TERSAFE BSS BYTE SNAPSHOT"
+    BSS_LINE="$(awk '
+        /libtersafe\.so/ { seen=1; next }
+        seen && /\[anon:\.bss\]/ { print; exit }
+        seen && /\.so/ { exit }
+    ' "$OUT/game_maps.txt")"
+    if [ -n "$BSS_LINE" ] && [ -f "$PATCH_JSON" ]; then
+        BSS_RANGE="$(printf '%s\n' "$BSS_LINE" | awk '{print $1}')"
+        BSS_BASE_HEX="${BSS_RANGE%%-*}"
+        BSS_BASE_DEC=$((0x$BSS_BASE_HEX))
+        echo "bss_map_line=$BSS_LINE"
+        echo "offset expected_zero process_memory_le" >"$OUT/tersafe_bss_bytes.txt"
+        sed -n '/"tersafe_bss"/,/"ue4_patches"/p' "$PATCH_JSON" | \
+            grep -o '0x[0-9A-Fa-f]\+' | \
+        while read -r off; do
+            off_dec=$((16#${off#0x}))
+            addr_dec=$((BSS_BASE_DEC + off_dec))
+            mem_bytes="$(dd if="/proc/$PID/mem" bs=1 skip="$addr_dec" count=4 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+            [ -n "$mem_bytes" ] || mem_bytes=unreadable
+            printf '%s 00000000 %s\n' "$off" "$mem_bytes" >>"$OUT/tersafe_bss_bytes.txt"
+        done
+        cat "$OUT/tersafe_bss_bytes.txt"
+    else
+        echo "BSS snapshot skipped: mapping or patch JSON unavailable"
+    fi
+
+    section "UE4 PATCH BYTE SNAPSHOT"
+    UE4_MAPLINE="$(grep -F 'libUE4.so' "$OUT/game_maps.txt" | head -n 1)"
+    if [ -n "$UE4_MAPLINE" ] && [ -f "$PATCH_JSON" ]; then
+        UE4_RANGE="$(printf '%s\n' "$UE4_MAPLINE" | awk '{print $1}')"
+        UE4_MAPOFF="$(printf '%s\n' "$UE4_MAPLINE" | awk '{print $3}')"
+        UE4_START_HEX="${UE4_RANGE%%-*}"
+        UE4_BASE_DEC=$((0x$UE4_START_HEX - 0x$UE4_MAPOFF))
+        UE4_PATH="$(printf '%s\n' "$UE4_MAPLINE" | awk '{print $6}')"
+        echo "ue4_map_line=$UE4_MAPLINE"
+        printf 'ue4_load_base=0x%x\n' "$UE4_BASE_DEC"
+        echo "offset expected_word file_at_rva_le process_memory_le" >"$OUT/ue4_patch_bytes.txt"
+        sed -n '/"ue4_patches"/,$p' "$PATCH_JSON" | \
+            sed -n 's/.*"offset"[[:space:]]*:[[:space:]]*"\(0x[0-9A-Fa-f]*\)".*"value"[[:space:]]*:[[:space:]]*"\(0x[0-9A-Fa-f]*\)".*/\1 \2/p' | \
+        while read -r off expected; do
+            off_dec=$((16#${off#0x}))
+            addr_dec=$((UE4_BASE_DEC + off_dec))
+            file_bytes=unavailable
+            mem_bytes=unavailable
+            if [ -f "$UE4_PATH" ]; then
+                file_bytes="$(dd if="$UE4_PATH" bs=1 skip="$off_dec" count=4 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+                [ -n "$file_bytes" ] || file_bytes=unreadable
+            fi
+            mem_bytes="$(dd if="/proc/$PID/mem" bs=1 skip="$addr_dec" count=4 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+            [ -n "$mem_bytes" ] || mem_bytes=unreadable
+            printf '%s %s %s %s\n' "$off" "$expected" "$file_bytes" "$mem_bytes" >>"$OUT/ue4_patch_bytes.txt"
+        done
+        cat "$OUT/ue4_patch_bytes.txt"
+    else
+        echo "UE4 snapshot skipped: mapping or patch JSON unavailable"
     fi
 else
     echo "Game is not running; process maps and patch bytes were not collected."
