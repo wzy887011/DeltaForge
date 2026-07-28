@@ -1,6 +1,6 @@
 mixed-port: 7890
 allow-lan: false
-mode: rule
+mode: global
 log-level: silent
 
 proxies:
@@ -10,17 +10,11 @@ proxies:
     port: 48912
 
 proxy-groups:
-  - name: GAME
+  - name: GLOBAL
     type: select
     proxies:
       - PC-Home
       - DIRECT
 
 rules:
-  - DOMAIN-SUFFIX,qq.com,GAME
-  - DOMAIN-SUFFIX,tencent.com,GAME
-  - DOMAIN-SUFFIX,wegame.com.cn,GAME
-  - IP-CIDR,203.205.0.0/16,GAME
-  - IP-CIDR,14.17.0.0/16,GAME
-  - IP-CIDR,113.96.0.0/14,GAME
-  - MATCH,DIRECT
+  - MATCH,GLOBAL
