@@ -175,3 +175,13 @@ su -c /data/local/tmp/system_identity_overlay.sh rollback
 3. 云机采集结论分为“已确认”和“待复测”，不以设计推断替代证据。
 4. 版本号只描述产品基线；诊断采集器使用独立 `rN` 标识。
 5. 文件行号易漂移，图谱优先记录函数名、配置键和命令入口。
+
+## 10. v8.7 云机部署与 namespace 收口
+
+- `deploy.sh` 在 Termux UID 下只编译和生成 Root 子脚本；`/data/local/tmp` 的旧文件备份、覆盖、校验和与 `forge.version` 写入全部在 `su` 子脚本中完成。
+- `system_identity_overlay.sh apply` 维护 Root 调用方视图；`apply-pid PID` 通过 `nsenter` 进入游戏 mount namespace，再执行内部入口 `apply-local PID`。
+- `apply-local` 只挂载只读 `/proc`、Device Tree 和 `/sys/fs/selinux/enforce` 画像，不重复修改全局属性与显示参数；每个 PID 使用 `mounts.pid.PID.state` 记录。
+- `forge.c::do_launch()` 的固定顺序为：启动并取得 PID -> `apply_identity_namespace(pid)` -> JSON 全表预检/写入 -> injector `dlopen`。
+- `/sys/fs/selinux/enforce=1` 只是读取节点 overlay。真实策略行为继续由 `getenforce`、策略加载状态和内核 AVC 行为判定，不能由该节点推导。
+- `verify_identity.sh::ns_cat()` 在游戏 namespace 分别核对 `cpuinfo`、`osrelease`、Device Tree `compatible` 与 SELinux 读取节点；真实 `uname`、KGSL、SELinux 行为、Root 路径及容器拓扑继续单列。
+- 云机再次部署后，应先确认出现 `Previous version backed up`、`Deploy done` 和 `v8.7 deploy complete`，再运行 `forge -l` 与验证脚本。checksum 后直接返回提示符表示 Root 部署事务尚未开始或已失败。

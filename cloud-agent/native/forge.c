@@ -751,6 +751,24 @@ static int run_shell_best_effort(const char *cmd) {
     return rc;
 }
 
+static int apply_identity_namespace(pid_t pid) {
+    char pid_str[16];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    const char *argv[] = {
+        "/system/bin/sh",
+        "/data/local/tmp/system_identity_overlay.sh",
+        "apply-pid",
+        pid_str,
+        NULL
+    };
+    int rc = run_cmd(argv);
+    if (rc == 0)
+        OK("identity overlay applied in game mount namespace pid=%d", pid);
+    else
+        WARN("identity overlay missing in game mount namespace pid=%d rc=%d; verifier will report exposed nodes", pid, rc);
+    return rc;
+}
+
 static int write_all_fd(int fd, const void *data, size_t len) {
     const uint8_t *p = (const uint8_t *)data;
     while (len > 0) {
@@ -1557,8 +1575,10 @@ static int do_launch(void) {
     }
     if (pid) {
         usleep(500000);
+        /* Deploy-shell mounts need not propagate into Android app namespaces. */
+        apply_identity_namespace(pid);
     }
-    /* v8.7 顺序: validated table write -> inject libforgehook.so.
+    /* v8.7 order: namespace overlay -> validated table write -> hook dlopen.
      * injector only performs dlopen and owns no independent offset table. */
     int rc = patch_game_process();
     if (rc != 0) {

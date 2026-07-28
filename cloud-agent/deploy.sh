@@ -62,15 +62,6 @@ printf '%s\n' "$BUILD_MD5_LINES"
 FORGE_MD5=$(md5sum forge | awk '{print $1}')
 HOOK_MD5=$(md5sum libforgehook.so | awk '{print $1}')
 
-# ---- backup existing binaries ----
-if [ "$DRY_RUN" = "0" ]; then
-    mkdir -p "$BACKUP_DIR"
-    for f in forge libforgehook.so forge_monitor injector touch_injector forge_patches.json system_identity_overlay.sh verify_identity.sh forge.version forge_build.md5; do
-        [ -f "$TMP/$f" ] && cp "$TMP/$f" "$BACKUP_DIR/$f.$TIMESTAMP" 2>/dev/null
-    done
-    echo "[+] Previous version backed up to $BACKUP_DIR/"
-fi
-
 # ---- dry-run exit ----
 if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] Build verified. No files deployed."
@@ -80,21 +71,28 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-# Metadata is written only after the previous deployment has been backed up.
-printf '%s\n' "$BUILD_MD5_LINES" > "$TMP/forge_build.md5"
-echo "v8.7 $TIMESTAMP $FORGE_MD5 $HOOK_MD5" > "$TMP/forge.version"
-
 # ---- generate root deploy sub-script ----
 DEPLOY_SH="$HOME/df_deploy.sh"
 cat > "$DEPLOY_SH" << 'DEPLOY_EOF'
 #!/bin/sh
+set -e
 TMP=/data/local/tmp
 NATIVE="__NATIVE__"
 SCRIPT_DIR="__SCRIPT_DIR__"
+BACKUP_DIR="$TMP/forge_backup"
+TIMESTAMP="__TIMESTAMP__"
+
+# Keep backup and replacement in one root-owned transaction. Existing
+# /data/local/tmp files may not be writable by the Termux application UID.
+mkdir -p "$BACKUP_DIR"
+for f in forge libforgehook.so forge_monitor injector touch_injector forge_patches.json system_identity_overlay.sh verify_identity.sh forge.version forge_build.md5; do
+    [ -f "$TMP/$f" ] && cp -p "$TMP/$f" "$BACKUP_DIR/$f.$TIMESTAMP"
+done
+echo "[+] Previous version backed up to $BACKUP_DIR/"
 
 # 关键: 先杀旧进程，确保新二进制能写入
-pkill -9 -f "$TMP/forge" 2>/dev/null
-pkill -9 -f "$TMP/forge_monitor" 2>/dev/null
+pkill -9 -f "$TMP/forge" 2>/dev/null || true
+pkill -9 -f "$TMP/forge_monitor" 2>/dev/null || true
 sleep 3
 
 cp "$NATIVE/forge"           $TMP/forge
@@ -112,6 +110,12 @@ chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector $TMP/c
 chmod 755 $TMP/system_identity_overlay.sh $TMP/verify_identity.sh
 chmod 644 $TMP/libforgehook.so
 chmod 600 $TMP/forge_patches.json
+
+# Commit metadata only after every deployed artifact has been copied.
+md5sum $TMP/forge $TMP/libforgehook.so $TMP/forge_monitor $TMP/injector $TMP/touch_injector \
+    > $TMP/forge_build.md5
+echo "v8.7 $TIMESTAMP __FORGE_MD5__ __HOOK_MD5__" > $TMP/forge.version
+chmod 600 $TMP/forge_build.md5 $TMP/forge.version
 
 HIJACK=$(find /data/app -name libtdmqimei_real.so 2>/dev/null | head -1)
 if [ -n "$HIJACK" ]; then
@@ -142,6 +146,9 @@ DEPLOY_EOF
 
 sed -i "s|__NATIVE__|$NATIVE|g" "$DEPLOY_SH"
 sed -i "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" "$DEPLOY_SH"
+sed -i "s|__TIMESTAMP__|$TIMESTAMP|g" "$DEPLOY_SH"
+sed -i "s|__FORGE_MD5__|$FORGE_MD5|g" "$DEPLOY_SH"
+sed -i "s|__HOOK_MD5__|$HOOK_MD5|g" "$DEPLOY_SH"
 sed -i "s|__RESTORE_QIMEI__|$RESTORE_QIMEI|g" "$DEPLOY_SH"
 sed -i "s|__NO_HIJACK__|$NO_HIJACK|g" "$DEPLOY_SH"
 

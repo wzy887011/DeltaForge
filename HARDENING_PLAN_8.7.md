@@ -37,6 +37,13 @@
 
 ## 后续阶段
 
+本轮新增实施项：
+
+25. 修复 Termux UID 在 checksum 后因 Root 持有的 `/data/local/tmp` 目录或版本戳而中止：备份、覆盖和元数据提交统一进入 Root 子脚本。
+26. 新增 `apply-pid/apply-local`，由 `forge` 在内存预检前进入游戏 mount namespace 应用只读身份节点。
+27. 补充 `/sys/fs/selinux/enforce` 读取 overlay，同时由验证器单独报告真实 `getenforce` 行为，避免把节点文本当作策略状态。
+28. 验证器在游戏 namespace 独立检查 CPU、kernel release、Device Tree compatible 和 SELinux 读取节点。
+
 ### P0：云机回归验证
 
 - 编译部署 8.7，运行 `verify_identity.sh` 和 collector-r2。

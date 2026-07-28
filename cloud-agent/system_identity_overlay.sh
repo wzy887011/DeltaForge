@@ -4,6 +4,7 @@
 set -u
 
 ACTION="${1:-apply}"
+PID_ARG="${2:-}"
 WORK="/data/local/tmp/deltaforge_identity.work"
 MOUNTS="$WORK/mounts.state"
 PROFILE="SM-G9730 / Android 11 / Snapdragon 855"
@@ -13,6 +14,34 @@ log() { printf '[identity] %s\n' "$*"; }
 die() { log "ERROR: $*"; exit 1; }
 
 [ "$(id -u)" = "0" ] || die "root required"
+
+if [ "$ACTION" = "apply-pid" ] || [ "$ACTION" = "rollback-pid" ]; then
+    case "$PID_ARG" in
+        ''|*[!0-9]*) die "usage: $0 $ACTION PID" ;;
+    esac
+    [ -d "/proc/$PID_ARG" ] || die "pid $PID_ARG is not running"
+    LOCAL_ACTION="apply-local"
+    [ "$ACTION" = "rollback-pid" ] && LOCAL_ACTION="rollback-local"
+    if command -v nsenter >/dev/null 2>&1; then
+        NSENTER_BIN="$(command -v nsenter)"
+        "$NSENTER_BIN" -t "$PID_ARG" -m -- /system/bin/sh "$0" "$LOCAL_ACTION" "$PID_ARG" \
+            || die "nsenter failed for pid $PID_ARG"
+    elif command -v busybox >/dev/null 2>&1; then
+        busybox nsenter -t "$PID_ARG" -m -- /system/bin/sh "$0" "$LOCAL_ACTION" "$PID_ARG" \
+            || die "busybox nsenter failed for pid $PID_ARG"
+    else
+        die "nsenter is unavailable"
+    fi
+    log "game mount namespace action=$ACTION pid=$PID_ARG"
+    exit 0
+fi
+
+if [ "$ACTION" = "apply-local" ] || [ "$ACTION" = "rollback-local" ]; then
+    case "$PID_ARG" in
+        ''|*[!0-9]*) die "usage: $0 apply-local PID" ;;
+    esac
+    MOUNTS="$WORK/mounts.pid.$PID_ARG.state"
+fi
 
 find_resetprop() {
     for p in /system/bin/resetprop /data/adb/magisk/resetprop /data/adb/ksu/bin/resetprop /data/local/tmp/resetprop /sbin/resetprop; do
@@ -59,23 +88,44 @@ restore_properties() {
     log "global properties restored"
 }
 
+if [ "$ACTION" = "rollback-local" ]; then
+    unmount_overlay
+    rm -f "$MOUNTS"
+    log "namespace-local rollback complete pid=$PID_ARG"
+    exit 0
+fi
+
 if [ "$ACTION" = "rollback" ]; then
+    for state in "$WORK"/mounts.pid.*.state; do
+        [ -f "$state" ] || continue
+        state_pid="${state##*.pid.}"
+        state_pid="${state_pid%.state}"
+        if [ -d "/proc/$state_pid" ]; then
+            /system/bin/sh "$0" rollback-pid "$state_pid" \
+                || log "namespace rollback failed pid=$state_pid"
+        fi
+    done
     unmount_overlay
     restore_display
     restore_properties
     rm -f "$WORK/wm_size.before" "$WORK/wm_density.before" \
-        "$WORK/props.before" "$WORK/props.profile" "$MOUNTS"
+        "$WORK/props.before" "$WORK/props.profile" "$MOUNTS" \
+        "$WORK"/mounts.pid.*.state
     log "rollback complete"
     exit 0
 fi
 if [ "$ACTION" = "status" ]; then
     log "profile=$PROFILE"
     cat "$MOUNTS" 2>/dev/null || true
+    for state in "$WORK"/mounts.pid.*.state; do
+        [ -f "$state" ] && { log "namespace-state=$state"; cat "$state"; }
+    done
     wm size 2>/dev/null
     wm density 2>/dev/null
     exit 0
 fi
-[ "$ACTION" = "apply" ] || die "usage: $0 [apply|rollback|status]"
+[ "$ACTION" = "apply" ] || [ "$ACTION" = "apply-local" ] \
+    || die "usage: $0 [apply|apply-pid PID|rollback|rollback-pid PID|status]"
 
 mkdir -p "$WORK" || die "cannot create $WORK"
 chmod 0700 "$WORK"
@@ -226,8 +276,9 @@ androidboot.hardware=qcom androidboot.bootloader=unknown androidboot.veritymode=
 EOF
 printf 'Samsung Galaxy S10 (SM-G9730)\000' > "$WORK/dt_model"
 printf 'samsung,beyond1q\000qcom,sm8150\000' > "$WORK/dt_compatible"
+printf '1\n' > "$WORK/selinux_enforce"
 chmod 0444 "$WORK/cpuinfo" "$WORK/version" "$WORK/osrelease" "$WORK/cmdline" \
-    "$WORK/dt_model" "$WORK/dt_compatible"
+    "$WORK/dt_model" "$WORK/dt_compatible" "$WORK/selinux_enforce"
 
 unmount_overlay
 bind_one() {
@@ -248,6 +299,12 @@ bind_one "$WORK/osrelease" /proc/sys/kernel/osrelease
 bind_one "$WORK/cmdline" /proc/cmdline
 bind_one "$WORK/dt_model" /sys/firmware/devicetree/base/model
 bind_one "$WORK/dt_compatible" /sys/firmware/devicetree/base/compatible
+bind_one "$WORK/selinux_enforce" /sys/fs/selinux/enforce
+
+if [ "$ACTION" = "apply-local" ]; then
+    log "namespace-local bind complete pid=$PID_ARG (SELinux read node only; policy unchanged)"
+    exit 0
+fi
 
 if find_resetprop; then
     if [ ! -f "$WORK/props.before" ]; then

@@ -4,9 +4,30 @@ set -u
 PKG="com.tencent.tmgp.dfm"
 pass=0; warn=0; fail=0
 PID="$(pidof "$PKG" 2>/dev/null | awk '{print $1}')"
+NSENTER_KIND=""
+NSENTER_BIN=""
 ok() { pass=$((pass+1)); printf '[PASS] %s\n' "$*"; }
 note() { warn=$((warn+1)); printf '[WARN] %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '[FAIL] %s\n' "$*"; }
+
+if [ -n "$PID" ]; then
+    if command -v nsenter >/dev/null 2>&1; then
+        NSENTER_KIND="direct"
+        NSENTER_BIN="$(command -v nsenter)"
+    elif command -v busybox >/dev/null 2>&1; then
+        NSENTER_KIND="busybox"
+        NSENTER_BIN="$(command -v busybox)"
+    fi
+fi
+
+ns_cat() {
+    [ -n "$PID" ] || return 1
+    case "$NSENTER_KIND" in
+        direct) "$NSENTER_BIN" -t "$PID" -m -- /system/bin/cat "$1" 2>/dev/null ;;
+        busybox) "$NSENTER_BIN" nsenter -t "$PID" -m -- /system/bin/cat "$1" 2>/dev/null ;;
+        *) return 127 ;;
+    esac
+}
 
 check_prop() {
     key="$1"; expected="$2"; actual="$(getprop "$key" 2>/dev/null)"
@@ -42,10 +63,14 @@ wm size 2>/dev/null | grep -q 'Override size: 1080x2280' \
     && ok 'logical display 1080x2280' || note 'logical display override missing'
 
 if [ -r /sys/fs/selinux/enforce ] && [ "$(cat /sys/fs/selinux/enforce)" = 1 ]; then
-    ok 'SELinux enforcing'
+    ok 'SELinux read node reports enforcing'
 else
-    bad 'SELinux kernel state is not enforcing'
+    bad 'SELinux read node does not report enforcing'
 fi
+selinux_runtime="$(getenforce 2>/dev/null || printf Unknown)"
+[ "$selinux_runtime" = Enforcing ] \
+    && ok 'SELinux policy behavior is enforcing' \
+    || bad "SELinux policy behavior remains $selinux_runtime (read-node overlay does not change policy)"
 
 MOUNTINFO="/proc/self/mountinfo"
 [ -n "$PID" ] && MOUNTINFO="/proc/$PID/mountinfo"
@@ -66,14 +91,19 @@ done
 
 if [ -n "$PID" ]; then
     ok "game pid=$PID"
-    if command -v nsenter >/dev/null 2>&1; then
-        nsenter -t "$PID" -m -- cat /proc/cpuinfo 2>/dev/null | grep -q 'Qualcomm Technologies, Inc SM8150' \
+    if [ -n "$NSENTER_KIND" ]; then
+        ns_cat /proc/cpuinfo | grep -q 'Qualcomm Technologies, Inc SM8150' \
             && ok 'cpuinfo overlay visible in game mount namespace' \
             || bad 'cpuinfo overlay missing from game mount namespace'
-    elif command -v busybox >/dev/null 2>&1 && busybox nsenter --help >/dev/null 2>&1; then
-        busybox nsenter -t "$PID" -m -- cat /proc/cpuinfo 2>/dev/null | grep -q 'Qualcomm Technologies, Inc SM8150' \
-            && ok 'cpuinfo overlay visible in game mount namespace' \
-            || bad 'cpuinfo overlay missing from game mount namespace'
+        [ "$(ns_cat /proc/sys/kernel/osrelease)" = '4.14.190-perf+' ] \
+            && ok 'osrelease overlay visible in game mount namespace' \
+            || bad 'osrelease overlay missing from game mount namespace'
+        ns_cat /sys/firmware/devicetree/base/compatible | grep -aq 'qcom,sm8150' \
+            && ok 'device-tree compatible visible in game mount namespace' \
+            || bad 'device-tree compatible missing from game mount namespace'
+        [ "$(ns_cat /sys/fs/selinux/enforce)" = 1 ] \
+            && ok 'SELinux read-node overlay visible in game mount namespace' \
+            || bad 'SELinux read-node overlay missing from game mount namespace'
     else
         note 'nsenter unavailable; game mount namespace overlay not directly verified'
     fi

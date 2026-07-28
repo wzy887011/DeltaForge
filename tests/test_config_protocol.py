@@ -127,6 +127,15 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertIn('mount --bind "$src" "$dst"', source)
         self.assertIn('/proc/sys/kernel/osrelease', source)
         self.assertIn('/sys/firmware/devicetree/base/compatible', source)
+        self.assertIn('"apply-pid"', source)
+        self.assertIn('"apply-local"', source)
+        self.assertIn('"rollback-pid"', source)
+        self.assertIn('"rollback-local"', source)
+        self.assertIn('nsenter -t "$PID_ARG" -m', source)
+        self.assertIn('mounts.pid.$PID_ARG.state', source)
+        self.assertIn('selinux_enforce', source)
+        self.assertIn('/sys/fs/selinux/enforce', source)
+        self.assertIn('policy unchanged', source)
         self.assertEqual(source.count("BogoMIPS\t: 38.40"), 8)
         self.assertEqual(source.count("CPU variant\t: 0x0"), 4)
         self.assertEqual(source.count("CPU variant\t: 0x1"), 4)
@@ -144,6 +153,42 @@ class ConfigProtocolTests(unittest.TestCase):
                 hook_source,
             )
         self.assertIn("int uname(struct utsname *buf)", hook_source)
+
+        forge_path = os.path.join(ROOT, "cloud-agent", "native", "forge.c")
+        with open(forge_path, encoding="utf-8") as stream:
+            forge_source = stream.read()
+        launch = forge_source[forge_source.index("static int do_launch(void) {") :]
+        self.assertLess(
+            launch.index("apply_identity_namespace(pid);"),
+            launch.index("patch_game_process();"),
+        )
+
+        verify_path = os.path.join(ROOT, "cloud-agent", "verify_identity.sh")
+        with open(verify_path, encoding="utf-8") as stream:
+            verify_source = stream.read()
+        for node in (
+            "/proc/cpuinfo",
+            "/proc/sys/kernel/osrelease",
+            "/sys/firmware/devicetree/base/compatible",
+            "/sys/fs/selinux/enforce",
+        ):
+            self.assertIn(f"ns_cat {node}", verify_source)
+        self.assertIn("read-node overlay does not change policy", verify_source)
+
+    def test_deploy_root_owns_tmp_transaction(self):
+        path = os.path.join(ROOT, "cloud-agent", "deploy.sh")
+        with open(path, encoding="utf-8") as stream:
+            source = stream.read()
+        root_start = source.index('cat > "$DEPLOY_SH"')
+        pre_root = source[:root_start]
+        root_script = source[root_start:]
+        self.assertNotIn('mkdir -p "$BACKUP_DIR"', pre_root)
+        self.assertNotIn('> "$TMP/forge_build.md5"', pre_root)
+        self.assertIn('mkdir -p "$BACKUP_DIR"', root_script)
+        self.assertIn('cp -p "$TMP/$f" "$BACKUP_DIR/$f.$TIMESTAMP"', root_script)
+        self.assertIn('> $TMP/forge_build.md5', root_script)
+        self.assertIn('> $TMP/forge.version', root_script)
+        self.assertLess(source.index('if [ "$DRY_RUN" = "1" ]'), root_start)
 
 
 if __name__ == "__main__":
