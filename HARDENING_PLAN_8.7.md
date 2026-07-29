@@ -23,7 +23,7 @@
 8. 删除外部破坏映射 ELF 头的伪 maps 隐藏逻辑，保留进程内映射规范化与读取过滤。
 9. 修正 GPU 画像、GPU maps 解析、IPv4 字节序和 `sockaddr_ll` MAC 写入位置。
 10. 修正 Magisk 启动脚本文件名、画像冲突和部署时遗漏的 patch loader/JSON。
-11. 删除 native 写入的静态 fallback；强制 75 条代码项、40 条 BSS 项和 Build ID 形状校验。
+11. 删除 native 写入的静态 fallback；强制 72 条稳定代码项、40 条 BSS 项和 Build ID 形状校验。
 12. 首次写入、维护回写、快速链和 IPC 紧急回写统一走 `safe_verify_and_write()`。
 13. 修复系统 overlay 回滚：快照并恢复/删除原始属性，同时恢复显示和 bind mount。
 14. 验证脚本优先读取游戏 mount namespace，而不是只检查 Termux/Root 自身视图。
@@ -78,6 +78,6 @@
 
 - `verify_identity.sh` 的系统/进程覆盖项无 FAIL；宿主内核、Root 路径、SELinux、KGSL 等 FAIL 必须进入镜像跟踪项。
 - collector 中不再出现 RK3588、AntDock、宿主构建用户名或画像冲突。
-- TerSafe patch 为 75/75 且每项通过 expected opcode 校验。
+- TerSafe patch 为 72/72 且每项通过 expected opcode 校验。
 - UE4 表为空时日志明确显示 quarantined，不产生写入。
 - `system_identity_overlay.sh rollback` 能恢复所有 bind 与显示覆盖。

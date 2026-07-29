@@ -76,9 +76,9 @@ forge 启动
     ↓
 等待游戏进程启动 (get_pid_by_name)
     ↓
-加载 JSON，校验 Build ID，并预检 75 个代码点 + 40 个BSS地址（UE4为0）
+加载 JSON，校验 Build ID，并预检 72 个稳定代码点 + 40 个BSS地址（UE4为0）
     ↓
-forge 完成 75/75 + 40/40 validated write；任一失败则停止游戏
+forge 完成 72/72 + 40/40 validated write；任一失败则停止游戏
     ↓
 stage_hook_so: 复制 libforgehook.so 到游戏 app lib 目录 (绕 Android namespace)
     ↓
@@ -119,7 +119,7 @@ detect_entry (0x419fdc)
     → tgkill syscall → SIGKILL
 ```
 
-这 6 个地址属于 JSON 的 75 项代码表，并作为高频维护子集使用。`forge.c` 是唯一
+这 6 个地址属于 JSON 的 72 项代码表，并作为高频维护子集使用。`forge.c` 是唯一
 目标模块写入所有者；旧 `pattern_scan_seq` / `pattern_scan4` 与 Hook 内置表已置于
 `#if 0`，injector 只负责远程 `dlopen`。运行时不再使用未经 Build ID 和 expected
 opcode 约束的回退定位。

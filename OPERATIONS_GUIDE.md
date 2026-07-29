@@ -29,7 +29,7 @@ su -c '/data/local/tmp/mihomo_control.sh rollback'
 | L2 全局属性 | resetprop (Magisk独立版) | 已验证 Samsung/SM-G9730 |
 | L3 身份文件 | OAID/VAID/IMEI/Serial随机化 | ✅ |
 | L5 DFM指纹 | forge do_prepare() 清理 | ✅ |
-| L6 TerSafe patch | ptrace + /proc/pid/mem | 75 个代码点已验证，写前双重校验 |
+| L6 TerSafe patch | ptrace + /proc/pid/mem | 72 个稳定代码点已验证，写前双重校验 |
 | L7 进程内Hook | validated patch 后 ptrace `dlopen` | qimei 代理链已激活；直接 SVC 仍为残余面 |
 | UE4 RVA | 静态表 | 已隔离，等待当前 Build ID 重新提取 |
 | L8 LXC特征 | mountinfo过滤 | ✅ |
@@ -216,7 +216,7 @@ BSS 地址、0 个 UE4 点。每个代码点必须包含 `expected`，并且整�
 前完成 Build ID、数量、范围、对齐、重复项和原指令预检。
 
 高频维护子集为 `0x419FDC`、`0x419FE0`、`0x2E7810`、`0x2F29D0`、
-`0x320D78`、`0x3233B8`；它们仍从上述 75 项中查找，不是第二套表。
+`0x320D78`、`0x3233B8`；它们仍从上述 72 项中查找，不是第二套表。
 Hook 与 injector 均不执行签名扫描或目标代码写入。
 
 ---

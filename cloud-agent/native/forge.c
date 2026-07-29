@@ -46,7 +46,7 @@ static patch_table_t g_dyn_table;   /* 动态加载结果 */
 static int           g_dyn_loaded = 0;
 
 /* JSON is the only runtime source; no compiled offset fallback. */
-#define EXPECTED_TERSAFE_PATCH_COUNT 75
+#define EXPECTED_TERSAFE_PATCH_COUNT 72
 #define EXPECTED_TERSAFE_BSS_COUNT   40
 #define DYN_TERSAFE_PATCHES (g_dyn_table.tersafe_patches)
 #define DYN_TERSAFE_COUNT   ((size_t)g_dyn_table.tersafe_count)

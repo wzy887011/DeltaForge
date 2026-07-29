@@ -52,7 +52,7 @@ DeltaForge 是一套针对 **三角洲行动 (com.tencent.tmgp.dfm)** 的云手�
 | L3 身份文件 | 游戏 SDK | OAID/VAID 文件直读 | do_prepare() 随机替换 |
 | L4 SSAID | TDM/QIMEI | settings_ssaid.xml per-app ID | abx2xml + sed 轮换（当前云机无该文件） |
 | L5 游戏指纹缓存 | TDM/QIMEI | tdm_track.dat、login-identifier.txt 等 | 启动前 rm -rf 14+ 路径 |
-| L6 TerSafe 运行时 | TerSafe | 反调试、反 hook、kKillChain 自杀 | 75 条代码项 + 40 条 BSS 项，Build ID/原值约束 |
+| L6 TerSafe 运行时 | TerSafe | 反调试、反 hook、kKillChain 自杀 | 72 条稳定代码项 + 40 条 BSS 项，Build ID/原值约束 |
 | L7 进程属性 | TerSafe/GTI | __system_property_get、/proc、/sys | validated write 后 ptrace `dlopen` Hook |
 | L8 LXC 容器特征 | GTI | /proc/self/mountinfo 含 lxcfs | 进程内过滤；宿主/namespace 仍是残余面 |
 
@@ -61,7 +61,7 @@ DeltaForge 是一套针对 **三角洲行动 (com.tencent.tmgp.dfm)** 的云手�
 TerSafe (`libtersafe.so`) 是腾讯自研反作弊 SDK，运行在游戏进程内，主要行为：
 
 1. **版本绑定校验** (`verify_tersafe_version`)：检查 ELF build-id，防止偏移表版本错乱
-2. **代码 patch**：JSON 中 75 项，每项必须匹配 `expected` 或已是目标值
+2. **代码 patch**：JSON 中 72 项，每项必须匹配 `expected` 或已是目标值
 3. **BSS 段清零**：只处理 JSON 中 40 个显式地址，不做低值启发式扫描
 4. **写入所有权**：只有 `forge.c` 写目标模块；Hook/Injector 无独立偏移表
 5. **UE4**：当前表为 0，旧 6 个 RVA 因 Build ID 不匹配保持隔离
@@ -132,7 +132,7 @@ do_prepare()
 ### 2.5 高频维护子集（当前）
 
 `0x419FDC`、`0x419FE0`、`0x2E7810`、`0x2F29D0`、`0x320D78`、
-`0x3233B8`。这些地址从 75 项 JSON 表中查找，所有回写仍执行 expected 校验。
+`0x3233B8`。这些地址从 72 项 JSON 表中查找，所有回写仍执行 expected 校验。
 
 ---
 
@@ -248,7 +248,7 @@ su -c "sh /data/local/tmp/setup_network.sh check"  # 全链路泄漏检测
 | L6 TerSafe patch | 待云机复测 | 75 代码 + 40 BSS + 0 UE4；全表预检与 fail-closed |
 | L7 HOOK_PROPS | ✓ | 进程内全覆盖（三星 SM-G9730 画像）|
 | L8 LXC/mountinfo | 部分 | 进程内过滤存在；游戏 namespace/宿主视图待验证 |
-| 高频维护子集 | 6 项 | 来自 75 项 JSON，不是独立写入表 |
+| 高频维护子集 | 6 项 | 来自 72 项 JSON，不是独立写入表 |
 
 ### 4.3 已知问题
 
@@ -261,7 +261,7 @@ su -c "sh /data/local/tmp/setup_network.sh check"  # 全链路泄漏检测
 
 | 优先级 | 任务 | 预计工作量 |
 |--------|------|-----------|
-| P0 | 部署 8.7，验证 75/75、40/40 事务与 Hook 激活 | 立即 |
+| P0 | 部署 8.7，验证 72/72、40/40 事务与 Hook 激活 | 立即 |
 | P0 | 确认 resetprop 与 bind overlay 是否传播到游戏 namespace | 立即 |
 | P1 | 验证 standalone resetprop 的全局属性与回滚行为 | 云机复测 |
 | P1 | L0 IP 配置（proxy_pc_setup.bat 或 WireGuard） | 半天 |

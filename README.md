@@ -11,7 +11,7 @@
 | 模块 | 状态 | 说明 |
 |------|------|------|
 | 全局属性画像 | 本地一致 | Samsung SM-G9730 / Android 11 / SM8150；等待云机 namespace 复测 |
-| TerSafe code/BSS | 部分验证 | 75 个代码点具备采集原指令；40 个 BSS 仅有地址边界约束 |
+| TerSafe code/BSS | 部分验证 | 72 个稳定代码点具备采集原指令；40 个 BSS 仅有地址边界约束 |
 | 进程 Hook | 部分验证 | qimei 代理链及 GPU Hook 有激活日志 |
 | 直接 syscall | 残余项 | 当前游戏进程 `Seccomp: 0`，inline SVC 不受 libc Hook 覆盖 |
 | UE4 静态 RVA | 已隔离 | 当前 Build ID 与旧 RVA 不匹配，v8.7 默认不写入 |

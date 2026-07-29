@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int ok = table.tersafe_count == 75
+    int ok = table.tersafe_count == 72
         && table.bss_count == 40
         && table.ue4_count == 0
         && strcmp(table.build_id,
