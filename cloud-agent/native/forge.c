@@ -52,7 +52,7 @@ typedef enum {
 static patch_scope_t g_patch_scope = PATCH_SCOPE_FULL;
 
 /* JSON is the only runtime source; no compiled offset fallback. */
-#define EXPECTED_TERSAFE_PATCH_COUNT 72
+#define EXPECTED_TERSAFE_PATCH_COUNT 58
 #define EXPECTED_TERSAFE_BSS_COUNT   40
 #define DYN_TERSAFE_PATCHES (g_dyn_table.tersafe_patches)
 #define DYN_TERSAFE_COUNT   ((size_t)g_dyn_table.tersafe_count)

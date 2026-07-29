@@ -15,7 +15,7 @@
 | SoC/GPU 画像 | Snapdragon 855 (`SM8150`, `msmnile`) / Adreno 640 |
 | TerSafe Build ID | `d70d7926094ae39a46745c12ddcc1877641f82e8` |
 | UE4 Build ID | `8187ddb9edbc9d5201201ffd7b008df3bfe533db` |
-| 代码表 | 72 条稳定代码项，全部要求 `expected` |
+| 代码表 | 58 条预检代码项，全部要求 `expected` |
 | BSS 表 | 40 条，当前只有地址边界校验 |
 | UE4 表 | 0 条，旧 6 个 RVA 已隔离 |
 | 显示画像 | `1080x2280 @ 420dpi` |
@@ -56,7 +56,7 @@ flowchart TD
 | Magisk 属性 | `cloud-agent/magisk/system/bin/propspoof.sh` | 启动阶段属性画像 | 不覆盖直接读取内核/驱动的路径 |
 | 主控 | `cloud-agent/native/forge.c` | 准备、启动、Build ID 校验、内存写入、注入、IPC | 不替换宿主内核或容器 namespace |
 | 偏移加载 | `patch_loader.c/.h` | 无依赖 JSON 解析 | 不决定 Build ID 是否匹配运行目标 |
-| 偏移真源 | `runner/config/tersafe_patches.json` | Build ID、72 条稳定代码项、40 条 BSS、可选 UE4 项 | 不允许缺失 `expected` 的代码项 |
+| 偏移真源 | `runner/config/tersafe_patches.json` | Build ID、58 条预检代码项、40 条 BSS、可选 UE4 项 | 不允许缺失 `expected` 的代码项 |
 | 进程 Hook | `cloud-agent/native/libforgehook.c` | QIMEI chainload；属性、文件、maps、uname、GPU、网络接口、传感器等用户态读取路径 | 不写 TerSafe/UE4 代码；不覆盖 inline `SVC`、真实内核/驱动行为、进程外读取 |
 | 注入器 | `cloud-agent/native/injector.c` | ptrace 附加全部线程并只执行 `dlopen` Hook 库 | 不持有偏移表，不写目标模块代码，不提供系统级覆盖 |
 | 监控器 | `cloud-agent/native/forge_monitor.c` | 运行状态和告警 IPC | 不应维护另一套硬编码 patch 真源 |
@@ -76,7 +76,7 @@ flowchart TD
 
 1. JSON 必须存在且解析成功。
 2. `build_id` 必须存在并与磁盘 `libtersafe.so` 一致。
-3. TerSafe 必须正好 72 条，BSS 必须正好 40 条。
+3. TerSafe 必须正好 58 条，BSS 必须正好 40 条。
 4. 每条 TerSafe/UE4 代码项必须带 `expected`。
 5. 非空 UE4 表必须携带并匹配独立的 `ue4_build_id`。
 6. 首次写入、维护回写、快速链和 IPC 紧急回写都调用 `safe_verify_and_write()`。
@@ -85,7 +85,7 @@ flowchart TD
 9. `forge.c` 是唯一目标模块写入所有者；`injector.c` 与 `libforgehook.c` 的活动代码无硬编码 patch 表或指令写入。
 10. 默认启动不设置 `wrap.PKG`：游戏启动后先完成 validated write，再由 injector `dlopen` Hook；旧 wrap 属性在 prepare 阶段清除。
 11. BSS 只写 JSON 中的 40 个显式地址；不扫描或猜测低值计数器。
-12. 写入前先完整预检 72 个稳定代码点和 40 个 BSS 地址；任一预检/写入失败即取消 Hook 注入并停止该次游戏启动，不进入部分生效状态。
+12. 写入前先完整预检 58 个代码点和 40 个 BSS 地址；任一预检/写入失败即取消 Hook 注入并停止该次游戏启动，不进入部分生效状态。
 13. 部署编译前先复制已有 native 产物；`--dry-run` 不写 `/data/local/tmp`，部署元数据只在旧版本备份完成后更新。
 14. injector 成功 `dlopen` 后远程 `munmap` 8 KiB 调用区，并在所有错误路径 detach 全部已附加线程；清理失败视为启动失败。
 
@@ -93,7 +93,13 @@ flowchart TD
 Build ID 的不同 ASLR 启动中读到的 32 位值发生变化，属于动态/重定位槽，已从
 稳定代码表隔离；禁止把单次启动采样值写入 `expected`。
 
-故障隔离入口：`forge -m --code-only` 只执行 72 项代码表，
+同日 `--code-only` 隔离试验证明：无 Hook、无 BSS 写入时，旧 72 项代码表仍使
+TerSafe 在 `+0x1e70c0` 附近形成重复栈并退出。历史新增的 14 项 `kKillChain`
+把 tombstone 返回地址误当函数入口，将 `BL`、`BLR`、`LDR` 或条件分支直接改成
+`RET`，会在函数中部绕过栈帧恢复。它们已从活动表隔离；后续只有经过函数边界、
+控制流和调用约定验证的替代项才能重新加入。
+
+故障隔离入口：`forge -m --code-only` 只执行 58 项代码表，
 `forge -m --bss-only` 只执行 40 项 BSS 表。两者仅允许与 `-m` 组合，默认
 `forge -m`/`forge -l` 仍执行完整事务；诊断模式不得作为正式启动路径。
 
@@ -137,7 +143,7 @@ collector-r2 已确认的宿主事实：
 尚待云机复测：
 
 - Root 执行的 bind 是否传播到游戏 mount namespace。
-- 72 个稳定代码项的 `expected` 在干净冷启动映射上是否全部匹配。
+- 58 个代码项的 `expected` 在干净冷启动映射上是否全部匹配。
 - GLES/EGL/Vulkan 导出符号是否被目标实际调用。
 - 属性回滚、显示回滚、bind 回滚是否完整。
 

@@ -56,11 +56,14 @@ class ConfigProtocolTests(unittest.TestCase):
         path = os.path.join(RUNNER, "config", "tersafe_patches.json")
         with open(path, encoding="utf-8") as stream:
             table = json.load(stream)
-        self.assertEqual(len(table["tersafe_patches"]), 72)
+        self.assertEqual(len(table["tersafe_patches"]), 58)
         self.assertEqual(len(table["tersafe_bss"]), 40)
         self.assertTrue(all("expected" in item for item in table["tersafe_patches"]))
         offsets = {item["offset"].lower() for item in table["tersafe_patches"]}
         self.assertTrue({"0x5137c0", "0x516640", "0x526ed0"}.isdisjoint(offsets))
+        self.assertFalse(
+            any("kKillChain" in item.get("comment", "") for item in table["tersafe_patches"])
+        )
         self.assertEqual(
             table["build_id"],
             "d70d7926094ae39a46745c12ddcc1877641f82e8",
@@ -75,7 +78,7 @@ class ConfigProtocolTests(unittest.TestCase):
         path = os.path.join(ROOT, "cloud-agent", "native", "forge.c")
         with open(path, encoding="utf-8") as stream:
             source = stream.read()
-        self.assertIn("#define EXPECTED_TERSAFE_PATCH_COUNT 72", source)
+        self.assertIn("#define EXPECTED_TERSAFE_PATCH_COUNT 58", source)
         self.assertIn("#define EXPECTED_TERSAFE_BSS_COUNT   40", source)
         self.assertIn("find_validated_patch", source)
         self.assertIn("preflight_code_table", source)
