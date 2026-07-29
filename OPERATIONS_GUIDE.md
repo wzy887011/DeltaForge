@@ -211,13 +211,12 @@ su -c "sh /data/local/tmp/diagnose_device.sh 2>&1 | head -50"
 
 ## 4. 当前写入表（v8.7）
 
-唯一真源为 `runner/config/tersafe_patches.json`：75 个 TerSafe 代码点、40 个
+唯一真源为 `runner/config/tersafe_patches.json`：58 个 TerSafe 代码点、40 个
 BSS 地址、0 个 UE4 点。每个代码点必须包含 `expected`，并且整个表在任何写入
 前完成 Build ID、数量、范围、对齐、重复项和原指令预检。
 
-高频维护子集为 `0x419FDC`、`0x419FE0`、`0x2E7810`、`0x2F29D0`、
-`0x320D78`、`0x3233B8`；它们仍从上述 72 项中查找，不是第二套表。
-Hook 与 injector 均不执行签名扫描或目标代码写入。
+旧 `kKillChain` 返回地址补丁已全部隔离；它们把函数中部的 `BL/BLR/LDR/分支`
+误改为 `RET`，会破坏调用约定。Hook 与 injector 均不执行签名扫描或目标代码写入。
 
 ---
 

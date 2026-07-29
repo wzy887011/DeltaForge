@@ -434,12 +434,9 @@ static void _do_chainload(void) {
     g_real_qimei_handle = h;
     forge_log_raw("chainload: dlopen SUCCESS\n");
     hook_log("[chainload] done\n");
-    /* [v8 NEW-5] dlopen 后立即删除磁盘文件 — so 已映射到内存，删 inode 不影响运行
-     * 防: tersafe 通过 /data/app/ 路径扫描发现 libtdmqimei_real.so 磁盘文件 */
-    if (g_real_qimei_path[0]) {
-        syscall(SYS_unlinkat, AT_FDCWD, g_real_qimei_path, 0);
-        hook_log("[chainload] disk so unlinked\n");
-    }
+    /* The real library is the copy-first rollback artifact. Keep it on disk;
+     * path hooks already hide it from target-process enumeration. */
+    hook_log("[chainload] disk backup preserved\n");
 }
 
 /* [sensor] constructor(101) — 创建 SM-G9730 伪传感器目录供 opendir 重定向使用
@@ -477,9 +474,18 @@ __attribute__((constructor(102)))
 static void _resolve_qimei_path(void) {
     hook_log("[CTOR] 47 enter\n");
     char self_path[1024] = {0};
-    Dl_info info;
-    if (dladdr((void *)&_resolve_qimei_path, &info) && info.dli_fname &&
-        dirname_join_real(info.dli_fname, g_real_qimei_path, sizeof(g_real_qimei_path))) {
+    Dl_info info = {0};
+    int have_self = dladdr((void *)&_resolve_qimei_path, &info)
+                    && info.dli_fname && info.dli_fname[0];
+    if (have_self && strstr(info.dli_fname, C_forgehook)) {
+        /* Ptrace inject mode loads libforgehook.so alongside the already loaded
+         * original Qimei library, so hijack chainloading must stay disabled. */
+        g_real_qimei_path[0] = '\0';
+        forge_log_raw("chainload: inject mode skipped\n");
+        hook_log("[chainload] inject mode; chainload skipped\n");
+    } else if (have_self &&
+               dirname_join_real(info.dli_fname, g_real_qimei_path,
+                                 sizeof(g_real_qimei_path))) {
         forge_log_raw("chainload: path via dladdr\n");
     } else if (find_self_from_maps(self_path, sizeof(self_path)) &&
                dirname_join_real(self_path, g_real_qimei_path, sizeof(g_real_qimei_path))) {

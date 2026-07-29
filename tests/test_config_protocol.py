@@ -106,6 +106,11 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertNotIn('strstr(line, "libtdmqimei")', injector_source)
         self.assertIn("__NR_munmap", injector_source)
         self.assertIn("ptrace_setregs(pid, &saved);", injector_source)
+        self.assertIn('handle ? "non-null handle" : "NULL"', injector_source)
+        self.assertIn("if (done && handle)", injector_source)
+        self.assertIn("if (!done || !handle)", injector_source)
+        self.assertNotIn("(int64_t)handle < 0", injector_source)
+        self.assertNotIn("(int64_t)handle > 0", injector_source)
 
         hook_path = os.path.join(ROOT, "cloud-agent", "native", "libforgehook.c")
         with open(hook_path, encoding="utf-8") as stream:
@@ -127,6 +132,11 @@ class ConfigProtocolTests(unittest.TestCase):
             self.assertNotIn(legacy_writer, active_hook_source)
         self.assertIn("patch ownership=forge", active_hook_source)
         self.assertIn("_activate_hooks_thread", active_hook_source)
+        self.assertIn("[chainload] inject mode; chainload skipped", active_hook_source)
+        self.assertIn("[chainload] disk backup preserved", active_hook_source)
+        self.assertNotIn(
+            "syscall(SYS_unlinkat, AT_FDCWD, g_real_qimei_path", active_hook_source
+        )
         self.assertNotIn("LD_PRELOAD=/data/local/tmp/libforgehook.so", source)
         self.assertIn("stale wrap.%s preload cleared", source)
         self.assertNotIn("bss sweep zeroed", source)
@@ -224,6 +234,15 @@ class ConfigProtocolTests(unittest.TestCase):
             deploy_source = stream.read()
         self.assertIn('cp "$SCRIPT_DIR/mihomo_control.sh"', deploy_source)
         self.assertIn("$TMP/mihomo_control.sh", deploy_source)
+        self.assertIn("Qimei rollback copy rebuilt from active original", deploy_source)
+        self.assertIn("Qimei rollback copy missing while hijack is active", deploy_source)
+        self.assertIn('[ "$QIMEI_MD5" != "$HOOK_MD5" ]', deploy_source)
+
+        check_path = os.path.join(ROOT, "cloud-agent", "check.sh")
+        with open(check_path, encoding="utf-8") as stream:
+            check_source = stream.read()
+        self.assertIn("hijack active (主库等于 Hook)", check_source)
+        self.assertIn("inject mode / original active (主库不等于 Hook)", check_source)
 
     def test_deploy_disables_android_graphics_diagnostics(self):
         deploy_path = os.path.join(ROOT, "cloud-agent", "deploy.sh")

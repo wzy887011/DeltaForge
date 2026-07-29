@@ -103,6 +103,11 @@ TerSafe 在 `+0x1e70c0` 附近形成重复栈并退出。历史新增的 14 项 
 在代码阶段后等待 30 秒再执行 BSS 阶段可存活。正式完整事务因此采用一次预检、
 两阶段写入，并在等待期间逐秒确认原 PID 仍存在。
 
+Injector/Hook 隔离试验中原 PID、全部 constructor 和 Hook 映射均存活。Bionic
+`dlopen()` 返回的是非空不透明 handle，高位为 1 不代表负 errno；injector 只以
+NULL 判失败，并在任何非空 handle 后回收远程调用区。`libforgehook.so` 注入模式
+不执行 Qimei chainload；hijack 模式的 `libtdmqimei_real.so` 回滚副本始终保留。
+
 故障隔离入口：`forge -m --code-only` 只执行 58 项代码表，
 `forge -m --bss-only` 只执行 40 项 BSS 表。两者仅允许与 `-m` 组合，默认
 `forge -m`/`forge -l` 仍执行完整事务；诊断模式不得作为正式启动路径。

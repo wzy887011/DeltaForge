@@ -118,14 +118,34 @@ md5sum $TMP/forge $TMP/libforgehook.so $TMP/forge_monitor $TMP/injector $TMP/tou
 echo "v8.7 $TIMESTAMP __FORGE_MD5__ __HOOK_MD5__" > $TMP/forge.version
 chmod 600 $TMP/forge_build.md5 $TMP/forge.version
 
-HIJACK=$(find /data/app -name libtdmqimei_real.so 2>/dev/null | head -1)
-if [ -n "$HIJACK" ]; then
-    DIR=$(dirname "$HIJACK")
+QIMEI_SO=$(find /data/app -path '*/lib/arm64/libtdmqimei.so' 2>/dev/null | head -1)
+if [ -n "$QIMEI_SO" ]; then
+    DIR=$(dirname "$QIMEI_SO")
+    REAL_SO="$DIR/libtdmqimei_real.so"
+    QIMEI_MD5=$(md5sum "$QIMEI_SO" 2>/dev/null | awk '{print $1}')
+    HOOK_MD5=$(md5sum "$TMP/libforgehook.so" 2>/dev/null | awk '{print $1}')
+
+    # Older inject-mode hooks incorrectly removed the rollback copy. Rebuild it
+    # only when the active library is demonstrably not the hook binary.
+    if [ ! -f "$REAL_SO" ] && [ -n "$QIMEI_MD5" ] && [ "$QIMEI_MD5" != "$HOOK_MD5" ]; then
+        cp -p "$QIMEI_SO" "$REAL_SO"
+        chmod 644 "$REAL_SO"
+        restorecon "$REAL_SO" 2>/dev/null || true
+        echo "[+] Qimei rollback copy rebuilt from active original"
+    fi
+
     if [ "__RESTORE_QIMEI__" = "1" ]; then
-        cp "$DIR/libtdmqimei_real.so" "$DIR/libtdmqimei.so"
-        chmod 644 "$DIR/libtdmqimei.so"
-        restorecon "$DIR/libtdmqimei.so" 2>/dev/null
-        echo "[!] Qimei RESTORED to original — inject mode safe now"
+        if [ -f "$REAL_SO" ]; then
+            cp "$REAL_SO" "$QIMEI_SO"
+            chmod 644 "$QIMEI_SO"
+            restorecon "$QIMEI_SO" 2>/dev/null || true
+            echo "[+] Qimei restored to original — inject mode ready"
+        elif [ "$QIMEI_MD5" = "$HOOK_MD5" ]; then
+            echo "[-] Qimei rollback copy missing while hijack is active"
+            exit 1
+        else
+            echo "[!] Qimei rollback copy unavailable; active library already differs from hook"
+        fi
     fi
     if [ "__NO_HIJACK__" = "1" ]; then
         echo "[!] Hijack SKIPPED (--no-hijack). Use inject mode: su -c '$TMP/forge -l'"
@@ -138,7 +158,7 @@ if [ -n "$HIJACK" ]; then
         md5sum "$DIR/libtdmqimei.so" $TMP/libforgehook.so
     fi
 else
-    echo "[!] Hijack not found — inject mode only: su -c '$TMP/forge -l'"
+    echo "[!] Qimei library not found — inject mode only: su -c '$TMP/forge -l'"
 fi
 
 echo "[+] Deploy done"

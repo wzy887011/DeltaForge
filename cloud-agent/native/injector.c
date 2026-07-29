@@ -542,7 +542,7 @@ int main(int argc, char **argv) {
                     handle = out.regs[0];
                     printf("[*] dlopen returned x0=0x%llx (%s)\n",
                            (unsigned long long)handle,
-                           (int64_t)handle < 0 ? strerror((int)-(int64_t)handle) : "OK");
+                           handle ? "non-null handle" : "NULL");
                 }
                 done = 1;
             } else if (sig == SIGSEGV) {
@@ -595,7 +595,7 @@ int main(int argc, char **argv) {
     /* Release the remote call area before resuming the target.  This removes
      * both RWX and RW->RX fallback mappings from the final process state. */
     int cleanup_ok = 1;
-    if (done && handle && (int64_t)handle > 0) {
+    if (done && handle) {
         int64_t unmap_rc = remote_syscall(pid, svc_addr,
                                           215, /* __NR_munmap */
                                           rw_base, 0x2000, 0, 0, 0, 0);
@@ -610,10 +610,9 @@ int main(int argc, char **argv) {
     ptrace_setregs(pid, &saved);
     detach_all(pid, tids, ntids);
 
-    if (!handle || (int64_t)handle < 0) {
-        fprintf(stderr, "[-] dlopen 失败 (handle=0x%llx, %s)\n",
-                (unsigned long long)handle,
-                handle ? strerror((int)-(int64_t)handle) : "NULL");
+    if (!done || !handle) {
+        fprintf(stderr, "[-] dlopen 失败 (done=%d, handle=0x%llx)\n",
+                done, (unsigned long long)handle);
         return 1;
     }
     if (!cleanup_ok) {

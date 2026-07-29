@@ -13,11 +13,9 @@ echo "=========================================="
 
 echo ""
 echo "--- 1. hijack 状态 ---"
-HIJACK=$(find /data/app -name libtdmqimei_real.so 2>/dev/null | head -1)
-if [ -n "$HIJACK" ]; then
-    DIR=$(dirname "$HIJACK")
-    echo "hijack 已安装: $DIR"
-    HIJACK_SO="$DIR/libtdmqimei.so"
+HIJACK_SO=$(find /data/app -path '*/lib/arm64/libtdmqimei.so' 2>/dev/null | head -1)
+if [ -n "$HIJACK_SO" ]; then
+    DIR=$(dirname "$HIJACK_SO")
     REAL_SO="$DIR/libtdmqimei_real.so"
     echo "  libtdmqimei.so      ($(stat -c %s "$HIJACK_SO" 2>/dev/null || echo '?') bytes)"
     ls -la "$HIJACK_SO" 2>/dev/null
@@ -37,12 +35,17 @@ if [ -n "$HIJACK" ]; then
     HIJACK_MD5=$(md5sum "$HIJACK_SO" 2>/dev/null | awk '{print $1}')
     TMP_MD5=$(md5sum $TMP/libforgehook.so 2>/dev/null | awk '{print $1}')
     if [ "$HIJACK_MD5" = "$TMP_MD5" ] && [ -n "$HIJACK_MD5" ]; then
-        echo "  ✓ MD5 一致"
+        echo "  状态: hijack active (主库等于 Hook)"
     else
-        echo "  ✗ MD5 不一致! hijack=$HIJACK_MD5 tmp=$TMP_MD5"
+        echo "  状态: inject mode / original active (主库不等于 Hook)"
+    fi
+    if [ -f "$REAL_SO" ]; then
+        echo "  rollback: present"
+    else
+        echo "  rollback: missing"
     fi
 else
-    echo "hijack 未安装! 运行: su -c 'sh $TMP/df-hijack-root.sh'"
+    echo "Qimei 主库未找到"
 fi
 
 echo ""
