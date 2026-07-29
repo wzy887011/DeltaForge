@@ -20,6 +20,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python -m py_compile server-probe/server.py
+          python -m py_compile cloud-agent/environment_audit_report.py
       - name: Native patch loader test
         run: >-
           gcc -std=c11 -Wall -Wextra -Werror
@@ -46,6 +47,7 @@ jobs:
           cloud-agent/system_integration_gate.sh
           cloud-agent/kernel_hardware_gate.sh
           cloud-agent/server_probe_client.sh
+          cloud-agent/environment_audit.sh
           cloud-agent/mihomo_control.sh
           cloud-agent/magisk/service.sh
           cloud-agent/magisk/system/bin/propspoof.sh

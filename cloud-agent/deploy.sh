@@ -85,7 +85,7 @@ TIMESTAMP="__TIMESTAMP__"
 # Keep backup and replacement in one root-owned transaction. Existing
 # /data/local/tmp files may not be writable by the Termux application UID.
 mkdir -p "$BACKUP_DIR"
-for f in forge libforgehook.so forge_monitor injector touch_injector forge_patches.json system_identity_overlay.sh verify_identity.sh mihomo_control.sh system_integration_gate.sh kernel_hardware_gate.sh server_probe_client.sh forge.version forge_build.md5; do
+for f in forge libforgehook.so forge_monitor injector touch_injector forge_patches.json system_identity_overlay.sh verify_identity.sh mihomo_control.sh system_integration_gate.sh kernel_hardware_gate.sh server_probe_client.sh environment_audit.sh environment_audit_report.py forge.version forge_build.md5; do
     [ -f "$TMP/$f" ] && cp -p "$TMP/$f" "$BACKUP_DIR/$f.$TIMESTAMP"
 done
 echo "[+] Previous version backed up to $BACKUP_DIR/"
@@ -109,10 +109,13 @@ cp "$SCRIPT_DIR/mihomo_control.sh" $TMP/mihomo_control.sh
 cp "$SCRIPT_DIR/system_integration_gate.sh" $TMP/system_integration_gate.sh
 cp "$SCRIPT_DIR/kernel_hardware_gate.sh" $TMP/kernel_hardware_gate.sh
 cp "$SCRIPT_DIR/server_probe_client.sh" $TMP/server_probe_client.sh
+cp "$SCRIPT_DIR/environment_audit.sh" $TMP/environment_audit.sh
+cp "$SCRIPT_DIR/environment_audit_report.py" $TMP/environment_audit_report.py
 cp "$SCRIPT_DIR/../runner/config/tersafe_patches.json" $TMP/forge_patches.json
 chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector $TMP/collect_logs.sh $TMP/df-hijack-root.sh $TMP/check.sh
 chmod 755 $TMP/system_identity_overlay.sh $TMP/verify_identity.sh $TMP/mihomo_control.sh
 chmod 755 $TMP/system_integration_gate.sh $TMP/kernel_hardware_gate.sh $TMP/server_probe_client.sh
+chmod 755 $TMP/environment_audit.sh $TMP/environment_audit_report.py
 chmod 644 $TMP/libforgehook.so
 chmod 600 $TMP/forge_patches.json
 
@@ -205,6 +208,7 @@ echo "    Network rollback: su -c '$TMP/mihomo_control.sh rollback'"
 echo "    System gate: su -c '$TMP/system_integration_gate.sh'"
 echo "    Kernel/hardware gate: su -c '$TMP/kernel_hardware_gate.sh'"
 echo "    Server probe: su -c '$TMP/server_probe_client.sh URL'"
+echo "    Environment audit: su -c '$TMP/environment_audit.sh 60'"
 echo "    Launch (inject mode, recommended): su -c '$TMP/forge -l'"
 echo "    Launch (hijack mode, deprecated): su -c 'am start -n com.tencent.tmgp.dfm/.SplashActivity'"
 if [ "$AUTO_LAUNCH" = "1" ]; then

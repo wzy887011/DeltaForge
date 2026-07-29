@@ -427,6 +427,16 @@ for f in /data/local/tmp/deltaforge_server_probe.json \
          /data/local/tmp/deltaforge_server_probe.json.meta; do
     [ -f "$f" ] && cp -p "$f" "$OUT/$(basename "$f")"
 done
+latest_audit="$(find /data/local/tmp -maxdepth 1 -type d \
+    -name 'deltaforge_env_audit_*' 2>/dev/null | sort | tail -n 1)"
+if [ -n "$latest_audit" ]; then
+    mkdir -p "$OUT/environment-audit"
+    for f in metadata.txt report.json report.txt static_candidates.tsv \
+             strace.stderr.txt maps.before.txt maps.after.txt; do
+        [ -f "$latest_audit/$f" ] && cp -p "$latest_audit/$f" "$OUT/environment-audit/$f"
+    done
+    echo "environment_audit_source=$latest_audit"
+fi
 
 section "LOGS AND CRASHES"
 copy_tail /data/local/tmp/forge.log forge.log 10000

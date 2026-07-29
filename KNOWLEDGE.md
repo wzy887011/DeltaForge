@@ -67,6 +67,7 @@ flowchart TD
 | 系统门禁 | `cloud-agent/system_integration_gate.sh` | 宿主与游戏namespace的系统残留审计 | 不修改系统状态，不把进程Hook当系统通过 |
 | 内核/硬件门禁 | `cloud-agent/kernel_hardware_gate.sh` | KGSL、SM8150 DT、SELinux、KeyMint/TEE、内核配置硬门槛 | 缺项输出 `BLOCKED_IMAGE`，需镜像/内核所有者处理 |
 | 服务端探针 | `server-probe/server.py` + `cloud-agent/server_probe_client.sh` | 记录实际peer、代理头、时延和原始JSON证据 | ASN/网络类型无数据时保持 `unknown` |
+| 环境访问审计 | `cloud-agent/environment_audit.sh` + `environment_audit_report.py` | 外部记录文件、网络、ioctl、内核调用与静态候选 | 不修改返回值；ptrace时序污染必须单独标注 |
 
 ## 4. 关键数据流
 

@@ -309,6 +309,30 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertIn("proxy_headers_trusted", source)
         self.assertIn("--trust-proxy", source)
 
+    def test_environment_audit_is_read_only_and_deployed(self):
+        audit_path = os.path.join(ROOT, "cloud-agent", "environment_audit.sh")
+        report_path = os.path.join(
+            ROOT, "cloud-agent", "environment_audit_report.py"
+        )
+        deploy_path = os.path.join(ROOT, "cloud-agent", "deploy.sh")
+        with open(audit_path, encoding="utf-8") as stream:
+            audit_source = stream.read()
+        with open(report_path, encoding="utf-8") as stream:
+            report_source = stream.read()
+        with open(deploy_path, encoding="utf-8") as stream:
+            deploy_source = stream.read()
+
+        self.assertIn("-e trace=%file,%network,ioctl,uname,sysinfo,prctl", audit_source)
+        self.assertIn("static_candidates.tsv", audit_source)
+        self.assertIn("maps.before.txt", audit_source)
+        self.assertIn("ALLOW_HOOKED", audit_source)
+        self.assertIn("libforgehook.so is active", audit_source)
+        self.assertNotIn("resetprop", audit_source)
+        self.assertNotIn("setprop ", audit_source)
+        self.assertIn("def build_report", report_source)
+        self.assertIn('cp "$SCRIPT_DIR/environment_audit.sh"', deploy_source)
+        self.assertIn('cp "$SCRIPT_DIR/environment_audit_report.py"', deploy_source)
+
 
 if __name__ == "__main__":
     unittest.main()
