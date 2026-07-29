@@ -414,6 +414,20 @@ if have curl; then
     echo "api.ipify.org=$(curl -4 -ksS --max-time 10 https://api.ipify.org 2>&1 | tr -d '\r\n')"
 fi
 
+section "INTEGRATION GATES"
+for gate in system_integration_gate kernel_hardware_gate; do
+    script="/data/local/tmp/$gate.sh"
+    if [ -x "$script" ]; then
+        "$script" "$OUT/$gate.txt"
+    else
+        echo "$gate=not-deployed"
+    fi
+done
+for f in /data/local/tmp/deltaforge_server_probe.json \
+         /data/local/tmp/deltaforge_server_probe.json.meta; do
+    [ -f "$f" ] && cp -p "$f" "$OUT/$(basename "$f")"
+done
+
 section "LOGS AND CRASHES"
 copy_tail /data/local/tmp/forge.log forge.log 10000
 copy_tail /data/local/tmp/forge_hook.log forge_hook.log 10000

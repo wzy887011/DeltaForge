@@ -17,7 +17,7 @@
 | UE4 静态 RVA | 已隔离 | 当前 Build ID 与旧 RVA 不匹配，v8.7 默认不写入 |
 | 内核/容器画像 | 改进中 | Root bind overlay 覆盖现有节点；缺失驱动节点与命名空间仍需镜像支持 |
 
-**下一步:** 在云机冷启动执行 `verify_identity.sh` 和 collector-r2，确认 mount namespace、75 个原指令和 Hook 激活证据。
+**下一步:** 依据 `INTEGRATION_PLAN.md` 完成系统、内核/硬件和服务端门禁；当前58项代码表、40项BSS及Hook启动链已通过进程级验证。
 
 ---
 
@@ -83,7 +83,7 @@ DeltaForge/
 - **命令:** `-l`(一键) `-d`(daemon) `-p`(准备) `-m`(仅调整) `-s`(状态) `-c`(清理) `-x`(属性)
 - **TCP server:** `127.0.0.1:9510`, JSON行协议
 - **守护:** double-fork, 1s周期, 分层验证(检测链每周期/代码每3s/BSS每5s/UE4每2s)
-- **调整:** JSON 中 75 个 TerSafe 代码点 + 40 个 BSS；UE4 当前为 0；Build ID + expected 原指令双校验
+- **调整:** JSON 中58个 TerSafe代码点 + 40个BSS；UE4当前为0；Build ID + expected原指令双校验
 
 ### libforgehook.c — 进程内拦截核心
 - **加载:** 默认由 injector 在 validated patch 完成后 ptrace `dlopen`；library hijack 仅在显式 `--hijack` 时启用

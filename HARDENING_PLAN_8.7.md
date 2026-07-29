@@ -18,12 +18,12 @@
    `/proc/cmdline` 和已有的 Device Tree model，并提供一键回滚。
 4. 将逻辑显示模式统一为 SM-G9730 支持的 FHD+ `1080x2280 @ 420dpi`。
 5. TerSafe 写入改为 Build ID fail-closed，并支持逐条 expected opcode 校验。
-6. 依据 collector-r2 数据为 75 个 TerSafe 点填充 expected opcode。
+6. 依据 collector-r2 数据补齐 TerSafe expected opcode，并将不稳定项持续隔离。
 7. 隔离不匹配当前 UE4 Build ID 的 6 个旧 RVA，不再盲写。
 8. 删除外部破坏映射 ELF 头的伪 maps 隐藏逻辑，保留进程内映射规范化与读取过滤。
 9. 修正 GPU 画像、GPU maps 解析、IPv4 字节序和 `sockaddr_ll` MAC 写入位置。
 10. 修正 Magisk 启动脚本文件名、画像冲突和部署时遗漏的 patch loader/JSON。
-11. 删除 native 写入的静态 fallback；强制 72 条稳定代码项、40 条 BSS 项和 Build ID 形状校验。
+11. 删除 native 写入的静态 fallback；强制58条预检代码项、40条BSS项和 Build ID形状校验。
 12. 首次写入、维护回写、快速链和 IPC 紧急回写统一走 `safe_verify_and_write()`。
 13. 修复系统 overlay 回滚：快照并恢复/删除原始属性，同时恢复显示和 bind mount。
 14. 验证脚本优先读取游戏 mount namespace，而不是只检查 Termux/Root 自身视图。
@@ -46,6 +46,10 @@
 26. 新增 `apply-pid/apply-local`，由 `forge` 在内存预检前进入游戏 mount namespace 应用只读身份节点。
 27. 补充 `/sys/fs/selinux/enforce` 读取 overlay，同时由验证器单独报告真实 `getenforce` 行为，避免把节点文本当作策略状态。
 28. 验证器在游戏 namespace 独立检查 CPU、kernel release、Device Tree compatible 和 SELinux 读取节点。
+29. 隔离14项把 tombstone返回地址误改为 `RET` 的 `kKillChain` 条目。
+30. 完整写入改为代码阶段、30秒存活观察、BSS阶段，解决零间隔组合退出。
+31. 修正 Bionic非空不透明 `dlopen` handle判断并验证远程调用区回收。
+32. 新增系统门禁、内核/硬件门禁和自托管服务端观测探针。
 
 ### P0：云机回归验证
 
@@ -78,6 +82,6 @@
 
 - `verify_identity.sh` 的系统/进程覆盖项无 FAIL；宿主内核、Root 路径、SELinux、KGSL 等 FAIL 必须进入镜像跟踪项。
 - collector 中不再出现 RK3588、AntDock、宿主构建用户名或画像冲突。
-- TerSafe patch 为 72/72 且每项通过 expected opcode 校验。
+- TerSafe patch为58/58且每项通过 expected opcode校验；BSS为40/40。
 - UE4 表为空时日志明确显示 quarantined，不产生写入。
 - `system_identity_overlay.sh rollback` 能恢复所有 bind 与显示覆盖。

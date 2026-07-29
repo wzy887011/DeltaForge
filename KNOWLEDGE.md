@@ -64,6 +64,9 @@ flowchart TD
 | 自动化 | `runner/bot_runner.py` | 读取嵌套配置、创建控制器、编排操作 | 不拥有 native 偏移真源 |
 | 采集器 | `cloud-agent/collect_device_state.sh` | 只读采集云机证据并打包 | `r2/v2` 不参与产品版本统一 |
 | 验证器 | `cloud-agent/verify_identity.sh` | 属性、内核节点、mount、SELinux、KGSL、Hook、Seccomp 分层检查 | WARN 不等价于覆盖成功 |
+| 系统门禁 | `cloud-agent/system_integration_gate.sh` | 宿主与游戏namespace的系统残留审计 | 不修改系统状态，不把进程Hook当系统通过 |
+| 内核/硬件门禁 | `cloud-agent/kernel_hardware_gate.sh` | KGSL、SM8150 DT、SELinux、KeyMint/TEE、内核配置硬门槛 | 缺项输出 `BLOCKED_IMAGE`，需镜像/内核所有者处理 |
+| 服务端探针 | `server-probe/server.py` + `cloud-agent/server_probe_client.sh` | 记录实际peer、代理头、时延和原始JSON证据 | ASN/网络类型无数据时保持 `unknown` |
 
 ## 4. 关键数据流
 
@@ -167,6 +170,9 @@ collector-r2 已确认的宿主事实：
 
 因此当前是 Root 驱动的混合覆盖，不是把云机底层整体变成真机。检测风险仍存在，优先级为：
 宿主镜像/内核事实 > mount namespace 传播 > direct syscall > 进程内一致性。
+
+集成状态采用 `PROCESS_READY -> SYSTEM_READY -> HARDWARE_READY -> SERVICE_OBSERVED -> INTEGRATED`。
+当前云机只达到 `PROCESS_READY`；其余状态必须由对应门禁的真实证据产生。
 
 ## 8. 验证入口
 

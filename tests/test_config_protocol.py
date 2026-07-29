@@ -262,6 +262,53 @@ class ConfigProtocolTests(unittest.TestCase):
             self.assertIn(f"setprop {prop} false", deploy_source)
             self.assertIn(prop, verify_source)
 
+    def test_integration_gates_are_deployed_and_fail_closed(self):
+        system_path = os.path.join(ROOT, "cloud-agent", "system_integration_gate.sh")
+        kernel_path = os.path.join(ROOT, "cloud-agent", "kernel_hardware_gate.sh")
+        client_path = os.path.join(ROOT, "cloud-agent", "server_probe_client.sh")
+        deploy_path = os.path.join(ROOT, "cloud-agent", "deploy.sh")
+
+        with open(system_path, encoding="utf-8") as stream:
+            system_source = stream.read()
+        with open(kernel_path, encoding="utf-8") as stream:
+            kernel_source = stream.read()
+        with open(client_path, encoding="utf-8") as stream:
+            client_source = stream.read()
+        with open(deploy_path, encoding="utf-8") as stream:
+            deploy_source = stream.read()
+
+        self.assertIn("SELinux behavior=", system_source)
+        self.assertIn("container mount topology visible in game namespace", system_source)
+        self.assertIn("external root observer sees hook pathname", system_source)
+        self.assertIn("[BLOCKED_IMAGE]", kernel_source)
+        self.assertIn("/sys/class/kgsl/kgsl-3d0", kernel_source)
+        self.assertIn("KeyMint/Keymaster HAL absent", kernel_source)
+        self.assertIn("base image must boot SELinux enforcing", kernel_source)
+        self.assertIn("--connect-timeout 10 --max-time 30", client_source)
+        for script in (
+            "system_integration_gate.sh",
+            "kernel_hardware_gate.sh",
+            "server_probe_client.sh",
+        ):
+            self.assertIn(f'cp "$SCRIPT_DIR/{script}"', deploy_source)
+            self.assertIn(f"$TMP/{script}", deploy_source)
+
+        collector_path = os.path.join(ROOT, "cloud-agent", "collect_device_state.sh")
+        with open(collector_path, encoding="utf-8") as stream:
+            collector_source = stream.read()
+        self.assertIn('section "INTEGRATION GATES"', collector_source)
+        self.assertIn('system_integration_gate kernel_hardware_gate', collector_source)
+        self.assertIn("deltaforge_server_probe.json", collector_source)
+
+    def test_server_probe_does_not_invent_network_classification(self):
+        path = os.path.join(ROOT, "server-probe", "server.py")
+        with open(path, encoding="utf-8") as stream:
+            source = stream.read()
+        self.assertIn('"asn": None', source)
+        self.assertIn('"network_type": "unknown"', source)
+        self.assertIn("proxy_headers_trusted", source)
+        self.assertIn("--trust-proxy", source)
+
 
 if __name__ == "__main__":
     unittest.main()
