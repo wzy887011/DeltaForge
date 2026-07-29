@@ -77,6 +77,8 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertIn("#define EXPECTED_TERSAFE_BSS_COUNT   40", source)
         self.assertIn("find_validated_patch", source)
         self.assertIn("preflight_code_table", source)
+        self.assertIn("table rejected: accepted=%zu rejected=%zu total=%zu", source)
+        self.assertIn("pkill -x forge_monitor", source)
         self.assertIn("preflight_bss_table", source)
         self.assertIn("validated patch transaction failed; hook injection cancelled", source)
         self.assertIn("#define WRITE_FAIL_ABORT_THRESHOLD 0", source)
@@ -189,6 +191,43 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertIn('> $TMP/forge_build.md5', root_script)
         self.assertIn('> $TMP/forge.version', root_script)
         self.assertLess(source.index('if [ "$DRY_RUN" = "1" ]'), root_start)
+
+    def test_mihomo_controller_preserves_direct_resource_routes(self):
+        path = os.path.join(ROOT, "cloud-agent", "mihomo_control.sh")
+        with open(path, encoding="utf-8") as stream:
+            source = stream.read()
+        self.assertIn("config.before", source)
+        self.assertIn("PUFFER_DOMAIN=puffer.500638030-11-1.gcloudsvcs.com", source)
+        self.assertIn('PUFFER_RULE="DOMAIN,$PUFFER_DOMAIN,DIRECT"', source)
+        self.assertIn("ip route replace", source)
+        self.assertIn("table \"$ROUTE_TABLE\"", source)
+        self.assertIn("socket.getaddrinfo", source)
+        self.assertIn('chmod 0600 "$CONFIG"', source)
+        self.assertIn("rollback)", source)
+
+        deploy_path = os.path.join(ROOT, "cloud-agent", "deploy.sh")
+        with open(deploy_path, encoding="utf-8") as stream:
+            deploy_source = stream.read()
+        self.assertIn('cp "$SCRIPT_DIR/mihomo_control.sh"', deploy_source)
+        self.assertIn("$TMP/mihomo_control.sh", deploy_source)
+
+    def test_deploy_disables_android_graphics_diagnostics(self):
+        deploy_path = os.path.join(ROOT, "cloud-agent", "deploy.sh")
+        with open(deploy_path, encoding="utf-8") as stream:
+            deploy_source = stream.read()
+        verify_path = os.path.join(ROOT, "cloud-agent", "verify_identity.sh")
+        with open(verify_path, encoding="utf-8") as stream:
+            verify_source = stream.read()
+
+        for prop in (
+            "debug.hwui.show_layers_updates",
+            "debug.hwui.show_dirty_regions",
+            "debug.hwui.show_overdraw",
+            "debug.hwui.profile",
+            "debug.sf.showupdates",
+        ):
+            self.assertIn(f"setprop {prop} false", deploy_source)
+            self.assertIn(prop, verify_source)
 
 
 if __name__ == "__main__":

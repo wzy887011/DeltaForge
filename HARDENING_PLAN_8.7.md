@@ -2,6 +2,9 @@
 
 ## 结论与边界
 
+新增实施项：`mihomo_control.sh` 负责代理配置快照、YAML 校验、Puffer
+动态 `/32` 路由、配置权限 `0600`、状态检查和显式回滚。
+
 当前实现是 Root 权限驱动的混合覆盖：全局属性和 bind mount 属于系统状态层，
 `libforgehook.so` 属于目标进程用户态 Hook。Root 是部署与注入能力，不代表
 所有读取路径都进入了“Root Hook”。宿主内核、CPU 指令行为、设备驱动树和

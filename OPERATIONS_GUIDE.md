@@ -1,6 +1,18 @@
 # DeltaForge 操作手册 v1.0
 **更新**: 2026-07-28 | **版本**: v8.7
 
+网络控制入口：
+
+```bash
+su -c '/data/local/tmp/mihomo_control.sh apply'
+su -c '/data/local/tmp/mihomo_control.sh refresh'
+su -c '/data/local/tmp/mihomo_control.sh status'
+su -c '/data/local/tmp/mihomo_control.sh rollback'
+```
+
+控制器会先备份私有配置，验证 YAML，维护 Puffer 当前 IPv4 地址经真实
+`wlan0` 网关的精确 `/32` 路由，并将配置权限收敛为 `0600`。
+
 ---
 
 ## 1. 项目概览

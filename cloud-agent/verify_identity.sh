@@ -10,6 +10,22 @@ ok() { pass=$((pass+1)); printf '[PASS] %s\n' "$*"; }
 note() { warn=$((warn+1)); printf '[WARN] %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '[FAIL] %s\n' "$*"; }
 
+[ "$(id -u)" = 0 ] && ok 'verification runs with UID 0' \
+    || bad 'verification is not running as root'
+
+for prop in \
+    debug.hwui.show_layers_updates \
+    debug.hwui.show_dirty_regions \
+    debug.hwui.show_overdraw \
+    debug.hwui.profile \
+    debug.sf.showupdates; do
+    value="$(getprop "$prop" 2>/dev/null)"
+    case "$value" in
+        ''|false|0) ok "$prop disabled" ;;
+        *) bad "$prop=$value enables Android graphics diagnostics" ;;
+    esac
+done
+
 if [ -n "$PID" ]; then
     if command -v nsenter >/dev/null 2>&1; then
         NSENTER_KIND="direct"
@@ -88,6 +104,35 @@ done
     && ok 'common root artifact paths absent' || bad "root artifact paths:$root_artifacts"
 [ -d /sys/class/kgsl/kgsl-3d0 ] \
     && ok 'Qualcomm KGSL tree exists' || note 'KGSL tree absent; only game-process file hooks synthesize it'
+
+if pidof mihomo >/dev/null 2>&1; then
+    note 'Mihomo root process exists; host/root observers can identify the proxy layer'
+else
+    note 'Mihomo process absent; L0 proxy is not active'
+fi
+if ip link show Meta >/dev/null 2>&1; then
+    note 'Meta TUN exists; game-process interface hooks must normalize it'
+else
+    note 'Meta TUN absent; L0 proxy routing is not active'
+fi
+if [ -f /data/local/tmp/clash-config.yaml ]; then
+    config_mode="$(stat -c %a /data/local/tmp/clash-config.yaml 2>/dev/null)"
+    [ "$config_mode" = 600 ] \
+        && ok 'Mihomo credential config mode=600' \
+        || bad "Mihomo credential config mode=${config_mode:-unknown} expected=600"
+fi
+if [ -s /data/local/tmp/forge_network_backup/puffer.routes ]; then
+    route_missing=0
+    while IFS= read -r address; do
+        ip route show table wlan0 "$address/32" 2>/dev/null | grep -q "via .* dev wlan0" \
+            || route_missing=$((route_missing + 1))
+    done < /data/local/tmp/forge_network_backup/puffer.routes
+    [ "$route_missing" -eq 0 ] \
+        && ok 'Puffer DIRECT host routes installed' \
+        || bad "Puffer DIRECT host routes missing=$route_missing"
+else
+    note 'managed Puffer route state absent'
+fi
 
 if [ -n "$PID" ]; then
     ok "game pid=$PID"

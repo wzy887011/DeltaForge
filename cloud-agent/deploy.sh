@@ -85,14 +85,14 @@ TIMESTAMP="__TIMESTAMP__"
 # Keep backup and replacement in one root-owned transaction. Existing
 # /data/local/tmp files may not be writable by the Termux application UID.
 mkdir -p "$BACKUP_DIR"
-for f in forge libforgehook.so forge_monitor injector touch_injector forge_patches.json system_identity_overlay.sh verify_identity.sh forge.version forge_build.md5; do
+for f in forge libforgehook.so forge_monitor injector touch_injector forge_patches.json system_identity_overlay.sh verify_identity.sh mihomo_control.sh forge.version forge_build.md5; do
     [ -f "$TMP/$f" ] && cp -p "$TMP/$f" "$BACKUP_DIR/$f.$TIMESTAMP"
 done
 echo "[+] Previous version backed up to $BACKUP_DIR/"
 
 # 关键: 先杀旧进程，确保新二进制能写入
 pkill -9 -f "$TMP/forge" 2>/dev/null || true
-pkill -9 -f "$TMP/forge_monitor" 2>/dev/null || true
+pkill -9 -x forge_monitor 2>/dev/null || true
 sleep 3
 
 cp "$NATIVE/forge"           $TMP/forge
@@ -105,9 +105,10 @@ cp "$SCRIPT_DIR/df-hijack-root.sh" $TMP/df-hijack-root.sh
 cp "$SCRIPT_DIR/check.sh"          $TMP/check.sh
 cp "$SCRIPT_DIR/system_identity_overlay.sh" $TMP/system_identity_overlay.sh
 cp "$SCRIPT_DIR/verify_identity.sh" $TMP/verify_identity.sh
+cp "$SCRIPT_DIR/mihomo_control.sh" $TMP/mihomo_control.sh
 cp "$SCRIPT_DIR/../runner/config/tersafe_patches.json" $TMP/forge_patches.json
 chmod 755 $TMP/forge $TMP/forge_monitor $TMP/injector $TMP/touch_injector $TMP/collect_logs.sh $TMP/df-hijack-root.sh $TMP/check.sh
-chmod 755 $TMP/system_identity_overlay.sh $TMP/verify_identity.sh
+chmod 755 $TMP/system_identity_overlay.sh $TMP/verify_identity.sh $TMP/mihomo_control.sh
 chmod 644 $TMP/libforgehook.so
 chmod 600 $TMP/forge_patches.json
 
@@ -142,6 +143,14 @@ fi
 
 echo "[+] Deploy done"
 sh $TMP/system_identity_overlay.sh apply
+
+# Disable Android graphics diagnostics that flash hardware layers green.
+# Existing applications must be restarted before every renderer observes it.
+setprop debug.hwui.show_layers_updates false
+setprop debug.hwui.show_dirty_regions false
+setprop debug.hwui.show_overdraw false
+setprop debug.hwui.profile false
+setprop debug.sf.showupdates false
 DEPLOY_EOF
 
 sed -i "s|__NATIVE__|$NATIVE|g" "$DEPLOY_SH"
@@ -167,6 +176,8 @@ su -c "sh $TMP/verify_identity.sh" 2>/dev/null || true
 echo ""
 echo "[+] v8.7 deploy complete. Binary backups: $BACKUP_DIR/*.$TIMESTAMP"
 echo "    Identity rollback: su -c '$TMP/system_identity_overlay.sh rollback'"
+echo "    Network apply: su -c '$TMP/mihomo_control.sh apply'"
+echo "    Network rollback: su -c '$TMP/mihomo_control.sh rollback'"
 echo "    Launch (inject mode, recommended): su -c '$TMP/forge -l'"
 echo "    Launch (hijack mode, deprecated): su -c 'am start -n com.tencent.tmgp.dfm/.SplashActivity'"
 if [ "$AUTO_LAUNCH" = "1" ]; then

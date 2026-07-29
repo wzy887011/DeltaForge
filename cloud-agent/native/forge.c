@@ -592,16 +592,25 @@ static const patch_entry_t *find_validated_patch(uint64_t offset) {
 static int preflight_code_table(pid_t pid, uint64_t base,
                                 const patch_entry_t *entries, size_t count,
                                 const char *name) {
+    size_t accepted = 0;
+    size_t rejected = 0;
     for (size_t i = 0; i < count; i++) {
         uint32_t current = 0;
-        if (!entries[i].has_expected
-            || mem_read32(pid, base + entries[i].offset, &current) != 0
+        int readable = mem_read32(pid, base + entries[i].offset, &current) == 0;
+        if (!entries[i].has_expected || !readable
             || (current != entries[i].expected && current != entries[i].value)) {
-            ERR("[preflight] %s[%zu] rejected off=0x%llx current=0x%08x expected=0x%08x patch=0x%08x",
-                name, i, (unsigned long long)entries[i].offset, current,
-                entries[i].expected, entries[i].value);
-            return 0;
+            ERR("[preflight] %s[%zu] rejected off=0x%llx readable=%d current=0x%08x expected=0x%08x patch=0x%08x",
+                name, i, (unsigned long long)entries[i].offset, readable,
+                current, entries[i].expected, entries[i].value);
+            rejected++;
+        } else {
+            accepted++;
         }
+    }
+    if (rejected != 0) {
+        ERR("[preflight] %s table rejected: accepted=%zu rejected=%zu total=%zu",
+            name, accepted, rejected, count);
+        return 0;
     }
     OK("[preflight] %s table accepted: %zu/%zu", name, count, count);
     return 1;
@@ -1563,7 +1572,7 @@ static int do_launch(void) {
     do_prepare();
     start_logcat();
     /* Start background behavior monitor (append-only log) */
-    run_shell_best_effort("pkill -f forge_monitor 2>/dev/null; "
+    run_shell_best_effort("pkill -x forge_monitor 2>/dev/null || true; "
            "/data/local/tmp/forge_monitor -v >> /data/local/tmp/forge_monitor.log 2>&1 &");
     OK("forge_monitor 已启动");
     start_game();
@@ -1584,14 +1593,14 @@ static int do_launch(void) {
     if (rc != 0) {
         ERR("validated patch transaction failed; hook injection cancelled");
         stop_game();
-        run_shell_best_effort("pkill -f forge_monitor 2>/dev/null");
+        run_shell_best_effort("pkill -x forge_monitor 2>/dev/null || true");
         return rc;
     }
     pid = get_pid_by_name(TARGET_PKG);
     if (!pid || inject_hook(pid) != 0) {
         ERR("hook library load failed; stopping inconsistent launch");
         stop_game();
-        run_shell_best_effort("pkill -f forge_monitor 2>/dev/null");
+        run_shell_best_effort("pkill -x forge_monitor 2>/dev/null || true");
         return -1;
     }
     hide_injection_from_maps(pid);
