@@ -42,13 +42,31 @@ lshal > "$WORK/lshal.snapshot.txt" 2>/dev/null || true
 
 STRINGS="$(command -v strings 2>/dev/null || true)"
 [ -n "$STRINGS" ] || STRINGS=/data/data/com.termux/files/usr/bin/strings
+READELF="$(command -v readelf 2>/dev/null || true)"
+SHA256SUM="$(command -v sha256sum 2>/dev/null || true)"
 APP_APK="$(pm path "$PKG" 2>/dev/null | sed -n 's/^package://p' | head -n 1)"
 APP_DIR="$(dirname "$APP_APK" 2>/dev/null)"
 : > "$WORK/static_candidates.tsv"
+: > "$WORK/native_inventory.tsv"
 if [ -x "$STRINGS" ] && [ -d "$APP_DIR/lib/arm64" ]; then
     for so in "$APP_DIR"/lib/arm64/*.so; do
         [ -f "$so" ] || continue
         module="$(basename "$so")"
+        case "$module" in
+            libtersafe.so|libTDataMaster.so|libtdmqimei.so|libUE4.so|*qimei*|*Qimei*|*turing*|*Turing*|*hawk*|*Hawk*|*CrashSight*)
+                bytes="$(wc -c < "$so" | tr -d ' ')"
+                sha256=""
+                [ -n "$SHA256SUM" ] && sha256="$($SHA256SUM "$so" 2>/dev/null | awk '{print $1}')"
+                build_id=""
+                [ -n "$READELF" ] && build_id="$($READELF -n "$so" 2>/dev/null | sed -n 's/.*Build ID: //p' | head -n 1)"
+                versions="$($STRINGS -a "$so" 2>/dev/null | \
+                    grep -E 'GCLOUD_VERSION_TDM_|[0-9]+\.[0-9]{2,3}\.[0-9]{2,3}\.[0-9]+' | \
+                    head -n 8 | tr '\t\r\n' '   ')"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$module" "$bytes" "$sha256" "$build_id" "$versions" "$so" \
+                    >> "$WORK/native_inventory.tsv"
+                ;;
+        esac
         "$STRINGS" -a "$so" 2>/dev/null | awk -v module="$module" '
             function emit(kind, value) {
                 print module "\t" kind "\t" value
@@ -62,7 +80,7 @@ if [ -x "$STRINGS" ] && [ -d "$APP_DIR/lib/arm64" ]; then
             /^\/(proc|sys|dev|system|vendor|odm|data)\/[A-Za-z0-9._\/@:+-]+$/ {
                 emit("path", $0); next
             }
-            tolower($0) ~ /(keymint|keymaster|strongbox|gatekeeper|kgsl|adreno|mali|selinux|mountinfo|cpuinfo|qemu|virtual|cloud|container|lxc|magisk|xposed|frida)/ {
+            tolower($0) ~ /(keymint|keymaster|strongbox|gatekeeper|kgsl|adreno|mali|selinux|mountinfo|cpuinfo|qemu|virtual|cloud|container|lxc|magisk|xposed|frida|tersafe|tss_ano|ano_tmp|tdatamaster|tdm_tmp|qimei|turing|hawk|crashsight|android_id|settings_ssaid|serial_number|ro.serialno|build.fingerprint)/ {
                 emit("token", $0)
             }
         ' >> "$WORK/static_candidates.tsv"

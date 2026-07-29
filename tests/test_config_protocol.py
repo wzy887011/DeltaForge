@@ -324,6 +324,9 @@ class ConfigProtocolTests(unittest.TestCase):
 
         self.assertIn("-e trace=%file,%network,ioctl,uname,sysinfo,prctl", audit_source)
         self.assertIn("static_candidates.tsv", audit_source)
+        self.assertIn("native_inventory.tsv", audit_source)
+        self.assertIn("libTDataMaster.so", audit_source)
+        self.assertIn("GCLOUD_VERSION_TDM_", audit_source)
         self.assertIn("maps.before.txt", audit_source)
         self.assertIn("ALLOW_HOOKED", audit_source)
         self.assertIn("libforgehook.so is active", audit_source)

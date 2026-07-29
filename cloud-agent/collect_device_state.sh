@@ -431,7 +431,7 @@ latest_audit="$(find /data/local/tmp -maxdepth 1 -type d \
     -name 'deltaforge_env_audit_*' 2>/dev/null | sort | tail -n 1)"
 if [ -n "$latest_audit" ]; then
     mkdir -p "$OUT/environment-audit"
-    for f in metadata.txt report.json report.txt static_candidates.tsv \
+    for f in metadata.txt report.json report.txt static_candidates.tsv native_inventory.tsv \
              strace.stderr.txt maps.before.txt maps.after.txt; do
         [ -f "$latest_audit/$f" ] && cp -p "$latest_audit/$f" "$OUT/environment-audit/$f"
     done
