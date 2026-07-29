@@ -54,6 +54,7 @@ static patch_scope_t g_patch_scope = PATCH_SCOPE_FULL;
 /* JSON is the only runtime source; no compiled offset fallback. */
 #define EXPECTED_TERSAFE_PATCH_COUNT 58
 #define EXPECTED_TERSAFE_BSS_COUNT   40
+#define PATCH_PHASE_SETTLE_SECONDS   30
 #define DYN_TERSAFE_PATCHES (g_dyn_table.tersafe_patches)
 #define DYN_TERSAFE_COUNT   ((size_t)g_dyn_table.tersafe_count)
 #define DYN_BSS_OFFSETS     (g_dyn_table.tersafe_bss)
@@ -1188,6 +1189,22 @@ static int patch_game_process(void) {
         total_ok += tersafe_ok; total_fail += tersafe_fail;
     } else {
         WARN("diagnostic scope: code table skipped");
+    }
+
+    /* Back-to-back code and BSS writes trigger TerSafe's initialization
+     * watchdog. Keep the validated transaction on the same PID, but let the
+     * code phase settle before changing the explicit BSS counters. */
+    if (patch_code && patch_bss) {
+        OK("staged patch: waiting %d seconds before BSS phase",
+           PATCH_PHASE_SETTLE_SECONDS);
+        for (int i = 0; i < PATCH_PHASE_SETTLE_SECONDS; i++) {
+            sleep(1);
+            if (kill(pid, 0) != 0) {
+                ERR("staged patch: game exited before BSS phase");
+                return -3;
+            }
+        }
+        OK("staged patch: game stable, entering BSS phase");
     }
 
     /* 3. tersafe BSS 段清零 */
