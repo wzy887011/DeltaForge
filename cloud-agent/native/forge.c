@@ -44,6 +44,12 @@
 #define FORGE_PATCH_JSON "/data/local/tmp/forge_patches.json"
 static patch_table_t g_dyn_table;   /* 动态加载结果 */
 static int           g_dyn_loaded = 0;
+typedef enum {
+    PATCH_SCOPE_FULL = 0,
+    PATCH_SCOPE_CODE_ONLY,
+    PATCH_SCOPE_BSS_ONLY,
+} patch_scope_t;
+static patch_scope_t g_patch_scope = PATCH_SCOPE_FULL;
 
 /* JSON is the only runtime source; no compiled offset fallback. */
 #define EXPECTED_TERSAFE_PATCH_COUNT 72
@@ -1117,6 +1123,8 @@ static int inject_hook(pid_t pid) {
 /* ============= 核心: 内存补丁执行 ============= */
 static int patch_game_process(void) {
     JUNK_INSN();
+    int patch_code = g_patch_scope != PATCH_SCOPE_BSS_ONLY;
+    int patch_bss = g_patch_scope != PATCH_SCOPE_CODE_ONLY;
     pid_t pid = 0;
     for (int i = 0; i < 600; i++) {
         pid = get_pid_by_name(TARGET_PKG);
@@ -1159,27 +1167,31 @@ static int patch_game_process(void) {
     }
     OK("libtersafe.so base=0x%lx", (unsigned long)ts_base);
 
-    uint64_t bss_base = get_module_base(pid, "libtersafe.so:bss");
+    uint64_t bss_base = patch_bss ? get_module_base(pid, "libtersafe.so:bss") : 0;
     uint64_t bss_limit = ts_base + 0xC00000;
-    if (!preflight_code_table(pid, ts_base, DYN_TERSAFE_PATCHES,
-            DYN_TERSAFE_COUNT, "tersafe")
-        || bss_base == 0
-        || !preflight_bss_table(pid, bss_base, bss_limit)) {
+    if ((patch_code && !preflight_code_table(pid, ts_base, DYN_TERSAFE_PATCHES,
+             DYN_TERSAFE_COUNT, "tersafe"))
+        || (patch_bss && (bss_base == 0
+             || !preflight_bss_table(pid, bss_base, bss_limit)))) {
         ERR("patch transaction preflight failed; no target writes performed");
         return -2;
     }
 
-    /* 2. tersafe 代码补丁 75 处 (verify-before-patch) */
-    for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
-        uint64_t addr = ts_base + DYN_TERSAFE_PATCHES[i].offset;
-        if (safe_verify_and_write(pid, addr, &DYN_TERSAFE_PATCHES[i]) == 0) tersafe_ok++;
-        else tersafe_fail++;
+    /* 2. tersafe code table (verify-before-patch). */
+    if (patch_code) {
+        for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
+            uint64_t addr = ts_base + DYN_TERSAFE_PATCHES[i].offset;
+            if (safe_verify_and_write(pid, addr, &DYN_TERSAFE_PATCHES[i]) == 0) tersafe_ok++;
+            else tersafe_fail++;
+        }
+        OK("tersafe code: %d ok / %d fail", tersafe_ok, tersafe_fail);
+        total_ok += tersafe_ok; total_fail += tersafe_fail;
+    } else {
+        WARN("diagnostic scope: code table skipped");
     }
-    OK("tersafe code: %d ok / %d fail", tersafe_ok, tersafe_fail);
-    total_ok += tersafe_ok; total_fail += tersafe_fail;
 
     /* 3. tersafe BSS 段清零 */
-    if (bss_base > 0) {
+    if (patch_bss && bss_base > 0) {
         /* 3a. Only clear the explicit JSON offsets.  There is intentionally no
          * low-value sweep: guessing counters can corrupt unrelated state. */
         for (size_t i = 0; i < DYN_BSS_COUNT; i++) {
@@ -1194,12 +1206,16 @@ static int patch_game_process(void) {
         OK("tersafe bss: %d ok / %d fail", bss_ok, bss_fail);
         total_ok += bss_ok; total_fail += bss_fail;
     } else {
-        WARN("tersafe BSS 段未找到 (跳过)");
+        if (patch_bss)
+            WARN("tersafe BSS 段未找到 (跳过)");
+        else
+            WARN("diagnostic scope: BSS table skipped");
     }
 
     /* 4. UE4 table is optional and currently quarantined for this Build ID. */
-    uint64_t ue4_base = DYN_UE4_COUNT ? wait_for_module(pid, C_ue4, 20000) : 0;
-    if (ue4_base && DYN_UE4_COUNT
+    uint64_t ue4_base = patch_code && DYN_UE4_COUNT
+        ? wait_for_module(pid, C_ue4, 20000) : 0;
+    if (patch_code && ue4_base && DYN_UE4_COUNT
         && verify_module_version(pid, "libUE4.so", g_dyn_table.ue4_build_id)) {
         if (!preflight_code_table(pid, ue4_base, DYN_UE4_PATCHES,
                 DYN_UE4_COUNT, "ue4")) {
@@ -1214,9 +1230,9 @@ static int patch_game_process(void) {
         }
         OK("UE4: %d ok / %d fail", ue4_ok, ue4_fail);
         total_ok += ue4_ok; total_fail += ue4_fail;
-    } else if (DYN_UE4_COUNT) {
+    } else if (patch_code && DYN_UE4_COUNT) {
         WARN("libUE4.so missing or Build ID rejected (skip engine table)");
-    } else {
+    } else if (patch_code) {
         WARN("UE4 patch table quarantined for Build ID 8187ddb9edbc9d5201201ffd7b008df3bfe533db");
     }
 
@@ -1228,7 +1244,7 @@ static int patch_game_process(void) {
     }
 
     /* 立即验证 检测链 — tersafe 可能在补丁后几十毫秒内恢复 */
-    if (ts_base) {
+    if (patch_code && ts_base) {
         usleep(50000); /* 等 50ms 让 tersafe 的恢复线程跑完 */
         int reverted = 0;
         for (size_t i = 0; i < DYN_TERSAFE_COUNT; i++) {
@@ -2036,6 +2052,8 @@ static void print_usage(const char *prog) {
         "  -p    仅 prepare (清理+适配+属性)\n"
         "  -l    launch (prepare + 启动游戏 + 补丁)\n"
         "  -m    仅补丁 (游戏必须在运行)\n"
+        "        --code-only  诊断: -m 仅写稳定代码表\n"
+        "        --bss-only   诊断: -m 仅清零 BSS 表\n"
         "  -s    查询状态\n"
         "  -c    仅清理检查文件\n"
         "  -x    仅适配系统属性\n"
@@ -2059,6 +2077,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-p")) flag_prep = 1;
         else if (!strcmp(argv[i], "-l")) flag_launch = 1;
         else if (!strcmp(argv[i], "-m")) flag_patch = 1;
+        else if (!strcmp(argv[i], "--code-only")) g_patch_scope = PATCH_SCOPE_CODE_ONLY;
+        else if (!strcmp(argv[i], "--bss-only")) g_patch_scope = PATCH_SCOPE_BSS_ONLY;
         else if (!strcmp(argv[i], "-s")) flag_status = 1;
         else if (!strcmp(argv[i], "-c")) flag_clean = 1;
         else if (!strcmp(argv[i], "-x")) flag_adapt = 1;
@@ -2074,6 +2094,11 @@ int main(int argc, char **argv) {
     }
 
     if (getuid() != 0) { ERR("需要 root 权限"); return 1; }
+
+    if (g_patch_scope != PATCH_SCOPE_FULL && !flag_patch) {
+        ERR("--code-only/--bss-only 只允许与 -m 一起使用");
+        return 2;
+    }
 
     g_logfile = fopen(FORGE_LOG, "a");
 

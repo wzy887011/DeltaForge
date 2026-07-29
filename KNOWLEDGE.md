@@ -93,6 +93,10 @@ flowchart TD
 Build ID 的不同 ASLR 启动中读到的 32 位值发生变化，属于动态/重定位槽，已从
 稳定代码表隔离；禁止把单次启动采样值写入 `expected`。
 
+故障隔离入口：`forge -m --code-only` 只执行 72 项代码表，
+`forge -m --bss-only` 只执行 40 项 BSS 表。两者仅允许与 `-m` 组合，默认
+`forge -m`/`forge -l` 仍执行完整事务；诊断模式不得作为正式启动路径。
+
 ### 身份读取
 
 `resetprop` 提供全局 Android 属性；只读 bind 提供当前 mount namespace 的 `/proc`/DT 文本；
