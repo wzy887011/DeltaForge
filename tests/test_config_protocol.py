@@ -59,6 +59,10 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertEqual(len(table["tersafe_patches"]), 75)
         self.assertEqual(len(table["tersafe_bss"]), 40)
         self.assertTrue(all("expected" in item for item in table["tersafe_patches"]))
+        by_offset = {item["offset"].lower(): item for item in table["tersafe_patches"]}
+        self.assertEqual(by_offset["0x5137c0"]["expected"], "0xCAA52928")
+        self.assertEqual(by_offset["0x516640"]["expected"], "0xCAB15B7C")
+        self.assertEqual(by_offset["0x526ed0"]["expected"], "0xCAA58FC0")
         self.assertEqual(
             table["build_id"],
             "d70d7926094ae39a46745c12ddcc1877641f82e8",

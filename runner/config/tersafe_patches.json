@@ -6,19 +6,19 @@
                                 "offset":  "0x5137C0",
                                 "value":  "0x2A1F03FF",
                                 "comment":  "return 0xFF",
-                                "expected":  "0x00000000"
+                                "expected":  "0xCAA52928"
                             },
                             {
                                 "offset":  "0x516640",
                                 "value":  "0x2A1F03FF",
                                 "comment":  "return 0xFF",
-                                "expected":  "0x00000000"
+                                "expected":  "0xCAB15B7C"
                             },
                             {
                                 "offset":  "0x526ED0",
                                 "value":  "0x2A1F03FF",
                                 "comment":  "return 0xFF",
-                                "expected":  "0x00000000"
+                                "expected":  "0xCAA58FC0"
                             },
                             {
                                 "offset":  "0x4CDB04",
