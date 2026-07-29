@@ -86,7 +86,7 @@ PY
 
 find_gateway() {
     ip route show table "$ROUTE_TABLE" | awk -v dev="$IFACE" '
-        $2 == "via" && $4 == dev && $3 !~ /^198\.18\./ { print $3; exit }
+        $2 == "via" && $5 == dev && $3 !~ /^198\.18\./ { print $3; exit }
     '
 }
 

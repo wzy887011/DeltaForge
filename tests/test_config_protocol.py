@@ -201,6 +201,7 @@ class ConfigProtocolTests(unittest.TestCase):
         self.assertIn('PUFFER_RULE="DOMAIN,$PUFFER_DOMAIN,DIRECT"', source)
         self.assertIn("ip route replace", source)
         self.assertIn("table \"$ROUTE_TABLE\"", source)
+        self.assertIn('$2 == "via" && $5 == dev', source)
         self.assertIn("socket.getaddrinfo", source)
         self.assertIn('chmod 0600 "$CONFIG"', source)
         self.assertIn("rollback)", source)
