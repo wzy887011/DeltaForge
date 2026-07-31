@@ -20,8 +20,23 @@ MAX_TEXT_BYTES = 8 * 1024 * 1024
 
 FACET_PATTERNS = {
     "root_framework": re.compile(
-        r"magisk|kernelsu|\bksud?\b|apatch|\bapd\b|shamiko|root[_ -]?module|s9su",
+        r"magisk|kernelsu|\bksud?\b|apatch|\bapd\b|shamiko|root[_ -]?module|s9su|"
+        r"bpfdomain|com\.android\.provider\.root",
         re.I,
+    ),
+    "privileged_control_plane": re.compile(
+        r"platform[_ -]?control[_ -]?plane|bpfdomain|rkp_cert_processor|"
+        r"traced_kprobes|mount_script_socket|"
+        r"/data/misc/profiles/(?:exec|root)|provider\.root|dexguard|localSock",
+        re.I,
+    ),
+    "selinux_policy_patch": re.compile(
+        r"poweropt-service|asp_sepolicy|live[_ -]?sepolicy|selinux.*(?:patch|load)|"
+        r"/sys/fs/selinux/load",
+        re.I,
+    ),
+    "remote_admin": re.compile(
+        r"console_agent|dropbear(?:_service)?|authorized_keys|\bcrond?\b", re.I
     ),
     "zygote_injection": re.compile(
         r"zygisk|riru|lsposed|xposed|zygote.*(?:inject|module)|(?:inject|module).*zygote",
@@ -29,7 +44,7 @@ FACET_PATTERNS = {
     ),
     "property_spoofing": re.compile(
         r"resetprop|system\.prop|prop(?:erty)?[_ -]?(?:spoof|mask|override)|"
-        r"(?:spoof|mask).*prop|ro\.(?:product|build|boot|hardware|soc)",
+        r"(?:spoof|mask).*prop|ro\.(?:product|build|boot|hardware|soc)(?:\.|\b)",
         re.I,
     ),
     "namespace_overlay": re.compile(
@@ -37,12 +52,13 @@ FACET_PATTERNS = {
         re.I,
     ),
     "kernel_hook": re.compile(
-        r"susfs|kprobe|ftrace|inline[_ -]?hook|/sys/module|proc/modules|kernel[_ -]?module",
+        r"susfs|(?<!traced_)kprobe|ftrace|inline[_ -]?hook|/sys/module|"
+        r"proc/modules|kernel[_ -]?module",
         re.I,
     ),
     "hardware_projection": re.compile(
         r"kgsl|adreno|mali|sm8150|rk3588|device.?tree|keymint|keymaster|"
-        r"gatekeeper|strongbox|secureclock|soc0|selinux",
+        r"gatekeeper|strongbox|secureclock|soc0",
         re.I,
     ),
     "network_projection": re.compile(
@@ -50,8 +66,11 @@ FACET_PATTERNS = {
         r"\btun\b|proxy|private_dns",
         re.I,
     ),
+    "target_security_module": re.compile(
+        r"tersafe|tdatamaster|qimei|turing|hawk|crashsight", re.I
+    ),
     "application_hook": re.compile(
-        r"frida|hook|libforge|tersafe|tdatamaster|qimei|turing|hawk|"
+        r"frida|(?:^|[^a-z])hook(?:[^a-z]|$)|libforge|"
         r"memfd:|\(deleted\)|rwxp",
         re.I,
     ),
@@ -71,6 +90,11 @@ GENERIC_PATH_TOKENS = {
     "lib64",
     "zygisk",
     "arm64-v8a.so",
+    "arm64-v8a",
+    "arm64",
+    "armeabi-v7a",
+    "base.apk",
+    "base",
 }
 
 
@@ -149,12 +173,27 @@ def iter_text_lines(root: Path) -> Iterator[tuple[str, int, str]]:
 def candidate_tokens(path: str) -> list[str]:
     pure = PurePosixPath(path)
     tokens = []
-    for part in pure.parts:
-        lower = part.lower()
-        stem = Path(part).stem.lower()
-        for token in (lower, stem):
-            if len(token) >= 4 and token not in GENERIC_PATH_TOKENS and token not in tokens:
-                tokens.append(token)
+    basename = pure.name.lower()
+    stem = Path(pure.name).stem.lower()
+    for token in (basename, stem):
+        if len(token) >= 4 and token not in GENERIC_PATH_TOKENS and token not in tokens:
+            tokens.append(token)
+
+    parts = [part.lower() for part in pure.parts]
+    try:
+        module_index = parts.index("modules")
+    except ValueError:
+        module_index = -1
+    if module_index >= 0 and module_index + 1 < len(parts):
+        module_id = parts[module_index + 1]
+        if len(module_id) >= 4 and module_id not in GENERIC_PATH_TOKENS:
+            tokens.append(module_id)
+
+    if basename in GENERIC_PATH_TOKENS and "data" in parts and "app" in parts:
+        for part in parts:
+            match = re.match(r"((?:[a-z][a-z0-9_]*\.)+[a-z][a-z0-9_]*)-", part)
+            if match and match.group(1) not in tokens:
+                tokens.append(match.group(1))
     return tokens
 
 
@@ -165,24 +204,84 @@ def matches_candidate(line: str, path: str, tokens: list[str]) -> bool:
     basename = PurePosixPath(path).name.lower()
     if len(basename) >= 4 and basename in lower:
         return True
-    return any(token in lower for token in tokens)
+    for token in tokens:
+        if token not in lower:
+            continue
+        if token.startswith("com.") and lower.count(",") >= 2:
+            continue
+        return True
+    return False
 
 
 def environment_contradictions(lines: list[tuple[str, int, str]]) -> list[dict]:
-    patterns = {
-        "qualcomm": re.compile(r"qcom|qualcomm|sm8150|adreno", re.I),
-        "rockchip": re.compile(r"rockchip|rk3588|mali", re.I),
-        "container": re.compile(r"overlay|lxc|antdock|container", re.I),
-        "verified_green": re.compile(r"verifiedbootstate[^\n]*green", re.I),
-        "root": re.compile(r"magisk|kernelsu|apatch|/data/adb|/system/xbin/s9su", re.I),
-        "selinux_disabled": re.compile(r"selinux[^\n]*(?:disabled|permissive)|getenforce[^\n]*(?:disabled|permissive)", re.I),
-        "selinux_claim": re.compile(r"veritymode[^\n]*enforcing|/sys/fs/selinux/enforce[^\n]*1", re.I),
-    }
     hits: dict[str, list[dict]] = defaultdict(list)
+
+    def add(name: str, source: str, number: int, line: str) -> None:
+        if len(hits[name]) < 8:
+            hits[name].append({"source": source, "line": number, "text": line[:500]})
+
     for source, number, line in lines:
-        for name, pattern in patterns.items():
-            if pattern.search(line) and len(hits[name]) < 8:
-                hits[name].append({"source": source, "line": number, "text": line[:500]})
+        normalized = source.replace("\\", "/")
+        lower = line.lower()
+
+        property_source = normalized in {
+            "commands/identity_projection/getprop.stdout.txt",
+            "commands/init_services/init_properties.stdout.txt",
+            "commands/root_framework/resetprop_view.stdout.txt",
+        }
+        hardware_source = normalized in {
+            "commands/boot_kernel/device_tree.stdout.txt",
+            "commands/identity_projection/hardware_nodes.stdout.txt",
+            "commands/identity_projection/cpuinfo.stdout.txt",
+            "commands/identity_projection/surfaceflinger.stdout.txt",
+        }
+        if property_source:
+            if re.search(r"\[(?:ro\.)?(?:boot\.hardware|hardware|soc\.(?:model|manufacturer)|board\.platform)\].*\[(?:qcom|qualcomm|sm8\d+)", lower):
+                add("qualcomm", source, number, line)
+            if re.search(r"\[(?:ro\.)?(?:boot\.hardware|hardware|soc\.(?:model|manufacturer)|board\.platform|hardware\.egl)\].*\[(?:rockchip|rk3588|mali)", lower):
+                add("rockchip", source, number, line)
+            if "verifiedbootstate" in lower and "[green]" in lower:
+                add("verified_green", source, number, line)
+            if "ro.boot.selinux" in lower and "[enforcing]" in lower:
+                add("selinux_enforcing", source, number, line)
+
+        if hardware_source:
+            if re.search(r"qcom|qualcomm|sm8\d+|adreno", lower):
+                add("qualcomm", source, number, line)
+            if re.search(r"rockchip|rk3588|mali|rknpu", lower):
+                add("rockchip", source, number, line)
+
+        if normalized.endswith("mountinfo.txt") and re.search(
+            r"overlay|lxc|antdock|container|virtio|\b9p\b|/dev/mapper/vg-vm_", lower
+        ):
+            add("container", source, number, line)
+
+        root_source = normalized in {
+            "commands/root_framework/proc_walk.stdout.txt",
+            "commands/root_framework/framework_versions.stdout.txt",
+            "commands/root_framework/adb_inventory.stdout.txt",
+            "commands/root_framework/platform_control_plane.stdout.txt",
+            "commands/root_framework/platform_control_processes.stdout.txt",
+            "commands/root_framework/root_provider.stdout.txt",
+            "candidates.tsv",
+        }
+        if root_source and re.search(
+            r"(?:^|/)su(?:\s|$)|resetprop|bpfdomain|provider\.root|"
+            r"rkp_cert_processor|traced_kprobes|magisk|kernelsu|apatch|/data/adb/modules",
+            lower,
+        ):
+            add("root", source, number, line)
+
+        if normalized == "commands/boot_kernel/selinux.stdout.txt":
+            if lower.strip() == "enforcing":
+                add("selinux_enforcing", source, number, line)
+            elif lower.strip() in {"disabled", "permissive"}:
+                add("selinux_disabled", source, number, line)
+        if normalized == "commands/boot_kernel/cmdline.stdout.txt":
+            if "androidboot.selinux=disabled" in lower:
+                add("selinux_disabled", source, number, line)
+            elif "androidboot.selinux=enforcing" in lower:
+                add("selinux_enforcing", source, number, line)
 
     contradictions = []
     definitions = (
@@ -193,7 +292,7 @@ def environment_contradictions(lines: list[tuple[str, int, str]]) -> list[dict]:
         ),
         (
             "container_topology_visible",
-            "Container or overlay topology is visible in collected evidence",
+            "Virtualized or container storage topology is visible in mount evidence",
             ("container",),
         ),
         (
@@ -203,8 +302,8 @@ def environment_contradictions(lines: list[tuple[str, int, str]]) -> list[dict]:
         ),
         (
             "selinux_state_mismatch",
-            "Enforcing claims coexist with permissive or disabled SELinux evidence",
-            ("selinux_claim", "selinux_disabled"),
+            "Runtime enforcing evidence coexists with a disabled SELinux boot claim",
+            ("selinux_enforcing", "selinux_disabled"),
         ),
     )
     for key, description, required in definitions:
@@ -263,9 +362,15 @@ def build_report(root: Path) -> dict:
                     )
 
         first = candidate_rows[0]
-        combined = " ".join(
-            [path, " ".join(indicators)] + [item["text"] for item in evidence]
-        )
+        basename = PurePosixPath(path).name.lower()
+        direct_evidence = []
+        for item in evidence:
+            lower = item["text"].lower()
+            if path.lower() in lower or (
+                basename not in GENERIC_PATH_TOKENS and basename in lower
+            ):
+                direct_evidence.append(item["text"])
+        combined = " ".join([path, " ".join(indicators)] + direct_evidence)
         facets = classify_facets(combined)
         score = min(75, 15 * len(families))
         if first.get("sha256"):
@@ -276,6 +381,8 @@ def build_report(root: Path) -> dict:
             score += 10
         if "module_metadata" in families:
             score += 5
+        if not facets:
+            score = min(score, 20)
         score = min(score, 100)
 
         candidates.append(

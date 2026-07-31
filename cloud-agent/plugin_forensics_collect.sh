@@ -190,15 +190,33 @@ discover_root_modules() {
 }
 
 discover_keyword_candidates() {
-    for root in /data/local/tmp /system/bin /system/xbin /vendor/bin /vendor/lib64 \
-        /system/lib64 /product/bin /system_ext/bin; do
+    for root in /data/local/tmp /data/app /system/bin /system/xbin /vendor/bin \
+        /vendor/lib64 /system/lib64 /product/bin /system_ext/bin \
+        /system/etc/selinux; do
         [ -d "$root" ] || continue
         find "$root" -maxdepth 4 -type f 2>/dev/null \
-            | grep -Ei '/(magisk|ksu|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|props|spoof|mask|hide|yunzhenji|zhenji|cloudphone|mihomo|clash|qimei|tersafe|tdatamaster|turing|hawk)' \
+            | grep -Ei '/(magisk|ksu|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|initd|console_agent|poweropt-service|asp_sepolicy|provider\.root|dexguard|localSock|props|spoof|mask|hide|yunzhenji|zhenji|cloudphone|mihomo|clash|qimei|tersafe|tdatamaster|turing|hawk)' \
             | while IFS= read -r path; do
                 add_candidate "$path" "keyword_match" "filesystem_scan"
             done
     done
+}
+
+discover_platform_control_plane() {
+    for path in /system/xbin/su /system/xbin/sudo /system/xbin/bpfdomain \
+        /system/xbin/resetprop /system/xbin/traced_kprobes \
+        /system/xbin/rkp_cert_processor /system/bin/initd \
+        /system/bin/console_agent /system/bin/poweropt-service \
+        /system/etc/selinux/asp_sepolicy.conf; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        add_candidate "$path" "platform_control_plane" "platform_root_stack"
+    done
+
+    pm path com.android.provider.root 2>/dev/null \
+        | sed -n 's/^package://p' \
+        | while IFS= read -r path; do
+            add_candidate "$path" "privileged_root_provider" "platform_root_stack"
+        done
 }
 
 discover_loaded_candidates() {
@@ -208,7 +226,7 @@ discover_loaded_candidates() {
         sed -n 's#^.* \(/.*\)$#\1#p' "$maps" \
             | sed 's/ (deleted)$//' \
             | sort -u \
-            | grep -Ei '(magisk|ksu|zygisk|riru|lsposed|xposed|frida|susfs|spoof|mask|hide|forge|qimei|tersafe|tdatamaster|turing|hawk)' \
+            | grep -Ei '(^|/)(lib)?(magisk|ksu(d)?|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|console_agent|poweropt-service|localSock|[^/]*(provider\.root|dexguard|spoof|mask|hide|forge|qimei|tersafe|tdatamaster|turing|hawk)[^/]*)(/|$)' \
             | while IFS= read -r path; do
                 add_candidate "$path" "loaded_mapping" "process_$label"
             done
@@ -251,14 +269,18 @@ capture_sh root_framework resetprop_view 'if command -v resetprop >/dev/null 2>&
 capture_sh root_framework adb_inventory 'for d in /data/adb /data/adb/modules /data/adb/modules_update /data/adb/ksu /data/adb/ap; do echo "=== $d ==="; ls -laZ "$d" 2>/dev/null; done'
 capture_sh root_framework boot_scripts 'for d in /data/adb/service.d /data/adb/post-fs-data.d /data/adb/boot-completed.d; do echo "=== $d ==="; find "$d" -maxdepth 3 -type f -exec ls -laZ {} \; 2>/dev/null; done'
 capture_sh root_framework core_tool_hashes 'for f in /system/bin/getprop /system/bin/toybox /system/bin/sh /system/bin/linker64 /apex/com.android.runtime/bin/linker64 /apex/com.android.runtime/lib64/bionic/libc.so /system/lib64/libc.so; do [ -e "$f" ] || continue; ls -laZ "$f"; sha256sum "$f"; if command -v readelf >/dev/null 2>&1; then readelf -n "$f" 2>/dev/null | grep "Build ID"; fi; done'
-capture_sh root_framework manager_packages 'pm list packages -f -U 2>/dev/null | grep -Ei "magisk|kernelsu|apatch|lsposed|xposed|riru|zygisk|shamiko|hide|props|spoof|mask|frida|susfs"'
+capture_sh root_framework manager_packages 'pm list packages -f -U 2>/dev/null | grep -Ei "magisk|kernelsu|apatch|lsposed|xposed|riru|zygisk|shamiko|hide|props|spoof|mask|frida|susfs|provider\.root|dexguard"'
+capture_sh root_framework platform_control_plane 'for f in /system/xbin/su /system/xbin/sudo /system/xbin/bpfdomain /system/xbin/resetprop /system/xbin/traced_kprobes /system/xbin/rkp_cert_processor /system/bin/initd /system/bin/console_agent /system/bin/poweropt-service /system/bin/dropbear /system/bin/dropbear_service /system/etc/selinux/asp_sepolicy.conf /data/etc/selinux/asp_sepolicy.conf /data/isRoot; do [ -e "$f" ] || [ -L "$f" ] || continue; echo "=== $f ==="; ls -laZ "$f"; readlink -f "$f" 2>/dev/null; sha256sum "$f" 2>/dev/null; done'
+capture_sh root_framework platform_control_processes 'ps -AZ | grep -Ei "bpfdomain|traced_kprobes|rkp_cert_processor|initd|console_agent|provider\.root|dropbear|crond"'
+capture_sh root_framework platform_control_sockets 'cat /proc/net/unix 2>/dev/null | grep -Ei "profiles|rms_socket|mount_script_socket|root|bpf|kprobe|exec/sock|hook"; find /data/misc/profiles -maxdepth 4 \( -type s -o -type f \) -exec ls -laZ {} \; 2>/dev/null'
+capture_sh root_framework root_provider 'pm path com.android.provider.root; dumpsys package com.android.provider.root'
 
 # layer: init_services
 capture init_services init_properties getprop
 capture init_services binder_services service list
 capture init_services hal_inventory lshal
 capture init_services processes ps -A -o USER,PID,PPID,NAME,ARGS
-capture_sh init_services rc_candidates 'find /system/etc/init /vendor/etc/init /odm/etc/init /product/etc/init /system_ext/etc/init -type f 2>/dev/null | while read f; do grep -HnEi "magisk|ksu|apatch|zygisk|riru|xposed|susfs|resetprop|spoof|mask|hide|rockchip|antdock|yunzhenji|zhenji|cloudphone" "$f" 2>/dev/null; done'
+capture_sh init_services rc_candidates 'find /system/etc/init /vendor/etc/init /odm/etc/init /product/etc/init /system_ext/etc/init -type f 2>/dev/null | while read f; do grep -HnEi "magisk|ksu|apatch|zygisk|riru|xposed|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|initd|console_agent|poweropt-service|provider\.root|dexguard|rms_socket|spoof|mask|hide|rockchip|antdock|yunzhenji|zhenji|cloudphone" "$f" 2>/dev/null; done'
 
 # layer: identity_projection
 capture identity_projection getprop getprop
@@ -295,7 +317,7 @@ snapshot_pid zygote64 "$ZYGOTE64_PID"
 snapshot_pid zygote "$ZYGOTE_PID"
 snapshot_pid system_server "$SYSTEM_SERVER_PID"
 capture_sh runtime_injection executable_anonymous 'for p in '"${TARGET_PID:-0} ${ZYGOTE64_PID:-0} ${ZYGOTE_PID:-0} ${SYSTEM_SERVER_PID:-0}"'; do [ -r "/proc/$p/maps" ] || continue; echo "=== pid=$p ==="; grep -E "r.xp.*(memfd:|/dev/ashmem|\[anon:|deleted)|rwxp" "/proc/$p/maps"; done'
-capture_sh runtime_injection suspicious_logs 'logcat -d -b all -t 4000 2>/dev/null | grep -Ei "magisk|kernelsu|apatch|zygisk|riru|lsposed|xposed|susfs|resetprop|spoof|mask|hide|frida|qimei|tersafe|tdatamaster|turing|hawk"'
+capture_sh runtime_injection suspicious_logs 'logcat -d -b all -t 4000 2>/dev/null | grep -Ei "magisk|kernelsu|apatch|zygisk|riru|lsposed|xposed|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|provider\.root|dexguard|rms_socket|mount_script_socket|spoof|mask|hide|frida|qimei|tersafe|tdatamaster|turing|hawk"'
 
 # layer: packages_artifacts
 capture packages_artifacts packages_all pm list packages -f -U
@@ -319,6 +341,7 @@ capture_sh network_projection network_processes 'ps -A -o USER,PID,PPID,NAME,ARG
 
 discover_root_modules
 discover_keyword_candidates
+discover_platform_control_plane
 discover_loaded_candidates
 
 find "$WORK" -type f ! -name file_hashes.tsv -exec sha256sum {} \; 2>/dev/null \

@@ -33,8 +33,12 @@ mkdir -p diagnostics/plugin-audits
 cp ARCHIVE diagnostics/plugin-audits/
 git add -f diagnostics/plugin-audits/$(basename ARCHIVE)
 git commit -m "diagnostics: add cloud device plugin audit"
-git push origin codex/v8.7-hardening
+git push cloud codex/v8.7-hardening
 ```
+
+Use `origin` only on a device whose SSH identity has write access to
+`wzy887011/DeltaForge`. The cloud-phone identity writes its evidence commit to
+`wzy887011-cloud/DeltaForge` through the `cloud` remote.
 
 Record the printed SHA-256 in the commit message or accompanying message. The archive excludes application databases, account tokens, keystores, and unrelated private application files.
 
@@ -55,7 +59,13 @@ Review these outputs:
 - `diagnostics/plugin-report/plugin-forensics-report.md`
 - `diagnostics/plugin-report/plugin-forensics-report.json`
 
-High-confidence candidates have evidence from multiple source families, such as a root-module inventory, module metadata, a target-process mapping, and a namespace or property effect. The raw evidence reference on every finding provides the exact file and line to inspect before reverse engineering the candidate artifact.
+High-confidence candidates have evidence from multiple source families, such as
+a root-module inventory, a platform root control plane, a privileged provider,
+a target-process mapping, and a namespace or property effect. The collector also
+captures renamed root daemons, execution sockets, live SELinux policy loaders,
+and init services even when `/data/adb/modules` is absent. The raw evidence
+reference on every finding provides the exact file and line to inspect before
+reverse engineering the candidate artifact.
 
 ## Optional Package Override
 
