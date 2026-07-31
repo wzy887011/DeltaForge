@@ -26,8 +26,13 @@ FACET_PATTERNS = {
     ),
     "privileged_control_plane": re.compile(
         r"platform[_ -]?control[_ -]?plane|bpfdomain|rkp_cert_processor|"
-        r"traced_kprobes|mount_script_socket|"
+        r"traced_kprobes|\bs9su\b|script_guard|script_service|mount_script_socket|"
         r"/data/misc/profiles/(?:exec|root)|provider\.root|dexguard|localSock",
+        re.I,
+    ),
+    "container_control_plane": re.compile(
+        r"ntimespace|antdock|rk3588_docker|createns2|execns2|lxcfs|"
+        r"/ant/containers|/userdata/ant/overlay",
         re.I,
     ),
     "selinux_policy_patch": re.compile(
@@ -36,7 +41,9 @@ FACET_PATTERNS = {
         re.I,
     ),
     "remote_admin": re.compile(
-        r"console_agent|dropbear(?:_service)?|authorized_keys|\bcrond?\b", re.I
+        r"console_agent|dropbear(?:_service)?|authorized_keys|start-ssh|"
+        r"(?:^|/)sshd?(?:\s|$)|nc .*execns2|\bcrond?\b",
+        re.I,
     ),
     "zygote_injection": re.compile(
         r"zygisk|riru|lsposed|xposed|zygote.*(?:inject|module)|(?:inject|module).*zygote",
@@ -69,6 +76,11 @@ FACET_PATTERNS = {
     "target_security_module": re.compile(
         r"tersafe|tdatamaster|qimei|turing|hawk|crashsight", re.I
     ),
+    "research_artifact": re.compile(
+        r"/data/local/tmp/(?:deltaforge|deltaforge_diag|forge_backup|frida-server|"
+        r"mihomo|propspoof|resetprop)|/data/local/tmp/[^ ]*(?:clash-config|mihomo)",
+        re.I,
+    ),
     "application_hook": re.compile(
         r"frida|(?:^|[^a-z])hook(?:[^a-z]|$)|libforge|"
         r"memfd:|\(deleted\)|rwxp",
@@ -95,6 +107,12 @@ GENERIC_PATH_TOKENS = {
     "armeabi-v7a",
     "base.apk",
     "base",
+    "cache.db",
+    "cache",
+    "cmdline.txt",
+    "cmdline",
+    "status.txt",
+    "status",
 }
 
 
@@ -244,6 +262,14 @@ def environment_contradictions(lines: list[tuple[str, int, str]]) -> list[dict]:
                 add("verified_green", source, number, line)
             if "ro.boot.selinux" in lower and "[enforcing]" in lower:
                 add("selinux_enforcing", source, number, line)
+            if re.search(r"samsung/|\[ro\.product\.(?:brand|manufacturer|model)\].*\[samsung", lower):
+                add("identity_samsung", source, number, line)
+            if re.search(r"oppo|oneplus", lower):
+                add("identity_oppo", source, number, line)
+            if re.search(r"honor|huawei", lower):
+                add("identity_honor", source, number, line)
+            if re.search(r"ntimespace|rk3588_docker|antdock", lower):
+                add("native_cloud_identity", source, number, line)
 
         if hardware_source:
             if re.search(r"qcom|qualcomm|sm8\d+|adreno", lower):
@@ -267,7 +293,8 @@ def environment_contradictions(lines: list[tuple[str, int, str]]) -> list[dict]:
         }
         if root_source and re.search(
             r"(?:^|/)su(?:\s|$)|resetprop|bpfdomain|provider\.root|"
-            r"rkp_cert_processor|traced_kprobes|magisk|kernelsu|apatch|/data/adb/modules",
+            r"rkp_cert_processor|traced_kprobes|\bs9su\b|script_guard|"
+            r"magisk|kernelsu|apatch|/data/adb/modules",
             lower,
         ):
             add("root", source, number, line)
@@ -314,6 +341,32 @@ def environment_contradictions(lines: list[tuple[str, int, str]]) -> list[dict]:
             contradictions.append(
                 {"id": key, "description": description, "evidence": evidence}
             )
+
+    identity_families = [
+        name
+        for name in ("identity_samsung", "identity_oppo", "identity_honor")
+        if hits[name]
+    ]
+    if len(identity_families) >= 2:
+        evidence = []
+        for name in identity_families:
+            evidence.extend(hits[name][:2])
+        contradictions.append(
+            {
+                "id": "identity_profile_mismatch",
+                "description": "Properties combine unrelated consumer device identity families",
+                "evidence": evidence,
+            }
+        )
+    if hits["native_cloud_identity"] and identity_families:
+        contradictions.append(
+            {
+                "id": "native_cloud_identity_leak",
+                "description": "Native cloud/container identity leaks alongside a consumer device profile",
+                "evidence": hits["native_cloud_identity"][:4]
+                + hits[identity_families[0]][:2],
+            }
+        )
     return contradictions
 
 

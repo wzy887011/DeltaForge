@@ -99,6 +99,22 @@ capture_sh() {
     capture "$layer" "$name" /system/bin/sh -c "$code"
 }
 
+capture_shell_uid() {
+    layer="$1"
+    name="$2"
+    code="$3"
+    if [ -x /system/xbin/sudo ]; then
+        capture "$layer" "$name" /system/xbin/sudo shell \
+            /system/bin/runcon u:r:shell:s0 /system/bin/sh -c "$code"
+    elif [ -x /system/bin/su ]; then
+        capture "$layer" "$name" /system/bin/su shell -c "$code"
+    elif [ -x /system/xbin/su ]; then
+        capture "$layer" "$name" /system/xbin/su shell -c "$code"
+    else
+        capture_sh "$layer" "$name" "$code"
+    fi
+}
+
 safe_name() {
     printf '%s' "$1" | sed 's#[^A-Za-z0-9._-]#_#g' | cut -c1-180
 }
@@ -195,7 +211,7 @@ discover_keyword_candidates() {
         /system/etc/selinux; do
         [ -d "$root" ] || continue
         find "$root" -maxdepth 4 -type f 2>/dev/null \
-            | grep -Ei '/(magisk|ksu|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|initd|console_agent|poweropt-service|asp_sepolicy|provider\.root|dexguard|localSock|props|spoof|mask|hide|yunzhenji|zhenji|cloudphone|mihomo|clash|qimei|tersafe|tdatamaster|turing|hawk)' \
+            | grep -Ei '/(magisk|ksu|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|s9su|bpfdomain|script_guard|traced_kprobes|rkp_cert_processor|initd|console_agent|poweropt-service|createns2|execns2|ntimespace|antdock|asp_sepolicy|provider\.root|dexguard|localSock|props|spoof|mask|hide|yunzhenji|zhenji|cloudphone|mihomo|clash|qimei|tersafe|tdatamaster|turing|hawk)' \
             | while IFS= read -r path; do
                 add_candidate "$path" "keyword_match" "filesystem_scan"
             done
@@ -203,10 +219,13 @@ discover_keyword_candidates() {
 }
 
 discover_platform_control_plane() {
-    for path in /system/xbin/su /system/xbin/sudo /system/xbin/bpfdomain \
+    for path in /system/xbin/su /system/xbin/sudo /system/xbin/s9su \
+        /system/xbin/bpfdomain /system/xbin/script_guard \
         /system/xbin/resetprop /system/xbin/traced_kprobes \
         /system/xbin/rkp_cert_processor /system/bin/initd \
         /system/bin/console_agent /system/bin/poweropt-service \
+        /system/bin/script.sh /vendor/bin/start-ssh /vendor/bin/sshd \
+        /vendor/bin/createns2 /vendor/bin/execns2 \
         /system/etc/selinux/asp_sepolicy.conf; do
         [ -e "$path" ] || [ -L "$path" ] || continue
         add_candidate "$path" "platform_control_plane" "platform_root_stack"
@@ -226,7 +245,7 @@ discover_loaded_candidates() {
         sed -n 's#^.* \(/.*\)$#\1#p' "$maps" \
             | sed 's/ (deleted)$//' \
             | sort -u \
-            | grep -Ei '(^|/)(lib)?(magisk|ksu(d)?|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|console_agent|poweropt-service|localSock|[^/]*(provider\.root|dexguard|spoof|mask|hide|forge|qimei|tersafe|tdatamaster|turing|hawk)[^/]*)(/|$)' \
+            | grep -Ei '(^|/)(lib)?(magisk|ksu(d)?|kernelsu|apatch|zygisk|riru|lsposed|xposed|frida|susfs|resetprop|s9su|bpfdomain|script_guard|traced_kprobes|rkp_cert_processor|console_agent|poweropt-service|createns2|execns2|localSock|[^/]*(provider\.root|dexguard|ntimespace|antdock|spoof|mask|hide|forge|qimei|tersafe|tdatamaster|turing|hawk)[^/]*)(/|$)' \
             | while IFS= read -r path; do
                 add_candidate "$path" "loaded_mapping" "process_$label"
             done
@@ -270,9 +289,10 @@ capture_sh root_framework adb_inventory 'for d in /data/adb /data/adb/modules /d
 capture_sh root_framework boot_scripts 'for d in /data/adb/service.d /data/adb/post-fs-data.d /data/adb/boot-completed.d; do echo "=== $d ==="; find "$d" -maxdepth 3 -type f -exec ls -laZ {} \; 2>/dev/null; done'
 capture_sh root_framework core_tool_hashes 'for f in /system/bin/getprop /system/bin/toybox /system/bin/sh /system/bin/linker64 /apex/com.android.runtime/bin/linker64 /apex/com.android.runtime/lib64/bionic/libc.so /system/lib64/libc.so; do [ -e "$f" ] || continue; ls -laZ "$f"; sha256sum "$f"; if command -v readelf >/dev/null 2>&1; then readelf -n "$f" 2>/dev/null | grep "Build ID"; fi; done'
 capture_sh root_framework manager_packages 'pm list packages -f -U 2>/dev/null | grep -Ei "magisk|kernelsu|apatch|lsposed|xposed|riru|zygisk|shamiko|hide|props|spoof|mask|frida|susfs|provider\.root|dexguard"'
-capture_sh root_framework platform_control_plane 'for f in /system/xbin/su /system/xbin/sudo /system/xbin/bpfdomain /system/xbin/resetprop /system/xbin/traced_kprobes /system/xbin/rkp_cert_processor /system/bin/initd /system/bin/console_agent /system/bin/poweropt-service /system/bin/dropbear /system/bin/dropbear_service /system/etc/selinux/asp_sepolicy.conf /data/etc/selinux/asp_sepolicy.conf /data/isRoot; do [ -e "$f" ] || [ -L "$f" ] || continue; echo "=== $f ==="; ls -laZ "$f"; readlink -f "$f" 2>/dev/null; sha256sum "$f" 2>/dev/null; done'
-capture_sh root_framework platform_control_processes 'ps -AZ | grep -Ei "bpfdomain|traced_kprobes|rkp_cert_processor|initd|console_agent|provider\.root|dropbear|crond"'
+capture_sh root_framework platform_control_plane 'for f in /system/xbin/su /system/xbin/sudo /system/xbin/s9su /system/xbin/bpfdomain /system/xbin/script_guard /system/xbin/resetprop /system/xbin/traced_kprobes /system/xbin/rkp_cert_processor /system/bin/initd /system/bin/console_agent /system/bin/poweropt-service /system/bin/script.sh /system/bin/dropbear /system/bin/dropbear_service /vendor/bin/start-ssh /vendor/bin/sshd /vendor/bin/createns2 /vendor/bin/execns2 /system/etc/selinux/asp_sepolicy.conf /data/etc/selinux/asp_sepolicy.conf /data/isRoot; do [ -e "$f" ] || [ -L "$f" ] || continue; echo "=== $f ==="; ls -laZ "$f"; readlink -f "$f" 2>/dev/null; sha256sum "$f" 2>/dev/null; done'
+capture_sh root_framework platform_control_processes 'ps -AZ | grep -Ei "s9su|bpfdomain|script_guard|script_service|script\.sh|traced_kprobes|rkp_cert_processor|initd|console_agent|provider\.root|createns2|execns2|ntimespace|start-ssh|sshd|dropbear|crond"'
 capture_sh root_framework platform_control_sockets 'cat /proc/net/unix 2>/dev/null | grep -Ei "profiles|rms_socket|mount_script_socket|root|bpf|kprobe|exec/sock|hook"; find /data/misc/profiles -maxdepth 4 \( -type s -o -type f \) -exec ls -laZ {} \; 2>/dev/null'
+capture_sh root_framework remote_admin_bridges 'ps -A -o USER,PID,PPID,NAME,ARGS | grep -Ei "start-ssh|sshd|dropbear|nc .*execns2|createns2"; ss -lntup 2>/dev/null | grep -E ":(22|5555|62485)[[:space:]]"'
 capture_sh root_framework root_provider 'pm path com.android.provider.root; dumpsys package com.android.provider.root'
 
 # layer: init_services
@@ -280,7 +300,7 @@ capture init_services init_properties getprop
 capture init_services binder_services service list
 capture init_services hal_inventory lshal
 capture init_services processes ps -A -o USER,PID,PPID,NAME,ARGS
-capture_sh init_services rc_candidates 'find /system/etc/init /vendor/etc/init /odm/etc/init /product/etc/init /system_ext/etc/init -type f 2>/dev/null | while read f; do grep -HnEi "magisk|ksu|apatch|zygisk|riru|xposed|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|initd|console_agent|poweropt-service|provider\.root|dexguard|rms_socket|spoof|mask|hide|rockchip|antdock|yunzhenji|zhenji|cloudphone" "$f" 2>/dev/null; done'
+capture_sh init_services rc_candidates 'find /system/etc/init /vendor/etc/init /odm/etc/init /product/etc/init /system_ext/etc/init -type f 2>/dev/null | while read f; do grep -HnEi "magisk|ksu|apatch|zygisk|riru|xposed|susfs|resetprop|s9su|bpfdomain|script_guard|script_service|script\.sh|traced_kprobes|rkp_cert_processor|initd|console_agent|poweropt-service|createns2|execns2|ntimespace|start-ssh|sshd|provider\.root|dexguard|rms_socket|spoof|mask|hide|rockchip|antdock|yunzhenji|zhenji|cloudphone" "$f" 2>/dev/null; done'
 
 # layer: identity_projection
 capture identity_projection getprop getprop
@@ -294,6 +314,10 @@ capture identity_projection drm dumpsys drm.drmManager
 capture identity_projection android_id settings get secure android_id
 capture identity_projection global_proxy settings get global http_proxy
 capture identity_projection private_dns settings get global private_dns_mode
+capture_shell_uid identity_projection settings_global 'settings list global'
+capture_shell_uid identity_projection settings_secure 'settings list secure'
+capture_shell_uid identity_projection settings_system 'settings list system'
+capture_shell_uid identity_projection device_config 'device_config list'
 capture_sh identity_projection hardware_nodes 'for f in /sys/devices/soc0/family /sys/devices/soc0/machine /sys/class/kgsl/kgsl-3d0/gpu_model /sys/class/drm/card0/device/uevent /sys/fs/selinux/enforce; do echo "=== $f ==="; cat "$f" 2>/dev/null || echo unavailable; done; ls -la /dev/kgsl-3d0 /dev/dri 2>/dev/null'
 capture_sh identity_projection thermal_power 'find /sys/class/thermal /sys/class/power_supply /sys/class/devfreq -maxdepth 3 -type f 2>/dev/null | sort | head -n 5000'
 capture_sh identity_projection property_area 'find /dev/__properties__ -maxdepth 2 -type f 2>/dev/null | sort | while read f; do ls -laZ "$f"; sha256sum "$f"; done; ls -laZ /data/property 2>/dev/null'
@@ -320,10 +344,12 @@ capture_sh runtime_injection executable_anonymous 'for p in '"${TARGET_PID:-0} $
 capture_sh runtime_injection suspicious_logs 'logcat -d -b all -t 4000 2>/dev/null | grep -Ei "magisk|kernelsu|apatch|zygisk|riru|lsposed|xposed|susfs|resetprop|bpfdomain|traced_kprobes|rkp_cert_processor|provider\.root|dexguard|rms_socket|mount_script_socket|spoof|mask|hide|frida|qimei|tersafe|tdatamaster|turing|hawk"'
 
 # layer: packages_artifacts
-capture packages_artifacts packages_all pm list packages -f -U
-capture packages_artifacts packages_third_party pm list packages -f -U -3
-capture packages_artifacts overlays cmd overlay list --user 0
-capture packages_artifacts instrumentation pm list instrumentation
+capture_shell_uid packages_artifacts packages_all 'pm list packages -f -U'
+capture_shell_uid packages_artifacts packages_third_party 'pm list packages -f -U -3'
+capture_shell_uid packages_artifacts overlays 'cmd overlay list --user 0'
+capture_shell_uid packages_artifacts instrumentation 'pm list instrumentation'
+capture_shell_uid packages_artifacts features 'pm list features'
+capture_shell_uid packages_artifacts libraries 'pm list libraries'
 capture packages_artifacts target_package dumpsys package "$TARGET_PACKAGE"
 capture packages_artifacts target_paths pm path "$TARGET_PACKAGE"
 

@@ -57,6 +57,18 @@ class PluginForensicsCollectorTests(unittest.TestCase):
             "bpfdomain",
             "rkp_cert_processor",
             "traced_kprobes",
+            "s9su",
+            "script_guard",
+            "createns2",
+            "execns2",
+            "remote_admin_bridges",
+            "capture_shell_uid",
+            "settings_global",
+            "settings_secure",
+            "settings_system",
+            "device_config",
+            "packages_artifacts features",
+            "packages_artifacts libraries",
         ):
             self.assertIn(deep_signal, source)
 
@@ -228,6 +240,37 @@ class PluginForensicsReporterTests(unittest.TestCase):
             "/system/bin/initd [ro.boottime.initd]: [4839547528102962]"
         )
         self.assertNotIn("property_spoofing", initd_facets)
+
+        cloud_phone_facets = reporter.classify_facets(
+            "/system/xbin/s9su /vendor/bin/createns2 ntimespace "
+            "nc -L -p 5555 /vendor/bin/execns2"
+        )
+        self.assertIn("root_framework", cloud_phone_facets)
+        self.assertIn("privileged_control_plane", cloud_phone_facets)
+        self.assertIn("container_control_plane", cloud_phone_facets)
+        self.assertIn("remote_admin", cloud_phone_facets)
+
+        research_facets = reporter.classify_facets(
+            "/data/local/tmp/frida-server-17.15.3 keyword_match"
+        )
+        self.assertIn("research_artifact", research_facets)
+        self.assertIn("application_hook", research_facets)
+
+    def test_mixed_consumer_and_cloud_identity_is_reported(self):
+        reporter = load_reporter()
+        lines = [
+            ("commands/identity_projection/getprop.stdout.txt", 1,
+             "[ro.build.fingerprint]: [samsung/device/device:12/build:user/release-keys]"),
+            ("commands/identity_projection/getprop.stdout.txt", 2,
+             "[ro.product.brand]: [OPPO]"),
+            ("commands/identity_projection/getprop.stdout.txt", 3,
+             "[ro.product.manufacturer]: [honor]"),
+            ("commands/identity_projection/getprop.stdout.txt", 4,
+             "[ro.system_ext.build.fingerprint]: [ntimespace/rk3588_docker/device:12/build:user/test-keys]"),
+        ]
+        ids = {item["id"] for item in reporter.environment_contradictions(lines)}
+        self.assertIn("identity_profile_mismatch", ids)
+        self.assertIn("native_cloud_identity_leak", ids)
 
     def test_archive_parent_traversal_is_rejected(self):
         reporter = load_reporter()
