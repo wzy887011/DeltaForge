@@ -1,7 +1,7 @@
 # 云手机与云真机底层环境审核报告
 
 - 日期：2026-07-31
-- 云手机证据 SHA-256：`85688b1bb2aefde8991698068cdbc82d9769214afce8b92fbbe5730823beb704`
+- 云手机证据 SHA-256：`b5ee1277387ae6a7091357dd9dd4fa3e7a8bb5c528e200ec4de869396c113de7`
 - 云真机证据 SHA-256：`e3d92e966dc86c8ee1f38a437934eb48de0d3e04e963653dde63718627857172`
 - 范围：硬件投影、内核、启动链、存储、namespace、SELinux、root、framework、HAL、传感器、显示、软件包和网络
 - 排除：目标应用行为、游戏检测与账号风险
@@ -255,30 +255,39 @@ ro.build.tags=release-keys
 输出文件 SHA-256：
 
 ```text
-df2aa0e3a90803ed7aa550ed6c4ec4126869624b427aafb0019cc902ccd5e260  cloud-phone-config-all.txt
-af397a5549ba38f789036de2342dd56849acc76afb6510c02d3df31fafb36c4a  cloud-phone-config.json
+336015ce1257b4377e474c4f091c84c2a33f10619c017d7d72f4b682b4a30b94  cloud-phone-config-all.txt
+d96a81adae166642d4c66554652690e58df81ccd56199fc488ccd0c832663898  cloud-phone-config.json
 349a53285f5fffc6b755307931b7b5c4d780822a54c2ae4b36b2fb4d3423753b  cloud-real-phone-config-all.txt
-7a0c743bfe510b3aad6500714ba5c440bc13c92f40d97b9eb9b86df681251c2b  cloud-real-phone-config.json
-66c023485f835c8f66381eebe221dcede26d5910d2141228879aa90b6af6fdcd  environment-config-diff.json
-14e32db32f6cf30bac482fe8afc2c13ac6513394215bf90ef70648877caa4418  environment-config-diff.md
+599d49ad7f22544b477676e9fa2907814efa4bf9694897567ad940a5a3f817c3  cloud-real-phone-config.json
+5ac7edcec4b22ed09f43a9a04a78ff75fe075ac73dee6c80b4334055c155d9ff  environment-config-diff.json
+b3e42a0a07a2919ca45e028b7aa8712a6d02b352769d9d04985e7c349ba80a4b  environment-config-diff.md
 ```
 
 当前标准化数量：
 
 | 配置域 | 云手机 | 云真机 | 不同项 |
 |---|---:|---:|---:|
-| Properties | 716 | 856 | 815 |
+| Properties | 716 | 856 | 817 |
 | Kernel config | 6,193 | 5,223 | 2,869 |
-| Init services | 94 | 87 | 64 |
+| Init services | 94 | 87 | 65 |
 | Processes | 112 | 117 | 145 |
 | Mounts | 545 | 584 | 1,129 |
-| Binder services | 212 | 257 | 262 |
+| Binder services | 213 | 257 | 63 |
 | HAL records | 117 | 70 | 152 |
-| Packages | 110 | 142 | 147 |
-| Third-party packages | 9 | 5 | 12 |
+| Packages | 110 | 143 | 148 |
+| Third-party packages | 9 | 6 | 12 |
 | Network addresses | 13 | 22 | 26 |
 | Network routes | 157 | 16 | 159 |
 | Network rules | 81 | 12 | 75 |
 | Network sockets | 22 | 11 | 31 |
+| Global settings | 91 | 125 | 85 |
+| Secure settings | 79 | 82 | 35 |
+| System settings | 42 | 46 | 28 |
+| Device config | 0 | 1,826 | 1,826 |
+| Features | 65 | 91 | 46 |
+| Shared libraries | 15 | 20 | 5 |
+| Overlays | 15 | 21 | 14 |
 
-云真机已通过 ADB shell domain 补齐 1,826 项 `device_config`、253 项 Android settings、91 项 features、20 项 shared libraries 和 21 项 overlay records。云手机旧归档未采集这些 Binder 配置；更新后的采集器已增加相同项目，需要重跑一次云手机清单才能形成完全对称的 framework 配置差异。
+Binder 服务按服务名与接口归一化，`service list` 的瞬时枚举序号不参与差异统计。
+
+两端 framework 配置现已按同一采集口径重建。云手机采集到 212 项 Android settings、65 项 features、15 项 shared libraries 和 15 项 overlay records；其 `device_config list` 返回码为 0、stdout/stderr 均为空，因此清单保留为 0 项，不将空结果解释成组件缺失。云真机采集到 253 项 Android settings、1,826 项 `device_config`、91 项 features、20 项 shared libraries 和 21 项 overlay records。

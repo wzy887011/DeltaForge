@@ -96,6 +96,25 @@ class EnvironmentInventoryTests(unittest.TestCase):
             "feature:android.hardware.camera\n",
         )
 
+    def test_binder_service_ordinals_are_ignored(self):
+        tool = load_tool()
+        before = tool.parse_binder_services(
+            "0 activity: [android.app.IActivityManager]\n"
+            "1 package: [android.content.pm.IPackageManager]\n"
+        )
+        after = tool.parse_binder_services(
+            "0 apexservice: [android.apex.IApexService]\n"
+            "1 activity: [android.app.IActivityManager]\n"
+            "2 package: [android.content.pm.IPackageManager]\n"
+        )
+
+        self.assertEqual(before["activity"], after["activity"])
+        self.assertEqual(before["package"], after["package"])
+        self.assertEqual(
+            [item["key"] for item in tool.mapping_diff(before, after)],
+            ["apexservice"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

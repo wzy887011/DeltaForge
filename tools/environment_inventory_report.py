@@ -52,7 +52,7 @@ EXCLUDED_CONFIGURATION_FILES = {
 
 PROPERTY_RE = re.compile(r"^\[([^]]+)\]: \[(.*)\]$")
 PACKAGE_RE = re.compile(r"^package:(.*?)=([A-Za-z0-9._]+)(?:\s+uid:(\d+))?$")
-BINDER_RE = re.compile(r"^\s*\d+\s+([^:]+):")
+BINDER_RE = re.compile(r"^\s*\d+\s+([^:]+):\s*(.*)$")
 
 
 def evidence_root(path: Path) -> Path:
@@ -165,7 +165,7 @@ def parse_binder_services(text: str) -> dict[str, str]:
     for line in text.splitlines():
         match = BINDER_RE.match(line)
         if match:
-            result[match.group(1).strip()] = line.strip()
+            result[match.group(1).strip()] = match.group(2).strip()
     return dict(sorted(result.items()))
 
 
